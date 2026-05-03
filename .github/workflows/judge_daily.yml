@@ -1,11 +1,8 @@
-name: Agente Juez — Ciclo Evolutivo Diario
+name: "Agente Juez - Ciclo Evolutivo Diario"
 
-on:
-  # Cron: 17:00 America/Bogota = 22:00 UTC
+"on":
   schedule:
-    - cron: "0 22 * * 1-5"  # Lunes a viernes, días de mercado Forex
-
-  # Disparo manual para pruebas desde la UI de GitHub Actions
+    - cron: "0 22 * * 1-5"
   workflow_dispatch:
     inputs:
       dry_run:
@@ -17,38 +14,38 @@ on:
 
 jobs:
   ciclo-evolutivo:
-    name: Ejecutar ciclo evolutivo
+    name: "Ejecutar ciclo evolutivo"
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
     env:
-      DATABASE_URL:          ${{ secrets.DATABASE_URL }}
-      DEEPSEEK_API_KEY:      ${{ secrets.DEEPSEEK_API_KEY }}
-      ALPHA_VANTAGE_API_KEY: ${{ secrets.ALPHA_VANTAGE_API_KEY }}
-      JUDGE_TIMEZONE:        America/Bogota
-      JUDGE_RUN_TIME:        "17:00"
-      AGENTS_ELIMINATE_PER_CYCLE: "5"
-      MUTATION_SIGMA_WEIGHTS: "0.05"
-      MUTATION_SIGMA_PERIODS: "0.08"
-      MUTATION_SIGMA_RISK:    "0.10"
-      MIN_ROI_FOR_HALL_OF_FAME: "0.05"
-      LOG_LEVEL: INFO
-      ENVIRONMENT: production
+      DATABASE_URL:                ${{ secrets.DATABASE_URL }}
+      DEEPSEEK_API_KEY:            ${{ secrets.DEEPSEEK_API_KEY }}
+      ALPHA_VANTAGE_API_KEY:       ${{ secrets.ALPHA_VANTAGE_API_KEY }}
+      JUDGE_TIMEZONE:              "America/Bogota"
+      JUDGE_RUN_TIME:              "17:00"
+      AGENTS_ELIMINATE_PER_CYCLE:  "5"
+      MUTATION_SIGMA_WEIGHTS:      "0.05"
+      MUTATION_SIGMA_PERIODS:      "0.08"
+      MUTATION_SIGMA_RISK:         "0.10"
+      MIN_ROI_FOR_HALL_OF_FAME:    "0.05"
+      LOG_LEVEL:                   "INFO"
+      ENVIRONMENT:                 "production"
 
     steps:
-      - name: Checkout del repositorio
+      - name: "Checkout del repositorio"
         uses: actions/checkout@v4
 
-      - name: Configurar Python 3.11
+      - name: "Configurar Python 3.11"
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
           cache: pip
 
-      - name: Instalar dependencias
+      - name: "Instalar dependencias"
         run: pip install -r requirements.txt
 
-      - name: Health check de la base de datos
+      - name: "Health check de la base de datos"
         run: |
           python -c "
           from db.connection import health_check
@@ -57,25 +54,24 @@ jobs:
           exit(0 if ok else 1)
           "
 
-      - name: Ejecutar ciclo evolutivo (Agente Juez)
+      - name: "Ejecutar ciclo evolutivo (Agente Juez)"
         if: ${{ github.event.inputs.dry_run != 'true' }}
         run: python -m cron.judge_scheduler --run-now
 
-      - name: Dry run — solo health check
+      - name: "Dry run - solo health check"
         if: ${{ github.event.inputs.dry_run == 'true' }}
         run: |
-          echo "Dry run activado. Health check ya ejecutado en paso anterior."
+          echo "Dry run activado."
           python -c "
           from evolution.evolution_engine import EvolutionEngine
           from datetime import date
           engine = EvolutionEngine(date.today())
           agents = engine._get_active_agents_ranked()
-          print(f'Agentes activos encontrados: {len(agents)}')
+          print(f'Agentes activos: {len(agents)}')
           for a in agents[:3]:
               print(f'  {a[\"id\"]} | ROI={a[\"roi_total\"]}')
           "
 
-      - name: Reportar resultado
+      - name: "Reportar resultado"
         if: always()
-        run: |
-          echo "Ciclo completado a las $(date -u +'%Y-%m-%d %H:%M UTC')"
+        run: echo "Ciclo completado a las $(date -u +'%Y-%m-%d %H:%M UTC')"
