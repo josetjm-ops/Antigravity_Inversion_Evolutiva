@@ -531,10 +531,10 @@ def _tab_operations(df_ops: pd.DataFrame) -> None:
     if df_ops.empty:
         st.markdown(f"""
         <div class="ie-card ie-card-amber" style="font-size:13px;">
-          <b style="color:{AMBER};">Sin operaciones registradas</b><br><br>
-          El sistema comenzará a registrar operaciones cuando se configuren
-          <code>ALPHA_VANTAGE_API_KEY</code> y <code>DEEPSEEK_API_KEY</code>
-          en el archivo <code>.env</code> y se ejecute el pipeline de agentes.
+          <b style="color:{AMBER};">Sin operaciones registradas aun</b><br><br>
+          Las APIs estan configuradas correctamente. Las operaciones apareceran
+          aqui automaticamente cuando el Agente Juez ejecute el primer ciclo
+          completo de trading (proximo dia habil a las 17:00 Bogota).
         </div>
         """, unsafe_allow_html=True)
         return
