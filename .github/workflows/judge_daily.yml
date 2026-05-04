@@ -29,6 +29,9 @@ jobs:
       MUTATION_SIGMA_PERIODS:      "0.08"
       MUTATION_SIGMA_RISK:         "0.10"
       MIN_ROI_FOR_HALL_OF_FAME:    "0.05"
+      OANDA_ACCOUNT_ID:            ${{ secrets.OANDA_ACCOUNT_ID }}
+      OANDA_API_TOKEN:             ${{ secrets.OANDA_API_TOKEN }}
+      OANDA_ENVIRONMENT:           "practice"
       LOG_LEVEL:                   "INFO"
       ENVIRONMENT:                 "production"
 
@@ -53,6 +56,12 @@ jobs:
           print('DB health check:', 'PASS' if ok else 'FAIL')
           exit(0 if ok else 1)
           "
+
+      - name: "Cierre intraday EOD - cerrar todas las posiciones abiertas"
+        if: ${{ github.event.inputs.dry_run != 'true' }}
+        run: |
+          echo "Cerrando posiciones abiertas antes de la evaluacion del Juez..."
+          python -m cron.trade_monitor --force-close-all
 
       - name: "Ejecutar ciclo evolutivo (Agente Juez)"
         if: ${{ github.event.inputs.dry_run != 'true' }}

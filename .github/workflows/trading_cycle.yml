@@ -1,0 +1,83 @@
+name: "Ciclo de Trading Diario"
+
+"on":
+  schedule:
+    - cron: "0 14 * * 1-5"   # 09:00 Bogota (UTC-5) lunes a viernes
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run (solo health check, no opera)"
+        required: false
+        default: "false"
+        type: choice
+        options: ["true", "false"]
+
+jobs:
+  trading:
+    name: "Ejecutar pipeline de trading"
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    env:
+      DATABASE_URL:           ${{ secrets.DATABASE_URL }}
+      DEEPSEEK_API_KEY:       ${{ secrets.DEEPSEEK_API_KEY }}
+      ALPHA_VANTAGE_API_KEY:  ${{ secrets.ALPHA_VANTAGE_API_KEY }}
+      OANDA_ACCOUNT_ID:       ${{ secrets.OANDA_ACCOUNT_ID }}
+      OANDA_API_TOKEN:        ${{ secrets.OANDA_API_TOKEN }}
+      OANDA_ENVIRONMENT:      "practice"
+      OANDA_UNITS_PER_TRADE:  "1000"
+      JUDGE_TIMEZONE:         "America/Bogota"
+      LOG_LEVEL:              "INFO"
+      ENVIRONMENT:            "production"
+
+    steps:
+      - name: "Checkout del repositorio"
+        uses: actions/checkout@v4
+
+      - name: "Configurar Python 3.11"
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: "Instalar dependencias"
+        run: pip install -r requirements.txt
+
+      - name: "Health check - Base de datos"
+        run: |
+          python -c "
+          from db.connection import health_check
+          ok = health_check()
+          print('DB health check:', 'PASS' if ok else 'FAIL')
+          exit(0 if ok else 1)
+          "
+
+      - name: "Health check - OANDA"
+        run: |
+          python -c "
+          from data.oanda_client import health_check
+          ok = health_check()
+          print('OANDA health check:', 'PASS' if ok else 'FAIL')
+          exit(0 if ok else 1)
+          "
+
+      - name: "Ejecutar ciclo de trading"
+        if: ${{ github.event.inputs.dry_run != 'true' }}
+        run: python -m cron.trading_runner --run-now
+
+      - name: "Dry run - solo health checks"
+        if: ${{ github.event.inputs.dry_run == 'true' }}
+        run: |
+          echo "Dry run activado - health checks completados exitosamente."
+          python -c "
+          from db.connection import get_conn, get_dict_cursor
+          with get_conn() as conn:
+              cur = get_dict_cursor(conn)
+              cur.execute(\"SELECT COUNT(*) as n FROM agentes WHERE estado='activo'\")
+              row = cur.fetchone()
+              print(f'Agentes activos: {row[\"n\"]}')
+          "
+
+      - name: "Reportar resultado"
+        if: always()
+        run: echo "Ciclo de trading completado a las $(date -u +'%Y-%m-%d %H:%M UTC')"

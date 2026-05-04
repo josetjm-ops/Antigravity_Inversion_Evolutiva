@@ -1,0 +1,40 @@
+name: "Monitor de Trades OANDA"
+
+"on":
+  schedule:
+    - cron: "*/15 8-22 * * 1-5"   # cada 15 min, 8:00-22:00 UTC, lunes a viernes
+  workflow_dispatch: {}             # disparo manual para pruebas
+
+jobs:
+  monitor:
+    name: "Sincronizar trades cerrados"
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    env:
+      DATABASE_URL:       ${{ secrets.DATABASE_URL }}
+      OANDA_ACCOUNT_ID:   ${{ secrets.OANDA_ACCOUNT_ID }}
+      OANDA_API_TOKEN:    ${{ secrets.OANDA_API_TOKEN }}
+      OANDA_ENVIRONMENT:  "practice"
+      LOG_LEVEL:          "INFO"
+      ENVIRONMENT:        "production"
+
+    steps:
+      - name: "Checkout del repositorio"
+        uses: actions/checkout@v4
+
+      - name: "Configurar Python 3.11"
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: "Instalar dependencias"
+        run: pip install -r requirements.txt
+
+      - name: "Sincronizar trades cerrados en OANDA"
+        run: python -m cron.trade_monitor --run-once
+
+      - name: "Reportar resultado"
+        if: always()
+        run: echo "Monitor ejecutado a las $(date -u +'%Y-%m-%d %H:%M UTC')"

@@ -12,6 +12,13 @@ from datetime import datetime, timezone
 import pandas as pd
 import streamlit as st
 
+try:
+    from zoneinfo import ZoneInfo
+    _BOGOTA_TZ = ZoneInfo("America/Bogota")
+except Exception:
+    from datetime import timedelta
+    _BOGOTA_TZ = timezone(timedelta(hours=-5))
+
 # Asegura que el directorio raíz del proyecto esté en sys.path
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _ROOT not in sys.path:
@@ -148,6 +155,63 @@ def _css() -> None:
       /* ── Divider ──────────────────────────────────────────── */
       hr {{ border-color: {BORDER}; margin: 20px 0; }}
 
+      /* ── Mobile responsive ───────────────────────────────── */
+      @media screen and (max-width: 768px) {{
+        /* Columnas apiladas verticalmente en móvil */
+        [data-testid="stHorizontalBlock"] {{
+          flex-wrap: wrap !important;
+        }}
+        [data-testid="column"] {{
+          min-width: 45% !important;
+          flex: 1 1 45% !important;
+        }}
+        /* Métricas KPI más compactas */
+        [data-testid="stMetricValue"] {{
+          font-size: 18px !important;
+        }}
+        [data-testid="stMetricLabel"] p {{
+          font-size: 8px !important;
+          letter-spacing: 0.8px !important;
+        }}
+        [data-testid="stMetric"] {{
+          padding: 10px 12px 8px !important;
+        }}
+        /* Tabs más compactos */
+        [data-testid="stTabs"] [role="tab"] {{
+          font-size: 10px !important;
+          padding: 8px 10px !important;
+          letter-spacing: 0px !important;
+        }}
+        /* Reducir padding general */
+        .main .block-container {{
+          padding-left: 0.8rem !important;
+          padding-right: 0.8rem !important;
+          padding-top: 0.5rem !important;
+        }}
+        /* Cards más compactas */
+        .ie-card {{ padding: 12px 14px !important; }}
+        /* Sidebar botón full width */
+        [data-testid="stSidebar"] .stButton button {{
+          width: 100% !important;
+        }}
+      }}
+
+      @media screen and (max-width: 480px) {{
+        /* Teléfono vertical: columnas apiladas al 100% */
+        [data-testid="column"] {{
+          min-width: 100% !important;
+          flex: 1 1 100% !important;
+        }}
+        /* Header más pequeño */
+        [data-testid="stTabs"] [role="tab"] {{
+          font-size: 9px !important;
+          padding: 6px 8px !important;
+        }}
+        [data-testid="stMetricValue"] {{
+          font-size: 16px !important;
+        }}
+      }}
+
       /* ── Clases utilitarias ───────────────────────────────── */
       .ie-label {{
           font-size: 9px;
@@ -222,10 +286,11 @@ def _header() -> None:
         </div>
         """, unsafe_allow_html=True)
     with right:
+        now_bog = datetime.now(_BOGOTA_TZ)
         st.markdown(f"""
         <div style="padding:20px 0 0 0;text-align:right;
                     font-size:10px;color:{DIM};font-family:monospace;">
-          🕐 {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}
+          🕐 {now_bog.strftime('%Y-%m-%d %H:%M')} <span style="color:{GOLD};">Bogotá</span>
         </div>
         """, unsafe_allow_html=True)
 
@@ -311,9 +376,7 @@ def _sidebar() -> tuple[list[str], list[int]]:
 # KPIs
 # ═══════════════════════════════════════════════════════════════════════════════
 def _kpis(df_active: pd.DataFrame, df_all: pd.DataFrame) -> None:
-    c1, c2, c3, c4, c5 = st.columns(5)
-
-    n_act = len(df_active)
+    n_act    = len(df_active)
     best_roi = float(df_active["roi_total"].max()) if not df_active.empty else 0.0
     avg_roi  = float(df_active["roi_total"].mean()) if not df_active.empty else 0.0
     max_gen  = int(df_all["generacion"].max()) if not df_all.empty else 1
@@ -328,6 +391,8 @@ def _kpis(df_active: pd.DataFrame, df_all: pd.DataFrame) -> None:
     def _delta(v: float, sfx: str = "%") -> tuple[str, str]:
         return f"{v:+.2f}{sfx}", ("normal" if v >= 0 else "inverse")
 
+    # Fila 1: 3 métricas (se adaptan mejor en móvil)
+    c1, c2, c3 = st.columns(3)
     with c1:
         st.metric("Agentes Activos", n_act)
     with c2:
@@ -336,9 +401,12 @@ def _kpis(df_active: pd.DataFrame, df_all: pd.DataFrame) -> None:
     with c3:
         d, dc = _delta(avg_roi)
         st.metric("ROI Promedio", f"{avg_roi:.2f}%", delta=d, delta_color=dc)
+
+    # Fila 2: 2 métricas
+    c4, c5 = st.columns(2)
     with c4:
         st.metric("Generación Actual", f"Gen {max_gen}",
-                  delta=f"{max_gen - 1} ciclos evolutivos" if max_gen > 1 else "Génesis")
+                  delta=f"{max_gen - 1} ciclos" if max_gen > 1 else "Génesis")
     with c5:
         d, dc = _delta(wr - 50)
         st.metric("Win Rate Global", f"{wr:.1f}%", delta=d, delta_color=dc)
