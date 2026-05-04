@@ -48,6 +48,21 @@ if str(ROOT) not in sys.path:
 _POLL_SECONDS = int(os.getenv("TRADE_MONITOR_POLL_SECONDS", "60"))
 
 
+# ── Guard: verificar credenciales OANDA ──────────────────────────────────────
+
+def _oanda_configured() -> bool:
+    """Retorna False si faltan las credenciales OANDA en el entorno."""
+    account_id = os.getenv("OANDA_ACCOUNT_ID", "").strip()
+    token      = os.getenv("OANDA_API_TOKEN", "").strip()
+    if not account_id or not token:
+        log.warning(
+            "[TradeMonitor] OANDA_ACCOUNT_ID u OANDA_API_TOKEN no configurados. "
+            "Configura los secrets en GitHub Actions y vuelve a ejecutar."
+        )
+        return False
+    return True
+
+
 # ── Lógica de sincronización ──────────────────────────────────────────────────
 
 def sync_once() -> dict:
@@ -56,6 +71,9 @@ def sync_once() -> dict:
     las que OANDA ya cerró (SL o TP alcanzado).
     Retorna resumen: {'checked': N, 'synced': N, 'errors': N}
     """
+    if not _oanda_configured():
+        return {"checked": 0, "synced": 0, "errors": 0}
+
     from data import oanda_client
     from agents.investor_agent import InvestorAgent
     from db.connection import get_conn, get_dict_cursor
@@ -153,6 +171,9 @@ def force_close_all() -> dict:
     from data import oanda_client
     from agents.investor_agent import InvestorAgent
     from db.connection import get_conn, get_dict_cursor
+
+    if not _oanda_configured():
+        return {"closed": 0, "errors": 0}
 
     log.info("[TradeMonitor] EOD — Cerrando todas las posiciones abiertas (intraday)...")
 
