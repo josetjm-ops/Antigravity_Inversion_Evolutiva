@@ -770,6 +770,422 @@ def _tab_price(df_all: pd.DataFrame) -> None:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# TAB 6 — INSTRUCCIONES
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _tab_instructions() -> None:
+    st.markdown(f"""
+    <style>
+      .ins-section {{
+        margin-bottom: 28px;
+      }}
+      .ins-title {{
+        font-size: 11px;
+        font-weight: 800;
+        letter-spacing: 3px;
+        text-transform: uppercase;
+        color: {GOLD};
+        border-bottom: 1px solid {BORDER};
+        padding-bottom: 8px;
+        margin-bottom: 16px;
+      }}
+      .ins-card {{
+        background: {CARD};
+        border: 1px solid {BORDER};
+        border-radius: 10px;
+        padding: 18px 22px;
+        margin-bottom: 12px;
+      }}
+      .ins-card-left-gold    {{ border-left: 3px solid {GOLD};    }}
+      .ins-card-left-emerald {{ border-left: 3px solid {EMERALD}; }}
+      .ins-card-left-red     {{ border-left: 3px solid {RED};     }}
+      .ins-card-left-amber   {{ border-left: 3px solid {AMBER};   }}
+      .ins-card-left-dim     {{ border-left: 3px solid {BORDER};  }}
+      .ins-body {{
+        font-size: 13px;
+        color: {TEXT};
+        line-height: 1.8;
+      }}
+      .ins-body b {{ color: {GOLD}; }}
+      .ins-body em {{ color: {EMERALD}; font-style: normal; }}
+      .ins-body s {{ color: {RED}; text-decoration: none; font-weight: 700; }}
+      .ins-step {{
+        display: flex;
+        align-items: flex-start;
+        gap: 14px;
+        margin-bottom: 10px;
+      }}
+      .ins-step-num {{
+        min-width: 26px;
+        height: 26px;
+        border-radius: 50%;
+        background: {GOLD};
+        color: #000;
+        font-size: 11px;
+        font-weight: 800;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        flex-shrink: 0;
+        margin-top: 2px;
+      }}
+      .ins-step-text {{
+        font-size: 13px;
+        color: {TEXT};
+        line-height: 1.7;
+      }}
+      .ins-step-text b {{ color: {GOLD}; }}
+      .ins-pill {{
+        display: inline-block;
+        padding: 3px 10px;
+        border-radius: 20px;
+        font-size: 10px;
+        font-weight: 700;
+        letter-spacing: 0.5px;
+        margin-right: 6px;
+      }}
+      .ins-pill-buy  {{ background: rgba(0,200,120,0.15); color: {EMERALD}; border: 1px solid {EMERALD}; }}
+      .ins-pill-sell {{ background: rgba(224,82,82,0.15);  color: {RED};     border: 1px solid {RED}; }}
+      .ins-pill-hold {{ background: rgba(212,175,55,0.15); color: {GOLD};    border: 1px solid {GOLD}; }}
+      .ins-timeline {{
+        position: relative;
+        padding-left: 20px;
+        border-left: 2px solid {BORDER};
+        margin: 8px 0;
+      }}
+      .ins-timeline-item {{
+        margin-bottom: 14px;
+        position: relative;
+      }}
+      .ins-timeline-item::before {{
+        content: '';
+        position: absolute;
+        left: -25px;
+        top: 5px;
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: {GOLD};
+      }}
+      .ins-time {{
+        font-size: 11px;
+        color: {GOLD};
+        font-family: monospace;
+        font-weight: 700;
+      }}
+      .ins-timeline-text {{
+        font-size: 12px;
+        color: {TEXT};
+        line-height: 1.6;
+        margin-top: 2px;
+      }}
+      .ins-param-grid {{
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 10px;
+        margin-top: 10px;
+      }}
+      .ins-param-box {{
+        background: {CARD2};
+        border: 1px solid {BORDER};
+        border-radius: 8px;
+        padding: 10px 14px;
+      }}
+      .ins-param-label {{
+        font-size: 9px;
+        color: {GOLD};
+        letter-spacing: 1.5px;
+        text-transform: uppercase;
+        font-weight: 700;
+        margin-bottom: 6px;
+      }}
+      .ins-param-items {{
+        font-size: 11px;
+        color: {DIM};
+        line-height: 1.8;
+      }}
+    </style>
+
+    <!-- ══ ENCABEZADO ══ -->
+    <div style="margin-bottom:28px;">
+      <div style="font-size:18px;font-weight:800;color:{GOLD};letter-spacing:2px;margin-bottom:6px;">
+        ⚡ INVERSIÓN EVOLUTIVA — Cómo funciona
+      </div>
+      <div style="font-size:12px;color:{DIM};line-height:1.7;max-width:800px;">
+        Un sistema de trading algorítmico multi-agente que aplica <b style="color:{GOLD};">
+        algoritmos genéticos</b> para encontrar estrategias rentables en EUR/USD.
+        Los agentes compiten entre sí: los mejores sobreviven y se reproducen, los peores
+        son eliminados. La única herramienta de supervivencia de cada agente es su estrategia de inversión.
+      </div>
+    </div>
+
+    <!-- ══ 1. LOS AGENTES ══ -->
+    <div class="ins-section">
+      <div class="ins-title">1 · Los Agentes Inversionistas</div>
+      <div class="ins-card ins-card-left-gold">
+        <div class="ins-body">
+          El sistema comienza con <b>10 agentes génesis (Generación 1)</b>, cada uno con
+          <b>$10.00 USD de capital virtual</b> y un conjunto único de parámetros estratégicos
+          que definen cómo interpreta el mercado y gestiona el riesgo.
+          Estos parámetros son el "ADN" del agente y se heredan, cruzan y mutan entre generaciones.
+        </div>
+        <div class="ins-param-grid" style="margin-top:14px;">
+          <div class="ins-param-box">
+            <div class="ins-param-label">📊 Parámetros Técnicos</div>
+            <div class="ins-param-items">
+              Período RSI (5–50)<br>
+              Umbrales sobrecompra/venta<br>
+              EMA rápida y lenta<br>
+              Períodos MACD<br>
+              Pesos RSI / EMA / MACD
+            </div>
+          </div>
+          <div class="ins-param-box">
+            <div class="ins-param-label">📰 Parámetros Macro</div>
+            <div class="ins-param-items">
+              Pesos por impacto de noticias<br>
+              Umbrales de sentimiento<br>
+              Ventana temporal (1–8 h)<br>
+              Peso macro vs técnico total
+            </div>
+          </div>
+          <div class="ins-param-box">
+            <div class="ins-param-label">🛡️ Parámetros de Riesgo</div>
+            <div class="ins-param-items">
+              Stop Loss % (0.5%–5%)<br>
+              Take Profit % (1%–10%)<br>
+              Capital por operación<br>
+              Confianza mínima para operar<br>
+              Máx. drawdown diario
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ══ 2. CÓMO DECIDE UN AGENTE ══ -->
+    <div class="ins-section">
+      <div class="ins-title">2 · Cómo toma decisiones un agente — Pipeline A → B → C</div>
+      <div class="ins-card ins-card-left-emerald">
+        <div class="ins-body" style="margin-bottom:14px;">
+          Cada mañana a las <b>9:00 am Bogotá</b>, cada agente ejecuta un pipeline de tres
+          sub-agentes en serie. El resultado final es una de tres acciones posibles:
+          <span class="ins-pill ins-pill-buy">BUY</span>
+          <span class="ins-pill ins-pill-sell">SELL</span>
+          <span class="ins-pill ins-pill-hold">HOLD</span>
+        </div>
+        <div class="ins-step">
+          <div class="ins-step-num">A</div>
+          <div class="ins-step-text">
+            <b>Sub-agente Técnico</b> — Analiza RSI, EMA y MACD con los parámetros genéticos
+            propios del agente. Calcula una señal ponderada (BUY / SELL / HOLD) con nivel de
+            confianza. Si la confianza está en zona ambigua (0.45–0.65), consulta al LLM
+            DeepSeek para confirmar o ajustar la señal.
+          </div>
+        </div>
+        <div class="ins-step">
+          <div class="ins-step-num">B</div>
+          <div class="ins-step-text">
+            <b>Sub-agente Macro</b> — Analiza el calendario económico (Investing.com) y
+            titulares de noticias (DailyForex) para EUR/USD. DeepSeek devuelve un
+            score de sentimiento (−1.0 a +1.0). Los eventos de alto impacto tienen más peso
+            que los de bajo impacto, según los parámetros del agente.
+          </div>
+        </div>
+        <div class="ins-step">
+          <div class="ins-step-num">C</div>
+          <div class="ins-step-text">
+            <b>Sub-agente de Riesgo (decisión final)</b> — Combina las señales A y B con
+            pesos configurables. Si las señales coinciden, promedia. Si hay conflicto,
+            gana la que supere 0.75 de confianza; si ninguna lo hace, emite <b>HOLD</b>.
+            Si la confianza final no alcanza el umbral mínimo del agente, también emite
+            <b>HOLD</b>. Si la acción es BUY o SELL, calcula Stop Loss, Take Profit
+            y capital a usar, y consulta a DeepSeek para validación final.
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ══ 3. HOLD ══ -->
+    <div class="ins-section">
+      <div class="ins-title">3 · HOLD — Por qué no operar también es una estrategia</div>
+      <div class="ins-card ins-card-left-amber">
+        <div class="ins-body">
+          <span class="ins-pill ins-pill-hold">HOLD</span> significa que el agente decidió
+          <b>no abrir ninguna posición ese día</b>. Esto no es una falla — es una decisión
+          estratégica válida y en muchos casos la más inteligente.<br><br>
+          <b>¿Cuándo emite HOLD un agente?</b><br>
+          &nbsp;• Cuando las señales técnica y macro están en conflicto y ninguna tiene confianza suficiente.<br>
+          &nbsp;• Cuando la confianza combinada está por debajo del umbral mínimo del agente.<br>
+          &nbsp;• Cuando ya tiene una posición abierta de un ciclo anterior (no abre un segundo trade).<br><br>
+          <b>¿Por qué es válido como estrategia de supervivencia?</b><br>
+          Si el mercado está muy volátil e incierto y otros agentes abren posiciones perdedoras,
+          el agente que hizo HOLD conserva su capital intacto. Con el tiempo, un agente que
+          sabe cuándo <em>no operar</em> puede acumular una ventaja competitiva real frente
+          a agentes agresivos que pierden capital en señales débiles.
+        </div>
+      </div>
+    </div>
+
+    <!-- ══ 4. MONITOREO Y CIERRE ══ -->
+    <div class="ins-section">
+      <div class="ins-title">4 · Monitoreo de posiciones abiertas — Stop Loss y Take Profit</div>
+      <div class="ins-card ins-card-left-dim">
+        <div class="ins-body">
+          Una vez que un agente abre una posición (BUY o SELL), el <b>Trade Monitor</b>
+          verifica cada 15 minutos el precio real de EUR/USD (Yahoo Finance, gratuito)
+          para determinar si se deben cerrar:<br><br>
+          &nbsp;• <b style="color:{EMERALD};">✓ Take Profit alcanzado</b> — el precio llegó al nivel objetivo → se cierra con ganancia al precio exacto del TP.<br>
+          &nbsp;• <b style="color:{RED};">✗ Stop Loss alcanzado</b> — el precio cayó al límite de pérdida → se cierra con pérdida controlada al precio exacto del SL.<br>
+          &nbsp;• <b style="color:{DIM};">◎ Cierre EOD (4:45 pm Bogotá)</b> — si la posición sigue abierta al final del día, se cierra obligatoriamente al precio de mercado.<br><br>
+          El cierre al precio exacto del SL/TP garantiza que el P&L sea preciso
+          independientemente de cada cuánto se ejecute el monitor.
+        </div>
+      </div>
+    </div>
+
+    <!-- ══ 5. AGENTE JUEZ ══ -->
+    <div class="ins-section">
+      <div class="ins-title">5 · El Agente Juez — Evaluación diaria a las 5:00 pm Bogotá</div>
+      <div class="ins-card ins-card-left-red">
+        <div class="ins-body">
+          Al cierre del mercado, el <b>Agente Juez</b> ejecuta el ciclo evolutivo:<br><br>
+        </div>
+        <div class="ins-step">
+          <div class="ins-step-num">1</div>
+          <div class="ins-step-text">
+            <b>Clasificación por ROI</b> — Todos los agentes activos se ordenan por
+            rentabilidad acumulada (ROI total). En empate exacto de ROI,
+            <b>sobrevive el agente más reciente</b> — un agente joven con el mismo
+            ROI tiene más potencial adaptativo.
+          </div>
+        </div>
+        <div class="ins-step">
+          <div class="ins-step-num">2</div>
+          <div class="ins-step-text">
+            <b>Eliminación de los 5 peores</b> — Los 5 agentes con menor ROI son
+            marcados como <s>eliminado</s>. No importa si llevan poco tiempo —
+            si no generan resultados, son descartados. Su capital virtual desaparece con ellos.
+          </div>
+        </div>
+        <div class="ins-step">
+          <div class="ins-step-num">3</div>
+          <div class="ins-step-text">
+            <b>Razonamiento con DeepSeek</b> — El LLM analiza el contexto: parámetros
+            de los eliminados, condiciones de mercado del día, y qué estrategias
+            funcionaron mejor. Genera un veredicto con justificaciones individuales.
+          </div>
+        </div>
+        <div class="ins-step">
+          <div class="ins-step-num">4</div>
+          <div class="ins-step-text">
+            <b>Creación de 5 nuevos agentes</b> — Se generan 5 agentes de la siguiente
+            generación mediante cruce genético y mutación.
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ══ 6. EVOLUCIÓN GENÉTICA ══ -->
+    <div class="ins-section">
+      <div class="ins-title">6 · Reproducción y Mutación — Cómo nacen los nuevos agentes</div>
+      <div class="ins-card ins-card-left-gold">
+        <div class="ins-body">
+          Cada nuevo agente se crea en dos pasos:<br><br>
+          <b>① Cruce (Crossover)</b> — Se seleccionan 2 padres del pool de supervivientes.
+          La probabilidad de ser elegido como padre es proporcional al ROI de cada agente
+          (los mejores tienen más probabilidad de reproducirse). Cada parámetro del hijo
+          se hereda del Padre 1 con 60% de probabilidad, del Padre 2 con 40%.<br><br>
+          <b>② Mutación Gaussiana</b> — Cada parámetro heredado se perturba con ruido aleatorio:
+          <code style="font-size:11px;color:{EMERALD};">
+            param_hijo = param_padre × (1 + N(0, σ))
+          </code><br>
+          Los niveles de ruido (σ) son distintos por tipo:<br>
+          &nbsp;• Pesos de decisión: σ = 5%<br>
+          &nbsp;• Períodos enteros (RSI, EMA): σ = 8%<br>
+          &nbsp;• Parámetros de riesgo (SL, TP): σ = 10%<br><br>
+          <b>Restricciones de seguridad post-mutación:</b><br>
+          &nbsp;• Los pesos RSI/EMA/MACD se renormalizan para sumar 1.0.<br>
+          &nbsp;• La EMA rápida siempre es menor que la EMA lenta.<br>
+          &nbsp;• El Take Profit es siempre ≥ 1.5× el Stop Loss.
+        </div>
+      </div>
+    </div>
+
+    <!-- ══ 7. HALL OF FAME ══ -->
+    <div class="ins-section">
+      <div class="ins-title">7 · Hall of Fame — Estrategias que demuestran valor real</div>
+      <div class="ins-card ins-card-left-emerald">
+        <div class="ins-body">
+          Todo agente superviviente con <b>ROI &gt; 0.05%</b> tiene sus parámetros
+          guardados en la tabla <em>estrategias_exitosas</em>. Este repositorio acumula
+          las configuraciones que han demostrado rentabilidad real con datos de mercado
+          reales. En el futuro, puede usarse como fuente preferencial de herencia
+          para nuevas generaciones, acelerando la convergencia evolutiva.
+        </div>
+      </div>
+    </div>
+
+    <!-- ══ 8. CICLO DIARIO ══ -->
+    <div class="ins-section">
+      <div class="ins-title">8 · Ciclo Diario Completo — Cronograma (hora Bogotá)</div>
+      <div class="ins-card ins-card-left-dim">
+        <div class="ins-timeline">
+          <div class="ins-timeline-item">
+            <div class="ins-time">9:00 am</div>
+            <div class="ins-timeline-text">
+              <b style="color:{TEXT};">Ciclo de Trading</b> — Los 10 agentes activos
+              ejecutan su pipeline A→B→C de forma simultánea, compartiendo los mismos datos
+              de mercado (1 sola llamada a Alpha Vantage). Cada agente que pasa sus umbrales
+              de confianza abre una posición BUY o SELL con precio real de Alpha Vantage.
+            </div>
+          </div>
+          <div class="ins-timeline-item">
+            <div class="ins-time">Cada 15 min · 8:00 am – 10:00 pm UTC</div>
+            <div class="ins-timeline-text">
+              <b style="color:{TEXT};">Monitor de Posiciones</b> — Verifica el precio actual
+              de EUR/USD (Yahoo Finance). Si alguna posición tocó su Stop Loss o Take Profit,
+              se cierra automáticamente al precio exacto del nivel correspondiente.
+            </div>
+          </div>
+          <div class="ins-timeline-item">
+            <div class="ins-time">4:45 pm</div>
+            <div class="ins-timeline-text">
+              <b style="color:{TEXT};">Cierre EOD (End of Day)</b> — Todas las posiciones
+              que siguen abiertas se cierran al precio de mercado. Ningún agente llega a
+              la evaluación del Juez con trades pendientes. El P&L del día queda completamente
+              liquidado y es el insumo final para el ranking.
+            </div>
+          </div>
+          <div class="ins-timeline-item">
+            <div class="ins-time">5:00 pm</div>
+            <div class="ins-timeline-text">
+              <b style="color:{TEXT};">Ciclo Evolutivo (Agente Juez)</b> — Clasifica agentes
+              por ROI, elimina los 5 peores, consulta a DeepSeek, crea 5 nuevos agentes con
+              parámetros mutados de los supervivientes y registra todo en el log de auditoría.
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ══ NOTA TÉCNICA ══ -->
+    <div style="background:{CARD2};border:1px solid {BORDER};border-radius:8px;
+                padding:14px 18px;font-size:11px;color:{DIM};line-height:1.8;">
+      <b style="color:{GOLD};">Nota técnica:</b>
+      Los datos técnicos (RSI, EMA, MACD) provienen de <b style="color:{TEXT};">Alpha Vantage</b>
+      (gratuito, 25 llamadas/día — el sistema usa 5 llamadas diarias en total, compartidas entre todos los agentes).
+      Los precios de monitoreo y la gráfica de la sección Precio usan <b style="color:{TEXT};">Yahoo Finance</b>
+      (gratuito, sin límite de llamadas).
+      El razonamiento de los agentes y del Juez usa <b style="color:{TEXT};">DeepSeek</b>
+      (modelo <code>deepseek-reasoner</code>).
+      La base de datos es <b style="color:{TEXT};">PostgreSQL en Neon</b>.
+      Los workflows corren en <b style="color:{TEXT};">GitHub Actions</b> de forma completamente autónoma.
+    </div>
+    """, unsafe_allow_html=True)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # MAIN
 # ═══════════════════════════════════════════════════════════════════════════════
 def main() -> None:
@@ -792,12 +1208,13 @@ def main() -> None:
     st.markdown("<br>", unsafe_allow_html=True)
 
     # Tabs principales
-    tab_pop, tab_evo, tab_judge, tab_ops, tab_price = st.tabs([
+    tab_pop, tab_evo, tab_judge, tab_ops, tab_price, tab_ins = st.tabs([
         "📊  Población",
         "🧬  Evolución",
         "⚖️  Agente Juez",
         "💹  Operaciones",
         "📈  Precio",
+        "📖  Instrucciones",
     ])
 
     with tab_pop:
@@ -814,6 +1231,9 @@ def main() -> None:
 
     with tab_price:
         _tab_price(df_all)
+
+    with tab_ins:
+        _tab_instructions()
 
 
 main()
