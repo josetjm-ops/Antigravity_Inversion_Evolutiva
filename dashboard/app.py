@@ -968,8 +968,11 @@ def _tab_instructions() -> None:
       <div class="ins-title">2 · Cómo toma decisiones un agente — Pipeline A → B → C</div>
       <div class="ins-card ins-card-left-emerald">
         <div class="ins-body" style="margin-bottom:14px;">
-          Cada mañana a las <b>9:00 am Bogotá</b>, cada agente ejecuta un pipeline de tres
-          sub-agentes en serie. El resultado final es una de tres acciones posibles:
+          Dentro del horario de trading (<b>9:00 am – 3:00 pm Bogotá</b>), cada agente
+          sin posición abierta ejecuta el pipeline de tres sub-agentes en serie.
+          Los indicadores técnicos (RSI, EMA, MACD) se calculan <b>en el momento exacto
+          de cada evaluación</b> con los precios más recientes de Yahoo Finance —
+          no se reutilizan los datos de la mañana. El resultado final es una de tres acciones:
           <span class="ins-pill ins-pill-buy">BUY</span>
           <span class="ins-pill ins-pill-sell">SELL</span>
           <span class="ins-pill ins-pill-hold">HOLD</span>
@@ -1029,17 +1032,27 @@ def _tab_instructions() -> None:
 
     <!-- ══ 4. MONITOREO Y CIERRE ══ -->
     <div class="ins-section">
-      <div class="ins-title">4 · Monitoreo de posiciones abiertas — Stop Loss y Take Profit</div>
+      <div class="ins-title">4 · Monitor cada 15 minutos — SL/TP + Nuevas posiciones intraday</div>
       <div class="ins-card ins-card-left-dim">
         <div class="ins-body">
-          Una vez que un agente abre una posición (BUY o SELL), el <b>Trade Monitor</b>
-          verifica cada 15 minutos el precio real de EUR/USD (Yahoo Finance, gratuito)
-          para determinar si se deben cerrar:<br><br>
-          &nbsp;• <b style="color:{EMERALD};">✓ Take Profit alcanzado</b> — el precio llegó al nivel objetivo → se cierra con ganancia al precio exacto del TP.<br>
-          &nbsp;• <b style="color:{RED};">✗ Stop Loss alcanzado</b> — el precio cayó al límite de pérdida → se cierra con pérdida controlada al precio exacto del SL.<br>
-          &nbsp;• <b style="color:{DIM};">◎ Cierre EOD (4:45 pm Bogotá)</b> — si la posición sigue abierta al final del día, se cierra obligatoriamente al precio de mercado.<br><br>
-          El cierre al precio exacto del SL/TP garantiza que el P&L sea preciso
-          independientemente de cada cuánto se ejecute el monitor.
+          El <b>Trade Monitor</b> corre cada 15 minutos dentro del horario 9:00 am–3:00 pm
+          Bogotá y realiza <b>dos tareas en cada ciclo</b>:<br><br>
+          <b>① Verificación de posiciones abiertas</b><br>
+          Obtiene el precio actual de EUR/USD (Yahoo Finance) y comprueba si alguna posición
+          tocó su Stop Loss o Take Profit:<br>
+          &nbsp;• <b style="color:{EMERALD};">✓ Take Profit alcanzado</b> — se cierra con ganancia al precio exacto del TP.<br>
+          &nbsp;• <b style="color:{RED};">✗ Stop Loss alcanzado</b> — se cierra con pérdida controlada al precio exacto del SL.<br>
+          &nbsp;• <b style="color:{DIM};">◎ Cierre EOD (5:00 pm Bogotá)</b> — posiciones aún abiertas se cierran obligatoriamente al precio de mercado antes de la evaluación del Juez.<br><br>
+          <b>② Evaluación de nuevas posiciones</b><br>
+          Para cada agente que quedó libre (sin posición abierta y con capital suficiente),
+          el monitor descarga <b>velas OHLCV actualizadas</b> de Yahoo Finance y recalcula
+          RSI, EMA y MACD con los precios del momento. Luego ejecuta el pipeline A→B→C completo
+          para decidir si abrir una nueva posición.<br><br>
+          <b>Ejemplo:</b> un agente abre a las 9:00 am, su Take Profit se activa a las 10:15 am.
+          A las 10:30 am el monitor detecta que está libre, descarga los precios actualizados
+          hasta las 10:30 am y evalúa si abrir una segunda posición con los indicadores frescos
+          de ese momento — no los del amanecer. Un agente puede operar múltiples veces
+          en el mismo día, de forma secuencial (una posición abierta a la vez).
         </div>
       </div>
     </div>
@@ -1132,37 +1145,33 @@ def _tab_instructions() -> None:
       <div class="ins-card ins-card-left-dim">
         <div class="ins-timeline">
           <div class="ins-timeline-item">
-            <div class="ins-time">9:00 am</div>
+            <div class="ins-time">8:50 am</div>
             <div class="ins-timeline-text">
-              <b style="color:{TEXT};">Ciclo de Trading</b> — Los 10 agentes activos
-              ejecutan su pipeline A→B→C de forma simultánea, compartiendo los mismos datos
-              de mercado (1 sola llamada a Alpha Vantage). Cada agente que pasa sus umbrales
-              de confianza abre una posición BUY o SELL con precio real de Alpha Vantage.
+              <b style="color:{TEXT};">Primer ciclo de Trading</b> — Los 10 agentes activos
+              ejecutan su pipeline A→B→C. Se descarga 1 DataFrame OHLCV compartido de Yahoo Finance
+              y cada agente calcula sus propios RSI, EMA y MACD en memoria con sus parámetros
+              genéticos. Los agentes que superan sus umbrales de confianza abren posición BUY o SELL.
             </div>
           </div>
           <div class="ins-timeline-item">
-            <div class="ins-time">Cada 15 min · 8:00 am – 10:00 pm UTC</div>
+            <div class="ins-time">9:00 am – 3:00 pm · cada 15 minutos</div>
             <div class="ins-timeline-text">
-              <b style="color:{TEXT};">Monitor de Posiciones</b> — Verifica el precio actual
-              de EUR/USD (Yahoo Finance). Si alguna posición tocó su Stop Loss o Take Profit,
-              se cierra automáticamente al precio exacto del nivel correspondiente.
-            </div>
-          </div>
-          <div class="ins-timeline-item">
-            <div class="ins-time">4:45 pm</div>
-            <div class="ins-timeline-text">
-              <b style="color:{TEXT};">Cierre EOD (End of Day)</b> — Todas las posiciones
-              que siguen abiertas se cierran al precio de mercado. Ningún agente llega a
-              la evaluación del Juez con trades pendientes. El P&L del día queda completamente
-              liquidado y es el insumo final para el ranking.
+              <b style="color:{TEXT};">Monitor intraday (doble función)</b><br>
+              <span style="color:{DIM};">① SL/TP:</span> verifica si alguna posición abierta tocó
+              su Stop Loss o Take Profit y la cierra al precio exacto del nivel.<br>
+              <span style="color:{DIM};">② Nuevas posiciones:</span> para cada agente libre
+              (sin posición y con capital suficiente), descarga OHLCV actualizado, recalcula
+              RSI/EMA/MACD con los precios del momento y ejecuta el pipeline completo.
+              Un agente puede operar varias veces al día de forma secuencial.
             </div>
           </div>
           <div class="ins-timeline-item">
             <div class="ins-time">5:00 pm</div>
             <div class="ins-timeline-text">
-              <b style="color:{TEXT};">Ciclo Evolutivo (Agente Juez)</b> — Clasifica agentes
-              por ROI, elimina los 5 peores, consulta a DeepSeek, crea 5 nuevos agentes con
-              parámetros mutados de los supervivientes y registra todo en el log de auditoría.
+              <b style="color:{TEXT};">Cierre EOD + Ciclo Evolutivo</b> — Primero se cierran
+              obligatoriamente todas las posiciones abiertas al precio de mercado. Luego el
+              Agente Juez clasifica por ROI, elimina los 5 peores, y crea 5 nuevos agentes
+              con parámetros mutados. Todo queda registrado en el log de auditoría.
             </div>
           </div>
         </div>
@@ -1173,12 +1182,12 @@ def _tab_instructions() -> None:
     <div style="background:{CARD2};border:1px solid {BORDER};border-radius:8px;
                 padding:14px 18px;font-size:11px;color:{DIM};line-height:1.8;">
       <b style="color:{GOLD};">Nota técnica:</b>
-      Los datos técnicos (RSI, EMA, MACD) provienen de <b style="color:{TEXT};">Alpha Vantage</b>
-      (gratuito, 25 llamadas/día — el sistema usa 5 llamadas diarias en total, compartidas entre todos los agentes).
-      Los precios de monitoreo y la gráfica de la sección Precio usan <b style="color:{TEXT};">Yahoo Finance</b>
-      (gratuito, sin límite de llamadas).
+      Los indicadores técnicos (RSI, EMA, MACD) y los precios de monitoreo se obtienen todos
+      de <b style="color:{TEXT};">Yahoo Finance</b> (gratuito, sin límite de llamadas, sin API key).
+      Se descarga 1 DataFrame OHLCV por ciclo, compartido entre todos los agentes;
+      cada agente calcula sus propios indicadores en memoria con sus parámetros genéticos.
       El razonamiento de los agentes y del Juez usa <b style="color:{TEXT};">DeepSeek</b>
-      (modelo <code>deepseek-reasoner</code>).
+      (modelo <code>deepseek-chat</code>).
       La base de datos es <b style="color:{TEXT};">PostgreSQL en Neon</b>.
       Los workflows corren en <b style="color:{TEXT};">GitHub Actions</b> de forma completamente autónoma.
     </div>
