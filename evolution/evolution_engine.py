@@ -206,7 +206,14 @@ class EvolutionEngine:
     # ── Consultas a la DB ────────────────────────────────────────────────────
 
     def _get_active_agents_ranked(self) -> list[dict]:
-        """Retorna todos los agentes activos ordenados por ROI descendente."""
+        """
+        Retorna los agentes activos ordenados por fitness descendente.
+
+        Criterios de desempate (en orden):
+          1. roi_total DESC        — mejor rendimiento acumulado primero
+          2. fecha_nacimiento DESC — en empate de ROI, el agente más joven sobrevive
+          3. id DESC               — mismo día de nacimiento: el creado después (índice mayor) sobrevive
+        """
         with get_conn() as conn:
             cur = get_dict_cursor(conn)
             cur.execute("""
@@ -215,7 +222,7 @@ class EvolutionEngine:
                        params_tecnicos, params_macro, params_riesgo
                 FROM agentes
                 WHERE estado = 'activo'
-                ORDER BY roi_total DESC, operaciones_ganadoras DESC
+                ORDER BY roi_total DESC, fecha_nacimiento DESC, id DESC
             """)
             return [dict(row) for row in cur.fetchall()]
 
@@ -398,7 +405,8 @@ class EvolutionEngine:
             with get_conn() as conn:
                 self._eliminate_agents(
                     conn, eliminated,
-                    f"Selección natural {self.today}: bottom {len(eliminated)} por ROI",
+                    f"Selección natural {self.today}: bottom {len(eliminated)} "
+                    f"por ROI (desempate: agente más reciente sobrevive)",
                 )
                 for child in new_agents:
                     self._insert_new_agent(conn, child)
