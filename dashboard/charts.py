@@ -431,7 +431,159 @@ def pnl_distribution(df: pd.DataFrame) -> go.Figure:
     return fig
 
 
-# ── 6. Gauge de Win Rate ──────────────────────────────────────────────────────
+# ── 6. Precio EUR/USD + Operaciones del Agente ───────────────────────────────
+
+def price_chart_with_operations(
+    df_prices: pd.DataFrame,
+    df_ops: pd.DataFrame,
+    agent_id: str = "",
+) -> go.Figure:
+    """
+    Candlestick EUR/USD con marcadores de entrada/salida para el agente seleccionado.
+    Entradas: triángulo verde (BUY) / rojo (SELL).
+    Salidas: estrella dorada (TP) · X roja (SL) · círculo gris (EOD).
+    Línea punteada conecta entrada con salida de cada operación.
+    """
+    if df_prices.empty:
+        return _empty("Sin datos de precio — intenta de nuevo en unos segundos")
+
+    fig = go.Figure()
+
+    # ── Velas OHLCV ──────────────────────────────────────────────────────────
+    fig.add_trace(go.Candlestick(
+        x=df_prices["timestamp"],
+        open=df_prices["open"],
+        high=df_prices["high"],
+        low=df_prices["low"],
+        close=df_prices["close"],
+        name="EUR/USD",
+        increasing=dict(
+            line=dict(color=EMERALD, width=1),
+            fillcolor="rgba(0,200,120,0.25)",
+        ),
+        decreasing=dict(
+            line=dict(color=RED, width=1),
+            fillcolor="rgba(224,82,82,0.25)",
+        ),
+        hoverinfo="x+y",
+    ))
+
+    if not df_ops.empty:
+        buys  = df_ops[df_ops["accion"] == "BUY"]
+        sells = df_ops[df_ops["accion"] == "SELL"]
+
+        # ── Entradas ─────────────────────────────────────────────────────────
+        if not buys.empty:
+            fig.add_trace(go.Scatter(
+                x=buys["timestamp_entrada"],
+                y=buys["precio_entrada"],
+                mode="markers",
+                name="Entrada BUY",
+                marker=dict(
+                    symbol="triangle-up", size=13,
+                    color=EMERALD, line=dict(color="white", width=1),
+                ),
+                hovertemplate="<b>BUY</b> entrada<br>%{x|%d/%m %H:%M}<br>Precio: %{y:.5f}<extra></extra>",
+            ))
+
+        if not sells.empty:
+            fig.add_trace(go.Scatter(
+                x=sells["timestamp_entrada"],
+                y=sells["precio_entrada"],
+                mode="markers",
+                name="Entrada SELL",
+                marker=dict(
+                    symbol="triangle-down", size=13,
+                    color=RED, line=dict(color="white", width=1),
+                ),
+                hovertemplate="<b>SELL</b> entrada<br>%{x|%d/%m %H:%M}<br>Precio: %{y:.5f}<extra></extra>",
+            ))
+
+        # ── Salidas (solo operaciones cerradas) ───────────────────────────────
+        closed = df_ops[df_ops["estado"] == "cerrada"].dropna(
+            subset=["timestamp_salida", "precio_salida"]
+        ).copy()
+
+        if not closed.empty:
+            _TOL = 0.00003  # tolerancia para identificar SL/TP exactos
+
+            def _exit_type(row) -> str:
+                ps = row["precio_salida"]
+                if not pd.isna(row["take_profit"]) and abs(ps - row["take_profit"]) <= _TOL:
+                    return "TP"
+                if not pd.isna(row["stop_loss"]) and abs(ps - row["stop_loss"]) <= _TOL:
+                    return "SL"
+                return "EOD"
+
+            closed["exit_type"] = closed.apply(_exit_type, axis=1)
+
+            for exit_type, symbol, color, label in [
+                ("TP",  "star",   GOLD,     "Salida TP"),
+                ("SL",  "x",      RED,      "Salida SL"),
+                ("EOD", "circle", "#888888", "Salida EOD"),
+            ]:
+                sub = closed[closed["exit_type"] == exit_type]
+                if sub.empty:
+                    continue
+                pnl_vals = sub["pnl"].apply(
+                    lambda p: f"{p:+.4f}" if not pd.isna(p) else "—"
+                ).values
+                fig.add_trace(go.Scatter(
+                    x=sub["timestamp_salida"],
+                    y=sub["precio_salida"],
+                    mode="markers",
+                    name=label,
+                    marker=dict(
+                        symbol=symbol,
+                        size=14 if exit_type == "TP" else 12,
+                        color=color,
+                        line=dict(color="white", width=1),
+                    ),
+                    customdata=pnl_vals,
+                    hovertemplate=(
+                        f"<b>{label}</b><br>%{{x|%d/%m %H:%M}}<br>"
+                        "Precio: %{y:.5f}<br>PnL: %{customdata}<extra></extra>"
+                    ),
+                ))
+
+            # ── Líneas entrada → salida ───────────────────────────────────────
+            for _, row in closed.iterrows():
+                line_color = EMERALD if (not pd.isna(row["pnl"]) and row["pnl"] >= 0) else RED
+                fig.add_shape(
+                    type="line",
+                    x0=row["timestamp_entrada"], y0=row["precio_entrada"],
+                    x1=row["timestamp_salida"],  y1=row["precio_salida"],
+                    line=dict(color=line_color, width=1, dash="dot"),
+                )
+
+    title_str = f"EUR/USD — {agent_id}" if agent_id else "EUR/USD"
+    fig.update_layout(
+        **_BASE,
+        title=dict(text=title_str, font=dict(color=GOLD, size=13), x=0),
+        xaxis=dict(
+            tickfont=dict(color=DIM),
+            gridcolor=BORDER, showgrid=True, gridwidth=0.4,
+            rangeslider=dict(visible=False),
+            type="date",
+        ),
+        yaxis=dict(
+            title=dict(text="EUR/USD", font=dict(color=DIM, size=10)),
+            tickfont=dict(color=DIM),
+            gridcolor=BORDER, showgrid=True, gridwidth=0.4,
+            tickformat=".5f",
+            side="right",
+        ),
+        legend=dict(
+            font=dict(color=DIM, size=9),
+            bgcolor=BG, bordercolor=BORDER,
+            x=0.01, y=0.99,
+        ),
+        height=500,
+    )
+    return fig
+
+
+# ── 7. Gauge de Win Rate ──────────────────────────────────────────────────────
 
 def win_rate_gauge(win_rate: float) -> go.Figure:
     color = EMERALD if win_rate >= 50 else (AMBER if win_rate >= 35 else RED)

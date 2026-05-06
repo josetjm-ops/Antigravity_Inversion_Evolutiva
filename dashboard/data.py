@@ -216,3 +216,59 @@ def fetch_available_generations() -> list[int]:
         return gens
     except Exception:
         return [1]
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def fetch_price_history(interval: str = "1h", range_str: str = "5d") -> pd.DataFrame:
+    """Velas OHLCV de EUR/USD desde Yahoo Finance, caché 5 min."""
+    try:
+        import sys, os
+        _root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        if _root not in sys.path:
+            sys.path.insert(0, _root)
+        from data.simulated_broker import get_price_history
+        candles = get_price_history(interval=interval, range_str=range_str)
+        if not candles:
+            return pd.DataFrame()
+        df = pd.DataFrame(candles)
+        df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
+        return df
+    except Exception:
+        return pd.DataFrame()
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def fetch_operations_by_agent(agent_id: str) -> pd.DataFrame:
+    """Operaciones BUY/SELL de un agente específico con niveles SL/TP."""
+    sql = """
+        SELECT o.id, o.accion,
+               o.precio_entrada::float                    AS precio_entrada,
+               o.precio_salida::float                     AS precio_salida,
+               o.timestamp_entrada, o.timestamp_salida,
+               o.pnl::float                               AS pnl,
+               o.estado,
+               (o.decision_riesgo->>'stop_loss')::float   AS stop_loss,
+               (o.decision_riesgo->>'take_profit')::float AS take_profit
+        FROM operaciones o
+        WHERE o.agente_id = %s
+          AND o.accion IN ('BUY', 'SELL')
+          AND o.precio_entrada IS NOT NULL
+        ORDER BY o.timestamp_entrada ASC
+    """
+    conn = _conn()
+    cur  = conn.cursor()
+    cur.execute(sql, (agent_id,))
+    rows = cur.fetchall()
+    conn.close()
+
+    cols = [
+        "id", "accion", "precio_entrada", "precio_salida",
+        "timestamp_entrada", "timestamp_salida", "pnl", "estado",
+        "stop_loss", "take_profit",
+    ]
+    df = _coerce(pd.DataFrame(rows, columns=cols))
+    for c in ["precio_entrada", "precio_salida", "pnl", "stop_loss", "take_profit"]:
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+    df["timestamp_entrada"] = pd.to_datetime(df["timestamp_entrada"], utc=True)
+    df["timestamp_salida"]  = pd.to_datetime(df["timestamp_salida"],  utc=True)
+    return df

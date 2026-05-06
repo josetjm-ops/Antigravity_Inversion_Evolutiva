@@ -21,6 +21,7 @@ Flujo operativo:
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 from typing import Literal
 
 import requests
@@ -92,3 +93,43 @@ def exit_price_for(result: PositionResult, stop_loss: float, take_profit: float,
     if result == "HIT_SL":
         return stop_loss
     return current_price  # cierre forzado EOD
+
+
+# ── Historial de precios OHLCV ────────────────────────────────────────────────
+
+def get_price_history(interval: str = "1h", range_str: str = "5d") -> list[dict]:
+    """
+    Devuelve velas OHLCV de EUR/USD desde Yahoo Finance.
+
+    interval  : "5m" | "15m" | "1h" | "1d"
+    range_str : "1d" | "5d"  | "1mo"
+    Retorna lista de dicts con claves: timestamp (UTC), open, high, low, close.
+    """
+    resp = requests.get(
+        _YAHOO_URL,
+        headers=_HEADERS,
+        params={"interval": interval, "range": range_str},
+        timeout=15,
+    )
+    resp.raise_for_status()
+    result = resp.json()["chart"]["result"][0]
+    timestamps = result["timestamp"]
+    quote      = result["indicators"]["quote"][0]
+
+    candles = []
+    for i, ts in enumerate(timestamps):
+        o = quote["open"][i]
+        h = quote["high"][i]
+        lo = quote["low"][i]
+        c = quote["close"][i]
+        if any(v is None for v in [o, h, lo, c]):
+            continue
+        candles.append({
+            "timestamp": datetime.fromtimestamp(ts, tz=timezone.utc),
+            "open":  float(o),
+            "high":  float(h),
+            "low":   float(lo),
+            "close": float(c),
+        })
+    log.debug("[SimBroker] %d velas %s/%s cargadas.", len(candles), interval, range_str)
+    return candles

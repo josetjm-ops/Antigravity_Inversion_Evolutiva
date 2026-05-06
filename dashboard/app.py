@@ -369,7 +369,7 @@ def _sidebar() -> tuple[list[str], list[int]]:
         </div>
         """, unsafe_allow_html=True)
 
-    return estados or ["activo"], gens or avail_gens
+    return estados or ["activo"], gens or avail_gens, n_logs
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -677,20 +677,113 @@ def _tab_operations(df_ops: pd.DataFrame) -> None:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# TAB 5 — PRECIO EUR/USD
+# ═══════════════════════════════════════════════════════════════════════════════
+
+_RANGE_MAP = {
+    "Hoy (5 min)":  ("5m",  "1d"),
+    "5 Días (1 h)": ("1h",  "5d"),
+    "1 Mes (1 día)": ("1d", "1mo"),
+}
+
+
+def _tab_price(df_all: pd.DataFrame) -> None:
+    col_rng, col_agt, _ = st.columns([1, 2, 3])
+
+    with col_rng:
+        st.markdown(
+            f'<span style="font-size:9px;color:{DIM};letter-spacing:1px;'
+            'text-transform:uppercase;">Rango</span>',
+            unsafe_allow_html=True,
+        )
+        range_label = st.selectbox(
+            "Rango", options=list(_RANGE_MAP.keys()),
+            index=1, label_visibility="collapsed",
+        )
+
+    interval, range_str = _RANGE_MAP[range_label]
+
+    agent_ids = ["— Sin agente —"] + sorted(df_all["id"].tolist())
+    with col_agt:
+        st.markdown(
+            f'<span style="font-size:9px;color:{DIM};letter-spacing:1px;'
+            'text-transform:uppercase;">Agente</span>',
+            unsafe_allow_html=True,
+        )
+        selected_agent = st.selectbox(
+            "Agente", options=agent_ids, index=0,
+            label_visibility="collapsed",
+        )
+
+    agent_id = selected_agent if selected_agent != "— Sin agente —" else ""
+
+    with st.spinner("Cargando datos de precio..."):
+        df_prices = D.fetch_price_history(interval=interval, range_str=range_str)
+
+    df_agent_ops = pd.DataFrame()
+    if agent_id:
+        with st.spinner(f"Cargando operaciones de {agent_id}..."):
+            df_agent_ops = D.fetch_operations_by_agent(agent_id)
+
+    st.plotly_chart(
+        C.price_chart_with_operations(df_prices, df_agent_ops, agent_id),
+        use_container_width=True,
+        config={"displayModeBar": True, "scrollZoom": True},
+    )
+
+    # Detalle de operaciones del agente seleccionado
+    if agent_id and not df_agent_ops.empty:
+        st.markdown("<br>", unsafe_allow_html=True)
+        st.markdown(
+            f'<span class="ie-label">Operaciones de {agent_id}</span>',
+            unsafe_allow_html=True,
+        )
+        disp = df_agent_ops.copy()
+        disp["timestamp_entrada"] = disp["timestamp_entrada"].dt.strftime("%m/%d %H:%M")
+        disp["timestamp_salida"]  = disp["timestamp_salida"].dt.strftime("%m/%d %H:%M").where(
+            disp["timestamp_salida"].notna(), other="abierta"
+        )
+        disp = disp[[
+            "id", "accion", "precio_entrada", "precio_salida",
+            "timestamp_entrada", "timestamp_salida", "pnl", "estado",
+        ]]
+        disp.columns = [
+            "ID", "Acción", "P. Entrada", "P. Salida",
+            "Entrada", "Salida", "PnL $", "Estado",
+        ]
+        st.dataframe(
+            disp, use_container_width=True,
+            height=min(320, len(disp) * 36 + 60),
+            column_config={
+                "PnL $":      st.column_config.NumberColumn(format="$%.4f"),
+                "P. Entrada": st.column_config.NumberColumn(format="%.5f"),
+                "P. Salida":  st.column_config.NumberColumn(format="%.5f"),
+            },
+            hide_index=True,
+        )
+    elif agent_id:
+        st.markdown(
+            f'<div class="ie-card ie-card-amber" style="font-size:12px;color:{DIM};">'
+            f'No hay operaciones registradas para <b>{agent_id}</b>.</div>',
+            unsafe_allow_html=True,
+        )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # MAIN
 # ═══════════════════════════════════════════════════════════════════════════════
 def main() -> None:
     _css()
     _header()
 
-    estados_f, gens_f = _sidebar()
+    estados_f, gens_f, n_logs = _sidebar()
 
     # Cargar datos
     with st.spinner("Sincronizando con Neon..."):
         df_filtered = D.fetch_agents(estados=estados_f, gens=gens_f)
         df_active   = D.fetch_agents(estados=["activo"])
         df_all      = D.fetch_agents()
-        df_logs     = D.fetch_judge_logs()
+        df_logs     = D.fetch_judge_logs(limit=n_logs)
         df_ops      = D.fetch_operations()
         df_hist     = D.fetch_ranking_history()
 
@@ -699,11 +792,12 @@ def main() -> None:
     st.markdown("<br>", unsafe_allow_html=True)
 
     # Tabs principales
-    tab_pop, tab_evo, tab_judge, tab_ops = st.tabs([
+    tab_pop, tab_evo, tab_judge, tab_ops, tab_price = st.tabs([
         "📊  Población",
         "🧬  Evolución",
         "⚖️  Agente Juez",
         "💹  Operaciones",
+        "📈  Precio",
     ])
 
     with tab_pop:
@@ -717,6 +811,9 @@ def main() -> None:
 
     with tab_ops:
         _tab_operations(df_ops)
+
+    with tab_price:
+        _tab_price(df_all)
 
 
 main()
