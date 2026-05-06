@@ -1,30 +1,36 @@
 """
-Scraper de calendario económico y noticias de alto impacto para EUR/USD.
-Fuentes: Investing.com (ForexFactory-compatible) y DailyForex.
-Devuelve eventos estructurados para que el Sub-agente B los procese con NLP.
+Cliente de noticias y calendario económico para EUR/USD.
+Fuente: Finnhub API (REST, sin scraping de HTML).
+
+Endpoints usados:
+  GET /news?category=forex          → titulares de noticias Forex en tiempo real
+  GET /calendar/economic            → calendario de eventos económicos (USD/EUR)
+
+Finnhub free tier: 60 llamadas/min, sin restricción comercial.
+Requiere: variable de entorno FINNHUB_API_KEY
 """
 
+from __future__ import annotations
+
 import logging
+import os
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import requests
-from bs4 import BeautifulSoup
 
 log = logging.getLogger(__name__)
 
-_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/124.0.0.0 Safari/537.36"
-    ),
-    "Accept-Language": "en-US,en;q=0.9",
-}
+_BASE_URL = "https://finnhub.io/api/v1"
+
+_EUR_COUNTRIES = {"EU", "DE", "FR", "IT", "ES", "NL", "BE", "AT", "FI", "PT", "GR", "IE"}
+_USD_COUNTRIES = {"US"}
 
 _IMPACT_MAP = {"high": "alto", "medium": "medio", "low": "bajo"}
 
+
+# ── Estructuras de datos (sin cambio de interfaz para los sub-agentes) ─────────
 
 @dataclass
 class EconomicEvent:
@@ -35,7 +41,7 @@ class EconomicEvent:
     actual: Optional[str]
     previo: Optional[str]
     estimado: Optional[str]
-    fuente: str
+    fuente: str = "finnhub"
 
 
 @dataclass
@@ -51,98 +57,100 @@ class MacroSnapshot:
         return len(self.eventos_alto_impacto()) > 0
 
 
-def _get(url: str, timeout: int = 15) -> BeautifulSoup:
-    resp = requests.get(url, headers=_HEADERS, timeout=timeout)
+# ── Helpers ────────────────────────────────────────────────────────────────────
+
+def _api_key() -> str:
+    return os.getenv("FINNHUB_API_KEY", "")
+
+
+def _get(endpoint: str, params: dict, timeout: int = 10) -> dict | list:
+    key = _api_key()
+    if not key:
+        raise RuntimeError("FINNHUB_API_KEY no configurada")
+    params["token"] = key
+    resp = requests.get(f"{_BASE_URL}{endpoint}", params=params, timeout=timeout)
     resp.raise_for_status()
-    return BeautifulSoup(resp.text, "lxml")
+    return resp.json()
 
 
-def scrape_investing_calendar() -> list[EconomicEvent]:
-    """
-    Parsea el calendario económico de Investing.com vía endpoint público.
-    Filtra eventos que afectan EUR o USD.
-    """
-    url = "https://www.investing.com/economic-calendar/"
-    events: list[EconomicEvent] = []
+# ── Noticias Forex ─────────────────────────────────────────────────────────────
+
+def fetch_forex_news(limit: int = 10) -> list[str]:
+    """Titulares de noticias Forex en tiempo real desde Finnhub."""
     try:
-        soup = _get(url)
-        rows = soup.select("tr.js-event-item")
-        for row in rows:
-            currency = row.get("data-country", "")
-            if currency not in ("eu", "us"):
-                continue
-
-            impact_el = row.select_one("td.sentiment span")
-            impact_raw = impact_el.get("title", "low").lower() if impact_el else "low"
-            impact = _IMPACT_MAP.get(impact_raw, "bajo")
-
-            title_el = row.select_one("td.event a")
-            title = title_el.get_text(strip=True) if title_el else "N/A"
-
-            time_el = row.select_one("td.time")
-            time_str = time_el.get_text(strip=True) if time_el else None
-
-            actual_el = row.select_one("td.actual")
-            prev_el = row.select_one("td.prev")
-            est_el = row.select_one("td.forecast")
-
-            events.append(EconomicEvent(
-                titulo=title,
-                moneda="EUR" if currency == "eu" else "USD",
-                impacto=impact,
-                hora_utc=_parse_time(time_str),
-                actual=actual_el.get_text(strip=True) if actual_el else None,
-                previo=prev_el.get_text(strip=True) if prev_el else None,
-                estimado=est_el.get_text(strip=True) if est_el else None,
-                fuente="investing.com",
-            ))
+        articles = _get("/news", {"category": "forex"})
+        headlines = [a["headline"] for a in articles[:limit] if a.get("headline")]
+        log.info("[MacroScraper] %d titulares forex obtenidos desde Finnhub", len(headlines))
+        return headlines
+    except RuntimeError:
+        log.warning("[MacroScraper] FINNHUB_API_KEY no configurada — titulares vacíos")
+        return []
     except Exception as e:
-        log.warning("[MacroScraper] investing.com no accesible: %s", e)
+        log.warning("[MacroScraper] Finnhub /news no disponible: %s", e)
+        return []
+
+
+# ── Calendario económico ───────────────────────────────────────────────────────
+
+def fetch_economic_calendar(ventana_horas: int = 4) -> list[EconomicEvent]:
+    """
+    Eventos del calendario económico filtrados para USD y EUR (últimas 1h + próximas ventana_horas).
+    """
+    now = datetime.now(timezone.utc)
+    date_from = (now - timedelta(hours=1)).strftime("%Y-%m-%d")
+    date_to   = (now + timedelta(hours=ventana_horas)).strftime("%Y-%m-%d")
+
+    try:
+        data = _get("/calendar/economic", {"from": date_from, "to": date_to})
+        items = data.get("economicCalendar", []) if isinstance(data, dict) else []
+    except RuntimeError:
+        log.warning("[MacroScraper] FINNHUB_API_KEY no configurada — calendario vacío")
+        return []
+    except Exception as e:
+        log.warning("[MacroScraper] Finnhub /calendar/economic no disponible: %s", e)
+        return []
+
+    events: list[EconomicEvent] = []
+    for item in items:
+        country = (item.get("country") or "").upper()
+        if country not in _EUR_COUNTRIES and country not in _USD_COUNTRIES:
+            continue
+
+        impact = _IMPACT_MAP.get((item.get("impact") or "low").lower(), "bajo")
+        moneda = "USD" if country in _USD_COUNTRIES else "EUR"
+
+        hora_utc: Optional[datetime] = None
+        time_str = item.get("time", "")
+        if time_str:
+            for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S"):
+                try:
+                    hora_utc = datetime.strptime(time_str[:19], fmt).replace(tzinfo=timezone.utc)
+                    break
+                except ValueError:
+                    continue
+
+        events.append(EconomicEvent(
+            titulo=item.get("event", "N/A"),
+            moneda=moneda,
+            impacto=impact,
+            hora_utc=hora_utc,
+            actual=item.get("actual"),
+            previo=item.get("prev"),
+            estimado=item.get("estimate"),
+        ))
+
+    log.info("[MacroScraper] %d eventos económicos EUR/USD obtenidos (ventana=%dh)", len(events), ventana_horas)
     return events
 
 
-def scrape_dailyforex_news() -> list[str]:
-    """Extrae titulares recientes de DailyForex relacionados con EUR/USD."""
-    url = "https://www.dailyforex.com/forex-news/eurusd"
-    headlines: list[str] = []
-    try:
-        soup = _get(url)
-        for el in soup.select("h3.article-title, h2.article-title")[:10]:
-            text = el.get_text(strip=True)
-            if text:
-                headlines.append(text)
-    except Exception as e:
-        log.warning("[MacroScraper] dailyforex.com no accesible: %s", e)
-    return headlines
-
-
-def _parse_time(time_str: Optional[str]) -> Optional[datetime]:
-    if not time_str:
-        return None
-    try:
-        now = datetime.now(timezone.utc)
-        t = datetime.strptime(time_str, "%H:%M")
-        return now.replace(hour=t.hour, minute=t.minute, second=0, microsecond=0)
-    except ValueError:
-        return None
-
+# ── Punto de entrada principal ─────────────────────────────────────────────────
 
 def fetch_macro_snapshot(ventana_horas: int = 4) -> MacroSnapshot:
     """
-    Punto de entrada principal para el Sub-agente B.
-    Retorna un MacroSnapshot con eventos y titulares actualizados,
-    filtrado a los que ocurrieron dentro de la ventana de tiempo indicada.
+    Retorna MacroSnapshot con noticias y calendario económico para los sub-agentes.
+    Si FINNHUB_API_KEY no está configurada, retorna snapshot vacío (agentes emiten HOLD macro).
     """
     snapshot = MacroSnapshot(timestamp=datetime.now(timezone.utc))
-    snapshot.eventos = scrape_investing_calendar()
-    snapshot.titulares = scrape_dailyforex_news()
-
-    if ventana_horas > 0 and snapshot.eventos:
-        window = timedelta(hours=ventana_horas)
-        now = snapshot.timestamp
-        snapshot.eventos = [
-            e for e in snapshot.eventos
-            if e.hora_utc is None or abs((now - e.hora_utc).total_seconds()) <= window.total_seconds()
-        ]
-
+    snapshot.titulares = fetch_forex_news(limit=10)
+    snapshot.eventos   = fetch_economic_calendar(ventana_horas=ventana_horas)
     return snapshot

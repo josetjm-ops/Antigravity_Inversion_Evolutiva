@@ -16,6 +16,7 @@ jobs:
     env:
       DATABASE_URL:     ${{ secrets.DATABASE_URL }}
       DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+      FINNHUB_API_KEY:  ${{ secrets.FINNHUB_API_KEY }}
       LOG_LEVEL:        "INFO"
 
     steps:
@@ -37,11 +38,16 @@ jobs:
           [ -z "$DATABASE_URL" ]     && MISSING="$MISSING DATABASE_URL"
           [ -z "$DEEPSEEK_API_KEY" ] && MISSING="$MISSING DEEPSEEK_API_KEY"
           if [ -n "$MISSING" ]; then
-            echo "❌ Secrets faltantes:$MISSING"
+            echo "❌ Secrets CRÍTICOS faltantes:$MISSING"
             echo "   Configura en: Settings → Secrets and variables → Actions"
             exit 1
           fi
-          echo "✅ Secrets OK: DATABASE_URL y DEEPSEEK_API_KEY configurados"
+          echo "✅ Secrets críticos OK: DATABASE_URL y DEEPSEEK_API_KEY configurados"
+          if [ -z "$FINNHUB_API_KEY" ]; then
+            echo "⚠️  FINNHUB_API_KEY no configurada — Sub-agente Macro operará sin datos de noticias"
+          else
+            echo "✅ FINNHUB_API_KEY configurada"
+          fi
 
       - name: "Verificar conexión a base de datos (Neon PostgreSQL)"
         run: |
@@ -110,6 +116,28 @@ jobs:
               print('✅ DeepSeek API OK')
           except Exception as e:
               print(f'❌ DeepSeek API error: {e}')
+              sys.exit(1)
+          "
+
+      - name: "Verificar Finnhub API (noticias Forex — opcional)"
+        run: |
+          python -c "
+          import os, requests, sys
+          key = os.environ.get('FINNHUB_API_KEY','')
+          if not key:
+              print('⚠️  FINNHUB_API_KEY no configurada — omitiendo verificación')
+              sys.exit(0)
+          try:
+              r = requests.get(
+                  'https://finnhub.io/api/v1/news',
+                  params={'category': 'forex', 'token': key},
+                  timeout=10,
+              )
+              r.raise_for_status()
+              n = len(r.json())
+              print(f'✅ Finnhub API OK — {n} noticias forex disponibles')
+          except Exception as e:
+              print(f'❌ Finnhub API error: {e}')
               sys.exit(1)
           "
 
