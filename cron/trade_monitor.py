@@ -1,18 +1,19 @@
 """
-Monitor de trades abiertos en OANDA.
+Monitor de posiciones abiertas — broker simulado.
 
-Consulta OANDA por cada operación con estado='abierta' y oanda_trade_id registrado.
-Cuando OANDA reporta el trade como CLOSED (SL o TP tocado), sincroniza el resultado
-en PostgreSQL actualizando la tabla operaciones y el capital del agente.
+Obtiene el precio actual de EUR/USD desde Yahoo Finance (gratuito, sin límite)
+y verifica si alguna posición abierta alcanzó su Stop Loss o Take Profit.
+Cuando se activa SL o TP, cierra la posición al precio exacto del nivel
+y actualiza el P&L y capital del agente en PostgreSQL.
 
-Estrategia intraday: --force-close-all cierra todas las posiciones abiertas al
-final del día (llamado por judge_daily.yml antes del ciclo evolutivo) para que
-ningún agente llegue a la evaluación con trades pendientes.
+Estrategia intraday: --force-close-all cierra todas las posiciones abiertas
+al precio de mercado al final del día (llamado por judge_daily.yml antes del
+ciclo evolutivo) para que ningún agente llegue a evaluación con trades pendientes.
 
 Modos de operación:
-  --run-once       : sincroniza trades cerrados una vez y termina (GitHub Actions)
-  --force-close-all: cierra TODAS las posiciones abiertas (EOD intraday)
-  --daemon         : corre continuamente cada TRADE_MONITOR_POLL_SECONDS segundos
+  --run-once       : verifica SL/TP una vez y termina (GitHub Actions cada 15 min)
+  --force-close-all: cierra TODAS las posiciones al precio actual (EOD intraday)
+  --daemon         : bucle continuo cada TRADE_MONITOR_POLL_SECONDS segundos
 
 Uso:
   python -m cron.trade_monitor --run-once
@@ -23,7 +24,6 @@ Uso:
 from __future__ import annotations
 
 import argparse
-import json
 import logging
 import os
 import sys
@@ -48,149 +48,153 @@ if str(ROOT) not in sys.path:
 _POLL_SECONDS = int(os.getenv("TRADE_MONITOR_POLL_SECONDS", "60"))
 
 
-# ── Guard: verificar credenciales OANDA ──────────────────────────────────────
-
-def _oanda_configured() -> bool:
-    """Retorna False si faltan las credenciales OANDA en el entorno."""
-    account_id = os.getenv("OANDA_ACCOUNT_ID", "").strip()
-    token      = os.getenv("OANDA_API_TOKEN", "").strip()
-    if not account_id or not token:
-        log.warning(
-            "[TradeMonitor] OANDA_ACCOUNT_ID u OANDA_API_TOKEN no configurados. "
-            "Configura los secrets en GitHub Actions y vuelve a ejecutar."
-        )
-        return False
-    return True
-
-
-# ── Lógica de sincronización ──────────────────────────────────────────────────
+# ── Sincronización SL/TP ──────────────────────────────────────────────────────
 
 def sync_once() -> dict:
     """
-    Revisa todas las operaciones abiertas con oanda_trade_id y sincroniza
-    las que OANDA ya cerró (SL o TP alcanzado).
-    Retorna resumen: {'checked': N, 'synced': N, 'errors': N}
+    Obtiene el precio actual de EUR/USD y cierra todas las posiciones
+    que hayan alcanzado su SL o TP.
+    Retorna: {'checked': N, 'synced': N, 'errors': N}
     """
-    if not _oanda_configured():
-        return {"checked": 0, "synced": 0, "errors": 0}
-
-    from data import oanda_client
+    from data.simulated_broker import get_current_price, check_sl_tp, exit_price_for
     from agents.investor_agent import InvestorAgent
     from db.connection import get_conn, get_dict_cursor
 
-    # 1. Operaciones abiertas en nuestra DB que tienen trade en OANDA
+    # 1. Obtener posiciones abiertas con SL/TP definidos
     with get_conn() as conn:
         cur = get_dict_cursor(conn)
         cur.execute(
             """
-            SELECT o.id, o.oanda_trade_id, o.agente_id, o.capital_usado
+            SELECT
+                o.id,
+                o.agente_id,
+                o.accion,
+                o.precio_entrada::float          AS precio_entrada,
+                o.capital_usado::float            AS capital_usado,
+                (o.decision_riesgo->>'stop_loss')::float   AS stop_loss,
+                (o.decision_riesgo->>'take_profit')::float AS take_profit
             FROM operaciones o
             WHERE o.estado = 'abierta'
-              AND o.oanda_trade_id IS NOT NULL
+              AND o.accion IN ('BUY', 'SELL')
+              AND o.precio_entrada IS NOT NULL
+              AND o.decision_riesgo->>'stop_loss'  IS NOT NULL
+              AND o.decision_riesgo->>'take_profit' IS NOT NULL
             ORDER BY o.timestamp_entrada ASC
             """
         )
         open_ops = [dict(row) for row in cur.fetchall()]
 
     if not open_ops:
-        log.info("[TradeMonitor] Sin operaciones abiertas con OANDA trade_id.")
+        log.info("[TradeMonitor] Sin posiciones abiertas para monitorear.")
         return {"checked": 0, "synced": 0, "errors": 0}
 
-    log.info("[TradeMonitor] Revisando %d operaciones abiertas en OANDA...", len(open_ops))
+    # 2. Precio actual de mercado (1 sola llamada para todas las posiciones)
+    try:
+        current_price = get_current_price()
+        log.info(
+            "[TradeMonitor] EUR/USD = %.5f — revisando %d posiciones abiertas.",
+            current_price, len(open_ops),
+        )
+    except Exception as exc:
+        log.error("[TradeMonitor] No se pudo obtener precio de mercado: %s", exc)
+        return {"checked": 0, "synced": 0, "errors": 1}
+
     synced = errors = 0
 
     for op in open_ops:
-        trade_id = op["oanda_trade_id"]
-        agent_id = op["agente_id"]
-        op_id    = op["id"]
-
         try:
-            response   = oanda_client.get_trade(trade_id)
-            trade_data = response.get("trade", {})
-            state      = trade_data.get("state", "OPEN")
+            resultado = check_sl_tp(
+                action=op["accion"],
+                entry_price=op["precio_entrada"],
+                stop_loss=op["stop_loss"],
+                take_profit=op["take_profit"],
+                current_price=current_price,
+            )
 
-            if state != "CLOSED":
-                log.debug("[TradeMonitor] Trade %s aún abierto (agent=%s)", trade_id, agent_id)
+            if resultado == "OPEN":
+                log.debug(
+                    "[TradeMonitor] Op %d (%s) abierta — precio=%.5f SL=%.5f TP=%.5f",
+                    op["id"], op["accion"], current_price, op["stop_loss"], op["take_profit"],
+                )
                 continue
 
-            # Trade cerrado por OANDA (SL o TP)
-            realized_pl = float(trade_data.get("realizedPL", 0))
-            close_price = float(trade_data.get("averageClosePrice", 0))
+            # Posición cerrada por SL o TP
+            precio_salida = exit_price_for(
+                resultado, op["stop_loss"], op["take_profit"], current_price
+            )
 
-            # Capital actual del agente (fuente de verdad para actualizar)
             with get_conn() as conn:
                 cur = conn.cursor()
                 cur.execute(
                     "SELECT capital_actual FROM agentes WHERE id = %s",
-                    (agent_id,),
+                    (op["agente_id"],),
                 )
                 row = cur.fetchone()
                 capital_actual = float(row[0]) if row else 10.0
 
-            agent  = InvestorAgent(agent_id, {})
-            result = agent.close_operation_from_oanda(
-                op_id=op_id,
-                oanda_realized_pl=realized_pl,
-                close_price=close_price,
+            agent  = InvestorAgent(op["agente_id"], {})
+            result = agent.close_operation(
+                op_id=op["id"],
+                precio_salida=precio_salida,
                 capital_disponible=capital_actual,
             )
 
             log.info(
-                "[TradeMonitor] Sincronizado: op_id=%d agent=%s pnl=%.4f capital=%.4f",
-                op_id, agent_id,
-                result.get("pnl", 0),
-                result.get("nuevo_capital", capital_actual),
+                "[TradeMonitor] Op %d %s → %s: salida=%.5f pnl=%.4f capital=%.4f",
+                op["id"], op["accion"], resultado,
+                precio_salida, result.get("pnl", 0), result.get("nuevo_capital", 0),
             )
             synced += 1
 
         except Exception as exc:
-            log.error(
-                "[TradeMonitor] Error procesando op_id=%d trade=%s: %s",
-                op_id, trade_id, exc,
-            )
+            log.error("[TradeMonitor] Error procesando op %d: %s", op["id"], exc)
             errors += 1
 
     log.info(
-        "[TradeMonitor] Ciclo completado — revisadas=%d sincronizadas=%d errores=%d",
+        "[TradeMonitor] Ciclo completado — revisadas=%d cerradas=%d errores=%d",
         len(open_ops), synced, errors,
     )
     return {"checked": len(open_ops), "synced": synced, "errors": errors}
 
 
-# ── Cierre forzado EOD (intraday) ────────────────────────────────────────────
+# ── Cierre forzado EOD (intraday) ─────────────────────────────────────────────
 
 def force_close_all() -> dict:
     """
-    Cierra TODAS las posiciones abiertas en OANDA a precio de mercado.
-    Se llama al final del día (16:45 Bogotá) antes de que el Juez evalúe,
-    garantizando que la estrategia sea completamente intraday.
-
-    Para cada trade cerrado manualmente, sincroniza el P&L real de OANDA
-    con nuestra base de datos igual que sync_once().
+    Cierra TODAS las posiciones abiertas al precio actual de mercado.
+    Se llama antes del ciclo evolutivo del Juez (16:45 Bogotá) para garantizar
+    que todos los agentes tengan sus resultados del día completamente liquidados.
     """
-    from data import oanda_client
+    from data.simulated_broker import get_current_price
     from agents.investor_agent import InvestorAgent
     from db.connection import get_conn, get_dict_cursor
 
-    if not _oanda_configured():
-        return {"closed": 0, "errors": 0}
+    log.info("[TradeMonitor] EOD — Iniciando cierre intraday de todas las posiciones...")
 
-    log.info("[TradeMonitor] EOD — Cerrando todas las posiciones abiertas (intraday)...")
+    # Precio de cierre EOD
+    try:
+        current_price = get_current_price()
+        log.info("[TradeMonitor] EOD — Precio de cierre: %.5f", current_price)
+    except Exception as exc:
+        log.error("[TradeMonitor] EOD — No se pudo obtener precio: %s", exc)
+        return {"closed": 0, "errors": 1}
 
-    # Operaciones abiertas con trade_id en OANDA
+    # Posiciones abiertas con BUY/SELL y precio de entrada
     with get_conn() as conn:
         cur = get_dict_cursor(conn)
         cur.execute(
             """
-            SELECT o.id, o.oanda_trade_id, o.agente_id, o.capital_usado
+            SELECT o.id, o.agente_id, o.accion,
+                   o.precio_entrada::float AS precio_entrada,
+                   o.capital_usado::float  AS capital_usado
             FROM operaciones o
             WHERE o.estado = 'abierta'
-              AND o.oanda_trade_id IS NOT NULL
+              AND o.accion IN ('BUY', 'SELL')
             """
         )
         open_ops = [dict(row) for row in cur.fetchall()]
 
-    # Operaciones abiertas sin trade OANDA (se marcan canceladas)
+    # Marcar como canceladas las operaciones sin precio de entrada (HOLD residuales)
     with get_conn() as conn:
         cur = conn.cursor()
         cur.execute(
@@ -198,67 +202,45 @@ def force_close_all() -> dict:
             UPDATE operaciones
             SET estado = 'cancelada'
             WHERE estado = 'abierta'
-              AND oanda_trade_id IS NULL
+              AND (accion = 'HOLD' OR precio_entrada IS NULL)
             """
         )
         orphaned = cur.rowcount
-        if orphaned:
-            log.info("[TradeMonitor] EOD — %d operaciones sin trade_id marcadas canceladas.", orphaned)
+
+    if orphaned:
+        log.info("[TradeMonitor] EOD — %d operaciones sin precio marcadas canceladas.", orphaned)
 
     if not open_ops:
-        log.info("[TradeMonitor] EOD — Sin posiciones abiertas en OANDA.")
+        log.info("[TradeMonitor] EOD — Sin posiciones abiertas para cerrar.")
         return {"closed": 0, "errors": 0}
 
     closed = errors = 0
 
     for op in open_ops:
-        trade_id = op["oanda_trade_id"]
-        agent_id = op["agente_id"]
-        op_id    = op["id"]
-
         try:
-            # Verificar estado antes de intentar cerrar
-            response   = oanda_client.get_trade(trade_id)
-            trade_data = response.get("trade", {})
-            state      = trade_data.get("state", "OPEN")
-
-            if state == "CLOSED":
-                # Ya cerrado por SL/TP, solo sincronizar
-                realized_pl = float(trade_data.get("realizedPL", 0))
-                close_price = float(trade_data.get("averageClosePrice", 0))
-            else:
-                # Cerrar manualmente a precio de mercado
-                result      = oanda_client.close_trade(trade_id)
-                realized_pl = result["realized_pl"]
-                close_price = result["close_price"]
-                log.info(
-                    "[TradeMonitor] EOD — Trade %s cerrado manualmente: pl=%.4f precio=%.5f",
-                    trade_id, realized_pl, close_price,
-                )
-
-            # Sincronizar en DB
             with get_conn() as conn:
                 cur = conn.cursor()
                 cur.execute(
-                    "SELECT capital_actual FROM agentes WHERE id = %s", (agent_id,)
+                    "SELECT capital_actual FROM agentes WHERE id = %s",
+                    (op["agente_id"],),
                 )
-                row = cur.fetchone()
+                row        = cur.fetchone()
                 capital_actual = float(row[0]) if row else 10.0
 
-            agent = InvestorAgent(agent_id, {})
-            agent.close_operation_from_oanda(
-                op_id=op_id,
-                oanda_realized_pl=realized_pl,
-                close_price=close_price,
+            agent  = InvestorAgent(op["agente_id"], {})
+            result = agent.close_operation(
+                op_id=op["id"],
+                precio_salida=current_price,
                 capital_disponible=capital_actual,
+            )
+            log.info(
+                "[TradeMonitor] EOD — Op %d cerrada: accion=%s pnl=%.4f",
+                op["id"], op["accion"], result.get("pnl", 0),
             )
             closed += 1
 
         except Exception as exc:
-            log.error(
-                "[TradeMonitor] EOD — Error cerrando op_id=%d trade=%s: %s",
-                op_id, trade_id, exc,
-            )
+            log.error("[TradeMonitor] EOD — Error cerrando op %d: %s", op["id"], exc)
             errors += 1
 
     log.info(
@@ -267,49 +249,43 @@ def force_close_all() -> dict:
     return {"closed": closed, "errors": errors}
 
 
-# ── Modos de ejecución ────────────────────────────────────────────────────────
+# ── Modo demonio ──────────────────────────────────────────────────────────────
 
 def run_daemon() -> None:
-    """Ejecuta sync_once() en bucle cada _POLL_SECONDS segundos."""
-    log.info(
-        "[TradeMonitor] Modo demonio — polling cada %d segundos.", _POLL_SECONDS
-    )
+    log.info("[TradeMonitor] Modo demonio — polling cada %ds.", _POLL_SECONDS)
     while True:
         try:
             sync_once()
         except Exception as exc:
-            log.error("[TradeMonitor] Error inesperado en ciclo: %s", exc)
+            log.error("[TradeMonitor] Error inesperado: %s", exc)
         time.sleep(_POLL_SECONDS)
 
 
+# ── Punto de entrada ──────────────────────────────────────────────────────────
+
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Monitor de trades OANDA — INVERSIÓN EVOLUTIVA"
+        description="Monitor de posiciones simuladas — INVERSIÓN EVOLUTIVA"
     )
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument(
-        "--run-once",
-        action="store_true",
-        help="Sincroniza trades cerrados una vez y termina (GitHub Actions).",
+        "--run-once", action="store_true",
+        help="Verifica SL/TP una vez y termina (GitHub Actions).",
     )
     group.add_argument(
-        "--force-close-all",
-        action="store_true",
-        help="Cierra TODAS las posiciones abiertas (EOD intraday, antes del Juez).",
+        "--force-close-all", action="store_true",
+        help="Cierra todas las posiciones al precio actual (EOD intraday).",
     )
     group.add_argument(
-        "--daemon",
-        action="store_true",
-        help=f"Bucle continuo cada {_POLL_SECONDS}s (Railway worker).",
+        "--daemon", action="store_true",
+        help=f"Bucle continuo cada {_POLL_SECONDS}s.",
     )
     args = parser.parse_args()
 
     if args.run_once:
-        log.info("[TradeMonitor] Modo: one-shot")
         result = sync_once()
         sys.exit(0 if result["errors"] == 0 else 1)
     elif args.force_close_all:
-        log.info("[TradeMonitor] Modo: force-close-all (EOD intraday)")
         result = force_close_all()
         sys.exit(0 if result["errors"] == 0 else 1)
     else:

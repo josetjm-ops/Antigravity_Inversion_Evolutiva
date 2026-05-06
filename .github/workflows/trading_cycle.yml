@@ -22,10 +22,6 @@ jobs:
       DATABASE_URL:           ${{ secrets.DATABASE_URL }}
       DEEPSEEK_API_KEY:       ${{ secrets.DEEPSEEK_API_KEY }}
       ALPHA_VANTAGE_API_KEY:  ${{ secrets.ALPHA_VANTAGE_API_KEY }}
-      OANDA_ACCOUNT_ID:       ${{ secrets.OANDA_ACCOUNT_ID }}
-      OANDA_API_TOKEN:        ${{ secrets.OANDA_API_TOKEN }}
-      OANDA_ENVIRONMENT:      "practice"
-      OANDA_UNITS_PER_TRADE:  "1000"
       JUDGE_TIMEZONE:         "America/Bogota"
       LOG_LEVEL:              "INFO"
       ENVIRONMENT:            "production"
@@ -49,15 +45,6 @@ jobs:
           from db.connection import health_check
           ok = health_check()
           print('DB health check:', 'PASS' if ok else 'FAIL')
-          exit(0 if ok else 1)
-          "
-
-      - name: "Health check - OANDA"
-        run: |
-          python -c "
-          from data.oanda_client import health_check
-          ok = health_check()
-          print('OANDA health check:', 'PASS' if ok else 'FAIL')
           exit(0 if ok else 1)
           "
 

@@ -26,7 +26,6 @@ Uso:
 from __future__ import annotations
 
 import argparse
-import json
 import logging
 import os
 import sys
@@ -103,18 +102,6 @@ def _fetch_shared_market_data():
 
 # ── Runner principal ──────────────────────────────────────────────────────────
 
-def _oanda_configured() -> bool:
-    account_id = os.getenv("OANDA_ACCOUNT_ID", "").strip()
-    token      = os.getenv("OANDA_API_TOKEN", "").strip()
-    if not account_id or not token:
-        log.warning(
-            "[TradingRunner] OANDA_ACCOUNT_ID u OANDA_API_TOKEN no configurados. "
-            "Configura los secrets en GitHub Actions para activar el trading."
-        )
-        return False
-    return True
-
-
 def run_all_agents() -> dict:
     """
     Ejecuta el ciclo de trading para todos los agentes activos.
@@ -122,9 +109,6 @@ def run_all_agents() -> dict:
     """
     from agents.investor_agent import InvestorAgent
     from db.connection import health_check
-
-    if not _oanda_configured():
-        return {"status": "ok", "total": 0, "results": [], "reason": "OANDA not configured"}
 
     if not health_check():
         log.error("[TradingRunner] DB health check fallido. Abortando.")
@@ -204,7 +188,7 @@ def main() -> None:
         required=True,
         help="Ejecuta el ciclo de trading inmediatamente y termina.",
     )
-    args = parser.parse_args()
+    parser.parse_args()
 
     result = run_all_agents()
     sys.exit(0 if result.get("status") == "ok" else 1)

@@ -12,12 +12,9 @@ jobs:
     timeout-minutes: 5
 
     env:
-      DATABASE_URL:       ${{ secrets.DATABASE_URL }}
-      OANDA_ACCOUNT_ID:   ${{ secrets.OANDA_ACCOUNT_ID }}
-      OANDA_API_TOKEN:    ${{ secrets.OANDA_API_TOKEN }}
-      OANDA_ENVIRONMENT:  "practice"
-      LOG_LEVEL:          "INFO"
-      ENVIRONMENT:        "production"
+      DATABASE_URL:  ${{ secrets.DATABASE_URL }}
+      LOG_LEVEL:     "INFO"
+      ENVIRONMENT:   "production"
 
     steps:
       - name: "Checkout del repositorio"
