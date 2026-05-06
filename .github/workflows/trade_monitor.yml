@@ -2,7 +2,7 @@ name: "Monitor de Trades (SL/TP + Nuevas Posiciones)"
 
 "on":
   schedule:
-    - cron: "*/15 8-22 * * 1-5"   # cada 15 min, 8:00-22:00 UTC, lunes a viernes
+    - cron: "*/15 7-22 * * 1-5"   # cada 15 min, 7:00-22:00 UTC (2:00am-5:00pm Bogotá), lunes a viernes
   workflow_dispatch: {}             # disparo manual para pruebas
 
 jobs:

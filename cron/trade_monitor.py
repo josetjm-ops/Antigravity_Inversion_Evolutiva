@@ -54,7 +54,7 @@ if str(ROOT) not in sys.path:
 
 _POLL_SECONDS        = int(os.getenv("TRADE_MONITOR_POLL_SECONDS", "60"))
 _MIN_CAPITAL         = float(os.getenv("MIN_CAPITAL_TO_TRADE", "2.0"))
-_TRADING_START_UTC   = int(os.getenv("TRADING_START_UTC",   "14"))   # 9:00 am Bogotá
+_TRADING_START_UTC   = int(os.getenv("TRADING_START_UTC",   "7"))    # 2:00 am Bogotá
 _TRADING_CUTOFF_UTC  = int(os.getenv("TRADING_CUTOFF_UTC",  "20"))   # 3:00 pm Bogotá
 
 
