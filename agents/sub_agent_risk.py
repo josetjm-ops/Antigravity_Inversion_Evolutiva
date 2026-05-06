@@ -8,10 +8,13 @@ Calcula stop-loss, take-profit y tamaño de posición.
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass
 from typing import Any
 
 from agents.base_agent import BaseAgent
+
+log = logging.getLogger(__name__)
 
 _SYSTEM_PROMPT = """Eres el Sub-agente de Riesgo y Decisión Final de un sistema de trading evolutivo EUR/USD.
 Recibes señales de dos analistas (Técnico y Macro) y debes tomar la decisión óptima de trading.
@@ -54,8 +57,8 @@ class SubAgentRisk(BaseAgent):
         accion: str,
         capital: float,
     ) -> tuple[float | None, float | None]:
-        sl_pct = float(self.params["stop_loss_pct"])
-        tp_pct = float(self.params["take_profit_pct"])
+        sl_pct = float(self.params.get("stop_loss_pct", 0.02))
+        tp_pct = float(self.params.get("take_profit_pct", 0.04))
         if accion == "BUY":
             return round(precio * (1 - sl_pct), 5), round(precio * (1 + tp_pct), 5)
         if accion == "SELL":
@@ -69,9 +72,9 @@ class SubAgentRisk(BaseAgent):
         rec_tec: str,
         rec_mac: str,
     ) -> tuple[str, float]:
-        peso_tec = float(self.params["peso_tecnico_vs_macro"])
+        peso_tec = float(self.params.get("peso_tecnico_vs_macro", 0.55))
         peso_mac = 1.0 - peso_tec
-        umbral_min = float(self.params["umbral_confianza_minima"])
+        umbral_min = float(self.params.get("umbral_confianza_minima", 0.60))
 
         # Si las señales concuerdan: promediar ponderado
         if rec_tec == rec_mac:
@@ -100,10 +103,26 @@ class SubAgentRisk(BaseAgent):
         conf_mac = float(senal_macro.get("confianza", 0.5))
         precio_actual = float(senal_tecnico.get("indicadores", {}).get("precio_actual", 0))
 
+        if precio_actual <= 0:
+            log.warning("[SubAgentRisk] precio_actual=%s inválido — emitiendo HOLD preventivo.", precio_actual)
+            return RiskDecision(
+                agente_id=self.agent_id,
+                accion_final="HOLD",
+                confianza_final=0.30,
+                stop_loss=None,
+                take_profit=None,
+                capital_a_usar=0.0,
+                razonamiento="precio_actual inválido o cero — HOLD preventivo",
+                senal_tecnico=senal_tecnico,
+                senal_macro=senal_macro,
+                confianza_tecnica=conf_tec,
+                confianza_macro=conf_mac,
+            )
+
         accion_prelim, conf_prelim = self._blend_confidence(conf_tec, conf_mac, rec_tec, rec_mac)
 
-        umbral_min = float(self.params["umbral_confianza_minima"])
-        capital_pct = float(self.params["capital_por_operacion_pct"])
+        umbral_min = float(self.params.get("umbral_confianza_minima", 0.60))
+        capital_pct = float(self.params.get("capital_por_operacion_pct", 0.50))
         capital_uso = round(capital_disponible * capital_pct, 4)
 
         # Bloquear si la confianza no alcanza el umbral mínimo del agente
@@ -143,8 +162,8 @@ class SubAgentRisk(BaseAgent):
                     take_profit = float(parsed["take_profit"])
                 if parsed.get("capital_a_usar"):
                     capital_uso = float(parsed["capital_a_usar"])
-            except Exception:
-                pass
+            except Exception as e:
+                log.warning("[SubAgentRisk] LLM no disponible: %s — usando heurística.", e)
 
         return RiskDecision(
             agente_id=self.agent_id,

@@ -52,6 +52,7 @@ class BaseAgent:
             messages=messages,
             temperature=0.1,
             max_tokens=512,
+            timeout=30.0,
         )
         return response.choices[0].message.content.strip()
 

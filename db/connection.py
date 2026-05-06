@@ -41,7 +41,7 @@ def get_conn():
     Contexto psycopg2 puro con cursor RealDict para acceso por nombre de columna.
     Preferido en el motor evolutivo por simplicidad y rendimiento.
     """
-    conn = psycopg2.connect(_DATABASE_URL)
+    conn = psycopg2.connect(_DATABASE_URL, connect_timeout=10)
     try:
         yield conn
         conn.commit()

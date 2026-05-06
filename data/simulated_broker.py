@@ -48,8 +48,14 @@ def get_current_price() -> float:
         timeout=10,
     )
     resp.raise_for_status()
-    data  = resp.json()
-    price = float(data["chart"]["result"][0]["meta"]["regularMarketPrice"])
+    data = resp.json()
+    chart_result = data.get("chart", {}).get("result") or []
+    if not chart_result:
+        raise RuntimeError(
+            "Yahoo Finance: resultado vacío para EURUSD=X "
+            "(mercado cerrado, festivo o estructura de API cambiada)."
+        )
+    price = float(chart_result[0]["meta"]["regularMarketPrice"])
     log.debug("[SimBroker] EUR/USD = %.5f", price)
     return price
 
@@ -112,9 +118,19 @@ def get_price_history(interval: str = "1h", range_str: str = "5d") -> list[dict]
         timeout=15,
     )
     resp.raise_for_status()
-    result = resp.json()["chart"]["result"][0]
-    timestamps = result["timestamp"]
-    quote      = result["indicators"]["quote"][0]
+    data2 = resp.json()
+    chart_result2 = data2.get("chart", {}).get("result") or []
+    if not chart_result2:
+        raise RuntimeError(
+            "Yahoo Finance: resultado vacío para EURUSD=X "
+            "(mercado cerrado, festivo o estructura de API cambiada)."
+        )
+    result = chart_result2[0]
+    quote_list2 = result.get("indicators", {}).get("quote") or []
+    if not quote_list2:
+        raise RuntimeError("Yahoo Finance: sin datos de quote para EURUSD=X.")
+    timestamps = result.get("timestamp", [])
+    quote      = quote_list2[0]
 
     candles = []
     for i, ts in enumerate(timestamps):

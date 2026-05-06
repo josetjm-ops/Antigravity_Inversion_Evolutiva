@@ -7,9 +7,12 @@ basado en los parámetros genéticos del agente padre.
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any
 
 from agents.base_agent import BaseAgent
+
+log = logging.getLogger(__name__)
 from data.alpha_vantage_client import TechnicalSignals
 from data.indicators import fetch_signals
 
@@ -27,8 +30,8 @@ class SubAgentTechnical(BaseAgent):
     system_prompt = _SYSTEM_PROMPT
 
     def _score_rsi(self, rsi: float) -> tuple[str, float]:
-        sobrecompra = self.params["rsi_sobrecompra"]
-        sobreventa = self.params["rsi_sobreventa"]
+        sobrecompra = self.params.get("rsi_sobrecompra", 70)
+        sobreventa = self.params.get("rsi_sobreventa", 30)
         if rsi <= sobreventa:
             strength = (sobreventa - rsi) / sobreventa
             return "BUY", min(0.95, 0.5 + strength)
@@ -38,6 +41,8 @@ class SubAgentTechnical(BaseAgent):
         return "HOLD", 0.4
 
     def _score_ema(self, ema_rapida: float, ema_lenta: float) -> tuple[str, float]:
+        if ema_lenta == 0:
+            return "HOLD", 0.35
         diff_pct = (ema_rapida - ema_lenta) / ema_lenta
         if diff_pct > 0.0002:
             return "BUY", min(0.90, 0.55 + abs(diff_pct) * 100)
@@ -61,6 +66,8 @@ class SubAgentTechnical(BaseAgent):
         score_sell = sum(c * w for r, c, w in signals if r == "SELL")
         total_weight = sum(w for _, _, w in signals)
 
+        if total_weight == 0:
+            return "HOLD", 0.30
         score_buy /= total_weight
         score_sell /= total_weight
 
@@ -78,9 +85,9 @@ class SubAgentTechnical(BaseAgent):
         ema_rec, ema_conf = self._score_ema(signals.ema_rapida, signals.ema_lenta)
         macd_rec, macd_conf = self._score_macd(signals.macd_hist)
 
-        w_rsi = self.params["peso_rsi"]
-        w_ema = self.params["peso_ema"]
-        w_macd = self.params["peso_macd"]
+        w_rsi = self.params.get("peso_rsi", 0.35)
+        w_ema = self.params.get("peso_ema", 0.35)
+        w_macd = self.params.get("peso_macd", 0.30)
 
         rec, conf = self._weighted_signal([
             (rsi_rec, rsi_conf, w_rsi),
@@ -104,8 +111,8 @@ class SubAgentTechnical(BaseAgent):
                 rec = parsed.get("recomendacion", rec)
                 conf = float(parsed.get("confianza", conf))
                 llm_razon = parsed.get("razon", "")
-            except Exception:
-                pass
+            except Exception as e:
+                log.warning("[SubAgentTechnical] LLM no disponible: %s — usando heurística.", e)
 
         return {
             "agente_id": self.agent_id,

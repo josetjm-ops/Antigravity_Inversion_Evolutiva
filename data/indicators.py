@@ -45,8 +45,17 @@ def fetch_ohlcv(interval: str = "15m", range_str: str = "5d") -> pd.DataFrame:
         timeout=15,
     )
     resp.raise_for_status()
-    result = resp.json()["chart"]["result"][0]
-    quote  = result["indicators"]["quote"][0]
+    chart_result = resp.json().get("chart", {}).get("result") or []
+    if not chart_result:
+        raise RuntimeError(
+            "Yahoo Finance: resultado vacío para EURUSD=X "
+            "(mercado cerrado, festivo o estructura de API cambiada)."
+        )
+    result = chart_result[0]
+    quote_list = result.get("indicators", {}).get("quote") or []
+    if not quote_list:
+        raise RuntimeError("Yahoo Finance: sin datos de quote para EURUSD=X.")
+    quote  = quote_list[0]
 
     df = pd.DataFrame({
         "timestamp": [datetime.fromtimestamp(ts, tz=timezone.utc) for ts in result["timestamp"]],

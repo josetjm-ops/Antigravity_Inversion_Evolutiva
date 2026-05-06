@@ -4,12 +4,15 @@ Fuentes: Investing.com (ForexFactory-compatible) y DailyForex.
 Devuelve eventos estructurados para que el Sub-agente B los procese con NLP.
 """
 
+import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import requests
 from bs4 import BeautifulSoup
+
+log = logging.getLogger(__name__)
 
 _HEADERS = {
     "User-Agent": (
@@ -93,8 +96,8 @@ def scrape_investing_calendar() -> list[EconomicEvent]:
                 estimado=est_el.get_text(strip=True) if est_el else None,
                 fuente="investing.com",
             ))
-    except Exception:
-        pass
+    except Exception as e:
+        log.warning("[MacroScraper] investing.com no accesible: %s", e)
     return events
 
 
@@ -108,8 +111,8 @@ def scrape_dailyforex_news() -> list[str]:
             text = el.get_text(strip=True)
             if text:
                 headlines.append(text)
-    except Exception:
-        pass
+    except Exception as e:
+        log.warning("[MacroScraper] dailyforex.com no accesible: %s", e)
     return headlines
 
 
