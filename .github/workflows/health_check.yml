@@ -1,0 +1,157 @@
+name: "Health Check Diario"
+
+"on":
+  schedule:
+    - cron: "0 13 * * 1-5"   # 08:00 Bogotá (UTC-5), 50 min antes del trading
+  workflow_dispatch: {}
+
+jobs:
+  health:
+    name: "Verificar dependencias críticas"
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+
+    env:
+      DATABASE_URL:     ${{ secrets.DATABASE_URL }}
+      DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+      LOG_LEVEL:        "INFO"
+
+    steps:
+      - name: "Checkout del repositorio"
+        uses: actions/checkout@v4
+
+      - name: "Configurar Python 3.11"
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: "Instalar dependencias"
+        run: pip install -r requirements.txt
+
+      - name: "Verificar secrets configurados"
+        run: |
+          MISSING=""
+          [ -z "$DATABASE_URL" ]     && MISSING="$MISSING DATABASE_URL"
+          [ -z "$DEEPSEEK_API_KEY" ] && MISSING="$MISSING DEEPSEEK_API_KEY"
+          if [ -n "$MISSING" ]; then
+            echo "❌ Secrets faltantes:$MISSING"
+            echo "   Configura en: Settings → Secrets and variables → Actions"
+            exit 1
+          fi
+          echo "✅ Secrets OK: DATABASE_URL y DEEPSEEK_API_KEY configurados"
+
+      - name: "Verificar conexión a base de datos (Neon PostgreSQL)"
+        run: |
+          python -c "
+          from db.connection import health_check
+          ok = health_check()
+          print('DB Neon PostgreSQL:', '✅ OK' if ok else '❌ FAIL')
+          exit(0 if ok else 1)
+          "
+
+      - name: "Verificar agentes activos en DB"
+        run: |
+          python -c "
+          from db.connection import get_conn, get_dict_cursor
+          with get_conn() as conn:
+              cur = get_dict_cursor(conn)
+              cur.execute(\"SELECT COUNT(*) as n FROM agentes WHERE estado='activo'\")
+              n = cur.fetchone()['n']
+              print(f'Agentes activos: {n}')
+              if n == 0:
+                  print('⚠️  Sin agentes activos — el Juez podría no haber corrido')
+              else:
+                  print(f'✅ {n} agentes listos para operar')
+          "
+
+      - name: "Verificar Yahoo Finance (fuente de precios EUR/USD)"
+        run: |
+          python -c "
+          import requests
+          try:
+              r = requests.get(
+                  'https://query1.finance.yahoo.com/v8/finance/chart/EURUSD=X',
+                  headers={'User-Agent': 'Mozilla/5.0 (compatible; InversionEvolutiva/1.0)'},
+                  params={'interval': '1m', 'range': '1d'},
+                  timeout=10,
+              )
+              data = r.json()
+              result = (data.get('chart') or {}).get('result') or []
+              if result:
+                  price = result[0]['meta']['regularMarketPrice']
+                  print(f'✅ Yahoo Finance OK — EUR/USD = {price:.5f}')
+              else:
+                  print('⚠️  Yahoo Finance: resultado vacío (mercado cerrado o festivo) — se esperan HOLDs hoy')
+          except Exception as e:
+              print(f'❌ Yahoo Finance inaccesible: {e}')
+              exit(1)
+          "
+
+      - name: "Verificar DeepSeek API (LLM de los agentes)"
+        run: |
+          python -c "
+          import os, sys
+          from openai import OpenAI
+          key = os.environ.get('DEEPSEEK_API_KEY','')
+          if not key:
+              print('❌ DEEPSEEK_API_KEY no configurada')
+              sys.exit(1)
+          client = OpenAI(api_key=key, base_url='https://api.deepseek.com')
+          try:
+              r = client.chat.completions.create(
+                  model='deepseek-chat',
+                  messages=[{'role':'user','content':'ping'}],
+                  max_tokens=5,
+                  timeout=20.0,
+              )
+              print('✅ DeepSeek API OK')
+          except Exception as e:
+              print(f'❌ DeepSeek API error: {e}')
+              sys.exit(1)
+          "
+
+      - name: "Resumen del health check"
+        if: success()
+        run: |
+          echo "============================================"
+          echo "✅ TODOS LOS CHECKS PASARON"
+          echo "El ciclo de trading correrá a las 08:50 Bogotá"
+          echo "============================================"
+
+      - name: "🚨 Crear Issue de alerta si algún check falló"
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const date = new Date().toISOString().slice(0,10);
+            const time = new Date().toISOString().slice(11,16);
+            const title = `🚨 Health Check fallido — ${date}`;
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+
+            const existing = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+            });
+            const duplicate = existing.data.find(i => i.title === title);
+
+            if (duplicate) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: duplicate.number,
+                body: `🔁 Falló de nuevo a las ${time} UTC — [ver logs](${runUrl})`,
+              });
+              console.log(`Comentario añadido al issue #${duplicate.number}`);
+            } else {
+              const issue = await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: title,
+                body: `## 🚨 Health Check Diario Fallido\n\n**Fecha:** ${date} a las ${time} UTC  \n**Logs:** [Ver workflow](${runUrl})\n\n### Qué revisar:\n- [ ] \`DATABASE_URL\` configurado en Secrets\n- [ ] \`DEEPSEEK_API_KEY\` configurado en Secrets\n- [ ] Neon PostgreSQL accesible (https://neon.tech/)\n- [ ] Yahoo Finance responde\n- [ ] DeepSeek API responde (https://platform.deepseek.com/)\n\n**El ciclo de trading de hoy puede estar afectado.**\n\n> Configura secrets en: **Settings → Secrets and variables → Actions**`,
+              });
+              console.log(`Issue creado: #${issue.data.number}`);
+            }

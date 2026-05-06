@@ -17,6 +17,8 @@ jobs:
     name: "Ejecutar pipeline de trading"
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    permissions:
+      issues: write
 
     env:
       DATABASE_URL:           ${{ secrets.DATABASE_URL }}
@@ -68,3 +70,30 @@ jobs:
       - name: "Reportar resultado"
         if: always()
         run: echo "Ciclo de trading completado a las $(date -u +'%Y-%m-%d %H:%M UTC')"
+
+      - name: "🚨 Crear Issue de alerta si el ciclo falló"
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const date = new Date().toISOString().slice(0,10);
+            const time = new Date().toISOString().slice(11,16);
+            const title = `🚨 Ciclo de Trading fallido — ${date}`;
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const existing = await github.rest.issues.listForRepo({
+              owner: context.repo.owner, repo: context.repo.repo, state: 'open',
+            });
+            const dup = existing.data.find(i => i.title === title);
+            if (dup) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner, repo: context.repo.repo,
+                issue_number: dup.number,
+                body: `🔁 Falló de nuevo a las ${time} UTC — [ver logs](${runUrl})`,
+              });
+            } else {
+              await github.rest.issues.create({
+                owner: context.repo.owner, repo: context.repo.repo,
+                title: title,
+                body: `## 🚨 Ciclo de Trading Fallido\n\n**Fecha:** ${date} a las ${time} UTC  \n**Logs:** [Ver workflow](${runUrl})\n\n### Posibles causas:\n- [ ] DB caída o sin conexión (Neon cold-start)\n- [ ] Yahoo Finance sin datos (mercado cerrado/festivo)\n- [ ] DeepSeek API caída o timeout\n- [ ] Error en código de los agentes\n\n**Los agentes NO operaron hoy.**`,
+              });
+            }
