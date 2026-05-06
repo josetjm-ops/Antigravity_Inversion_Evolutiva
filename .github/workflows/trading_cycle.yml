@@ -2,7 +2,7 @@ name: "Ciclo de Trading Diario"
 
 "on":
   schedule:
-    - cron: "0 14 * * 1-5"   # 09:00 Bogota (UTC-5) lunes a viernes
+    - cron: "50 13 * * 1-5"  # 08:50 Bogota (UTC-5) lunes a viernes — 10 min antes del trade_monitor
   workflow_dispatch:
     inputs:
       dry_run:

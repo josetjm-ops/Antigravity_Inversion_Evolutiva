@@ -1,4 +1,4 @@
-name: "Monitor de Trades OANDA"
+name: "Monitor de Trades (SL/TP + Nuevas Posiciones)"
 
 "on":
   schedule:
@@ -7,7 +7,7 @@ name: "Monitor de Trades OANDA"
 
 jobs:
   monitor:
-    name: "Sincronizar trades cerrados"
+    name: "SL/TP + evaluar nuevas posiciones"
     runs-on: ubuntu-latest
     timeout-minutes: 5
 
@@ -30,7 +30,7 @@ jobs:
       - name: "Instalar dependencias"
         run: pip install -r requirements.txt
 
-      - name: "Sincronizar trades cerrados en OANDA"
+      - name: "Verificar SL/TP + evaluar nuevas posiciones"
         run: python -m cron.trade_monitor --run-once
 
       - name: "Reportar resultado"
