@@ -12,9 +12,10 @@ jobs:
     timeout-minutes: 5
 
     env:
-      DATABASE_URL:  ${{ secrets.DATABASE_URL }}
-      LOG_LEVEL:     "INFO"
-      ENVIRONMENT:   "production"
+      DATABASE_URL:      ${{ secrets.DATABASE_URL }}
+      DEEPSEEK_API_KEY:  ${{ secrets.DEEPSEEK_API_KEY }}
+      LOG_LEVEL:         "INFO"
+      ENVIRONMENT:       "production"
 
     steps:
       - name: "Checkout del repositorio"

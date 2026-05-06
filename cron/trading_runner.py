@@ -67,37 +67,24 @@ def _fetch_active_agents() -> list[dict]:
 
 def _fetch_shared_market_data():
     """
-    Obtiene precio y señales técnicas base (parámetros por defecto).
-    Retorna TechnicalSignals y MacroSnapshot para compartir entre agentes.
+    Descarga velas OHLCV de Yahoo Finance (1 request) y snapshot macro.
+    Retorna (df_ohlcv, MacroSnapshot) para compartir entre agentes.
+    Cada agente calculará sus propios indicadores desde el mismo DataFrame.
     """
-    from data.alpha_vantage_client import fetch_signals
+    from data.indicators import fetch_ohlcv
     from data.macro_scraper import fetch_macro_snapshot
 
-    default_params = {
-        "rsi_periodo":   14,
-        "rsi_sobrecompra": 70,
-        "rsi_sobreventa":  30,
-        "ema_rapida":    9,
-        "ema_lenta":     21,
-        "macd_rapida":   12,
-        "macd_lenta":    26,
-        "macd_senal":    9,
-        "peso_rsi":      0.35,
-        "peso_ema":      0.35,
-        "peso_macd":     0.30,
-    }
-
-    log.info("[TradingRunner] Obteniendo señales técnicas (Alpha Vantage)...")
-    tech_signals = fetch_signals(default_params)
+    log.info("[TradingRunner] Descargando velas OHLCV (Yahoo Finance)...")
+    df_ohlcv = fetch_ohlcv()
 
     log.info("[TradingRunner] Obteniendo snapshot macro (scraping)...")
     macro_snapshot = fetch_macro_snapshot(ventana_horas=4)
 
     log.info(
-        "[TradingRunner] Datos obtenidos — precio=%.5f RSI=%.2f",
-        tech_signals.precio_actual, tech_signals.rsi,
+        "[TradingRunner] OHLCV listo — %d velas · último cierre=%.5f",
+        len(df_ohlcv), float(df_ohlcv["close"].iloc[-1]),
     )
-    return tech_signals, macro_snapshot
+    return df_ohlcv, macro_snapshot
 
 
 # ── Runner principal ──────────────────────────────────────────────────────────
@@ -121,12 +108,14 @@ def run_all_agents() -> dict:
         log.warning("[TradingRunner] Sin agentes activos. Nada que ejecutar.")
         return {"status": "ok", "total": 0, "results": []}
 
-    # Datos de mercado compartidos (1 llamada a Alpha Vantage para todos)
+    # 1 request HTTP para todos; indicadores se calculan por agente en memoria
     try:
-        tech_signals, macro_snapshot = _fetch_shared_market_data()
+        df_ohlcv, macro_snapshot = _fetch_shared_market_data()
     except Exception as exc:
         log.error("[TradingRunner] Error obteniendo datos de mercado: %s", exc)
         return {"status": "error", "reason": str(exc)}
+
+    from data.indicators import calc_signals
 
     results = []
     started = datetime.now(timezone.utc)
@@ -134,6 +123,8 @@ def run_all_agents() -> dict:
     for agent_data in agents_data:
         agent_id = agent_data["id"]
         try:
+            # Indicadores calculados con los parámetros genéticos propios del agente
+            tech_signals = calc_signals(df_ohlcv, agent_data["params_tecnicos"])
             params = {
                 "params_tecnicos": agent_data["params_tecnicos"],
                 "params_macro":    agent_data["params_macro"],
@@ -171,12 +162,14 @@ def run_all_agents() -> dict:
         "total":    len(agents_data),
         "elapsed_sec": elapsed,
         "results":  results,
-        "precio_mercado": tech_signals.precio_actual,
+        "precio_mercado": 0,
     }
+    ultimo_precio = float(df_ohlcv["close"].iloc[-1])
     log.info(
-        "[TradingRunner] Ciclo completado en %.2fs — %d agentes procesados.",
-        elapsed, len(agents_data),
+        "[TradingRunner] Ciclo completado en %.2fs — %d agentes · precio=%.5f",
+        elapsed, len(agents_data), ultimo_precio,
     )
+    summary["precio_mercado"] = ultimo_precio
     return summary
 
 

@@ -10,7 +10,8 @@ import json
 from typing import Any
 
 from agents.base_agent import BaseAgent
-from data.alpha_vantage_client import TechnicalSignals, fetch_signals
+from data.alpha_vantage_client import TechnicalSignals
+from data.indicators import fetch_signals
 
 _SYSTEM_PROMPT = """Eres el Sub-agente Técnico de un sistema de trading evolutivo EUR/USD.
 Tu rol es interpretar indicadores técnicos (RSI, EMA, MACD) y emitir una señal de trading.

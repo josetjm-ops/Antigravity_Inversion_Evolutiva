@@ -1,6 +1,5 @@
 import os
 from dataclasses import dataclass
-from typing import Optional
 
 import requests
 from dotenv import load_dotenv
@@ -8,7 +7,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 _BASE_URL = os.getenv("ALPHA_VANTAGE_BASE_URL", "https://www.alphavantage.co/query")
-_API_KEY = os.environ["ALPHA_VANTAGE_API_KEY"]
+_API_KEY = os.getenv("ALPHA_VANTAGE_API_KEY", "")
 _SYMBOL = "EURUSD"
 
 

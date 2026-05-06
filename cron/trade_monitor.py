@@ -1,17 +1,23 @@
 """
-Monitor de posiciones abiertas — broker simulado.
+Monitor de posiciones + motor de trading intraday cada 15 minutos.
 
-Obtiene el precio actual de EUR/USD desde Yahoo Finance (gratuito, sin límite)
-y verifica si alguna posición abierta alcanzó su Stop Loss o Take Profit.
-Cuando se activa SL o TP, cierra la posición al precio exacto del nivel
-y actualiza el P&L y capital del agente en PostgreSQL.
+Dos responsabilidades en cada ciclo:
+  1. SL/TP: verifica posiciones abiertas y las cierra si tocaron Stop Loss o Take Profit.
+  2. Nuevas posiciones: para agentes sin posición abierta, calcula indicadores frescos
+     desde Yahoo Finance y ejecuta el pipeline de inversión. Pueden operar múltiples
+     veces al día, de forma secuencial (una posición abierta a la vez por agente).
 
-Estrategia intraday: --force-close-all cierra todas las posiciones abiertas
-al precio de mercado al final del día (llamado por judge_daily.yml antes del
-ciclo evolutivo) para que ningún agente llegue a evaluación con trades pendientes.
+Horario de apertura de nuevas posiciones (configurable vía env):
+  TRADING_START_UTC  : hora UTC en que se permite abrir (default 14 = 9am Bogotá)
+  TRADING_CUTOFF_UTC : hora UTC límite para abrir (default 20 = 3pm Bogotá)
+  → Las posiciones abiertas se siguen monitoreando fuera de ese horario.
+  → El EOD (force-close-all) corre a las 22:00 UTC (5pm Bogotá).
+
+Capital mínimo para operar:
+  MIN_CAPITAL_TO_TRADE: default $2.00 (20% del capital inicial de $10).
 
 Modos de operación:
-  --run-once       : verifica SL/TP una vez y termina (GitHub Actions cada 15 min)
+  --run-once       : un ciclo completo (SL/TP + nuevas posiciones) y termina
   --force-close-all: cierra TODAS las posiciones al precio actual (EOD intraday)
   --daemon         : bucle continuo cada TRADE_MONITOR_POLL_SECONDS segundos
 
@@ -28,6 +34,7 @@ import logging
 import os
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -45,22 +52,33 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-_POLL_SECONDS = int(os.getenv("TRADE_MONITOR_POLL_SECONDS", "60"))
+_POLL_SECONDS        = int(os.getenv("TRADE_MONITOR_POLL_SECONDS", "60"))
+_MIN_CAPITAL         = float(os.getenv("MIN_CAPITAL_TO_TRADE", "2.0"))
+_TRADING_START_UTC   = int(os.getenv("TRADING_START_UTC",   "14"))   # 9:00 am Bogotá
+_TRADING_CUTOFF_UTC  = int(os.getenv("TRADING_CUTOFF_UTC",  "20"))   # 3:00 pm Bogotá
 
 
-# ── Sincronización SL/TP ──────────────────────────────────────────────────────
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _within_trading_hours() -> bool:
+    """True si la hora UTC actual está dentro del horario permitido para abrir posiciones."""
+    now_utc = datetime.now(timezone.utc)
+    return _TRADING_START_UTC <= now_utc.hour < _TRADING_CUTOFF_UTC
+
+
+# ── 1. Monitoreo SL/TP ───────────────────────────────────────────────────────
 
 def sync_once() -> dict:
     """
-    Obtiene el precio actual de EUR/USD y cierra todas las posiciones
-    que hayan alcanzado su SL o TP.
-    Retorna: {'checked': N, 'synced': N, 'errors': N}
+    Ciclo completo de 15 minutos:
+      a) Verifica SL/TP de posiciones abiertas y las cierra si corresponde.
+      b) Para agentes sin posición, evalúa si abrir una nueva (si es horario de trading).
     """
     from data.simulated_broker import get_current_price, check_sl_tp, exit_price_for
     from agents.investor_agent import InvestorAgent
     from db.connection import get_conn, get_dict_cursor
 
-    # 1. Obtener posiciones abiertas con SL/TP definidos
+    # ── a) Revisar posiciones abiertas ────────────────────────────────────────
     with get_conn() as conn:
         cur = get_dict_cursor(conn)
         cur.execute(
@@ -84,86 +102,209 @@ def sync_once() -> dict:
         )
         open_ops = [dict(row) for row in cur.fetchall()]
 
-    if not open_ops:
-        log.info("[TradeMonitor] Sin posiciones abiertas para monitorear.")
-        return {"checked": 0, "synced": 0, "errors": 0}
+    sltp_checked = sltp_synced = sltp_errors = 0
 
-    # 2. Precio actual de mercado (1 sola llamada para todas las posiciones)
-    try:
-        current_price = get_current_price()
+    if open_ops:
+        try:
+            current_price = get_current_price()
+            log.info(
+                "[TradeMonitor] EUR/USD = %.5f — revisando %d posiciones abiertas.",
+                current_price, len(open_ops),
+            )
+        except Exception as exc:
+            log.error("[TradeMonitor] No se pudo obtener precio: %s", exc)
+            current_price = None
+
+        if current_price is not None:
+            for op in open_ops:
+                try:
+                    resultado = check_sl_tp(
+                        action=op["accion"],
+                        entry_price=op["precio_entrada"],
+                        stop_loss=op["stop_loss"],
+                        take_profit=op["take_profit"],
+                        current_price=current_price,
+                    )
+                    sltp_checked += 1
+
+                    if resultado == "OPEN":
+                        log.debug(
+                            "[TradeMonitor] Op %d (%s) abierta — precio=%.5f SL=%.5f TP=%.5f",
+                            op["id"], op["accion"], current_price,
+                            op["stop_loss"], op["take_profit"],
+                        )
+                        continue
+
+                    precio_salida = exit_price_for(
+                        resultado, op["stop_loss"], op["take_profit"], current_price
+                    )
+                    with get_conn() as conn:
+                        cur = conn.cursor()
+                        cur.execute(
+                            "SELECT capital_actual FROM agentes WHERE id = %s",
+                            (op["agente_id"],),
+                        )
+                        row = cur.fetchone()
+                        capital_actual = float(row[0]) if row else 10.0
+
+                    agent  = InvestorAgent(op["agente_id"], {})
+                    result = agent.close_operation(
+                        op_id=op["id"],
+                        precio_salida=precio_salida,
+                        capital_disponible=capital_actual,
+                    )
+                    log.info(
+                        "[TradeMonitor] Op %d %s → %s: salida=%.5f pnl=%.4f capital=%.4f",
+                        op["id"], op["accion"], resultado,
+                        precio_salida, result.get("pnl", 0), result.get("nuevo_capital", 0),
+                    )
+                    sltp_synced += 1
+
+                except Exception as exc:
+                    log.error("[TradeMonitor] Error procesando op %d: %s", op["id"], exc)
+                    sltp_errors += 1
+
         log.info(
-            "[TradeMonitor] EUR/USD = %.5f — revisando %d posiciones abiertas.",
-            current_price, len(open_ops),
+            "[TradeMonitor] SL/TP — revisadas=%d cerradas=%d errores=%d",
+            sltp_checked, sltp_synced, sltp_errors,
+        )
+    else:
+        log.info("[TradeMonitor] Sin posiciones abiertas para monitorear.")
+
+    # ── b) Evaluar nuevas posiciones ──────────────────────────────────────────
+    new_result = _evaluate_new_positions()
+
+    return {
+        "sltp_checked": sltp_checked,
+        "sltp_closed":  sltp_synced,
+        "sltp_errors":  sltp_errors,
+        "new_evaluated": new_result.get("evaluated", 0),
+        "new_opened":    new_result.get("opened", 0),
+        "errors":        sltp_errors + new_result.get("errors", 0),
+    }
+
+
+# ── 2. Nuevas posiciones (trading intraday) ───────────────────────────────────
+
+def _evaluate_new_positions() -> dict:
+    """
+    Para cada agente activo que cumpla las condiciones, evalúa si abrir posición:
+      - Sin posición BUY/SELL abierta (secuencial: una a la vez)
+      - Capital >= MIN_CAPITAL_TO_TRADE
+      - Dentro del horario de trading (TRADING_START_UTC – TRADING_CUTOFF_UTC)
+
+    Descarga 1 DataFrame OHLCV compartido; calcula indicadores individuales
+    por agente en memoria usando sus propios parámetros genéticos.
+    """
+    if not _within_trading_hours():
+        now_h = datetime.now(timezone.utc).hour
+        log.info(
+            "[TradeMonitor] Fuera de horario de trading (%d UTC). "
+            "Horario: %d–%d UTC. No se evalúan nuevas posiciones.",
+            now_h, _TRADING_START_UTC, _TRADING_CUTOFF_UTC,
+        )
+        return {"evaluated": 0, "opened": 0, "errors": 0}
+
+    from agents.investor_agent import InvestorAgent
+    from data.indicators import fetch_ohlcv, calc_signals
+    from data.macro_scraper import fetch_macro_snapshot
+    from db.connection import get_conn, get_dict_cursor
+
+    # Agentes sin posición abierta con capital suficiente
+    with get_conn() as conn:
+        cur = get_dict_cursor(conn)
+        cur.execute(
+            """
+            SELECT a.id,
+                   a.params_tecnicos,
+                   a.params_macro,
+                   a.params_riesgo,
+                   a.capital_actual::float AS capital_actual
+            FROM agentes a
+            WHERE a.estado = 'activo'
+              AND a.capital_actual >= %s
+              AND NOT EXISTS (
+                  SELECT 1 FROM operaciones o
+                  WHERE o.agente_id = a.id
+                    AND o.estado    = 'abierta'
+                    AND o.accion   IN ('BUY', 'SELL')
+              )
+            ORDER BY a.roi_total DESC
+            """,
+            (_MIN_CAPITAL,),
+        )
+        candidates = [dict(row) for row in cur.fetchall()]
+
+    if not candidates:
+        log.info("[TradeMonitor] Sin agentes disponibles para nuevas posiciones.")
+        return {"evaluated": 0, "opened": 0, "errors": 0}
+
+    log.info(
+        "[TradeMonitor] %d agentes candidatos para nueva posición — descargando OHLCV...",
+        len(candidates),
+    )
+
+    # 1 request HTTP para todos; cada agente calcula sus propios indicadores en memoria
+    try:
+        df_ohlcv = fetch_ohlcv()
+        macro_snapshot = fetch_macro_snapshot(ventana_horas=4)
+        log.info(
+            "[TradeMonitor] OHLCV listo (%d velas) · último cierre=%.5f",
+            len(df_ohlcv), float(df_ohlcv["close"].iloc[-1]),
         )
     except Exception as exc:
-        log.error("[TradeMonitor] No se pudo obtener precio de mercado: %s", exc)
-        return {"checked": 0, "synced": 0, "errors": 1}
+        log.error("[TradeMonitor] Error descargando datos de mercado: %s", exc)
+        return {"evaluated": 0, "opened": 0, "errors": 1}
 
-    synced = errors = 0
+    evaluated = opened = errors = 0
 
-    for op in open_ops:
+    for agent_data in candidates:
+        agent_id = agent_data["id"]
         try:
-            resultado = check_sl_tp(
-                action=op["accion"],
-                entry_price=op["precio_entrada"],
-                stop_loss=op["stop_loss"],
-                take_profit=op["take_profit"],
-                current_price=current_price,
+            # Indicadores con parámetros genéticos propios del agente
+            tech_signals = calc_signals(df_ohlcv, agent_data["params_tecnicos"])
+
+            params = {
+                "params_tecnicos": agent_data["params_tecnicos"],
+                "params_macro":    agent_data["params_macro"],
+                "params_riesgo":   agent_data["params_riesgo"],
+                "capital_actual":  agent_data["capital_actual"],
+            }
+            agent  = InvestorAgent(agent_id, params)
+            result = agent.run_cycle(
+                tech_signals=tech_signals,
+                macro_snapshot=macro_snapshot,
             )
 
-            if resultado == "OPEN":
-                log.debug(
-                    "[TradeMonitor] Op %d (%s) abierta — precio=%.5f SL=%.5f TP=%.5f",
-                    op["id"], op["accion"], current_price, op["stop_loss"], op["take_profit"],
-                )
+            if result.get("skipped"):
+                log.debug("[TradeMonitor] %s — ciclo omitido (posición ya abierta).", agent_id)
                 continue
 
-            # Posición cerrada por SL o TP
-            precio_salida = exit_price_for(
-                resultado, op["stop_loss"], op["take_profit"], current_price
-            )
+            action = result.get("decision", {}).get("accion_final", "HOLD")
+            conf   = result.get("decision", {}).get("confianza_final", 0)
+            log.info("[TradeMonitor] %s → %s (conf=%.2f)", agent_id, action, conf)
 
-            with get_conn() as conn:
-                cur = conn.cursor()
-                cur.execute(
-                    "SELECT capital_actual FROM agentes WHERE id = %s",
-                    (op["agente_id"],),
-                )
-                row = cur.fetchone()
-                capital_actual = float(row[0]) if row else 10.0
-
-            agent  = InvestorAgent(op["agente_id"], {})
-            result = agent.close_operation(
-                op_id=op["id"],
-                precio_salida=precio_salida,
-                capital_disponible=capital_actual,
-            )
-
-            log.info(
-                "[TradeMonitor] Op %d %s → %s: salida=%.5f pnl=%.4f capital=%.4f",
-                op["id"], op["accion"], resultado,
-                precio_salida, result.get("pnl", 0), result.get("nuevo_capital", 0),
-            )
-            synced += 1
+            if action in ("BUY", "SELL"):
+                opened += 1
+            evaluated += 1
 
         except Exception as exc:
-            log.error("[TradeMonitor] Error procesando op %d: %s", op["id"], exc)
+            log.error("[TradeMonitor] Error evaluando agente %s: %s", agent_id, exc)
             errors += 1
 
     log.info(
-        "[TradeMonitor] Ciclo completado — revisadas=%d cerradas=%d errores=%d",
-        len(open_ops), synced, errors,
+        "[TradeMonitor] Nuevas posiciones — evaluados=%d abiertos=%d errores=%d",
+        evaluated, opened, errors,
     )
-    return {"checked": len(open_ops), "synced": synced, "errors": errors}
+    return {"evaluated": evaluated, "opened": opened, "errors": errors}
 
 
-# ── Cierre forzado EOD (intraday) ─────────────────────────────────────────────
+# ── 3. Cierre forzado EOD ─────────────────────────────────────────────────────
 
 def force_close_all() -> dict:
     """
     Cierra TODAS las posiciones abiertas al precio actual de mercado.
-    Se llama antes del ciclo evolutivo del Juez (16:45 Bogotá) para garantizar
-    que todos los agentes tengan sus resultados del día completamente liquidados.
+    Llamado por judge_daily.yml antes del ciclo evolutivo (5:00 pm Bogotá).
     """
     from data.simulated_broker import get_current_price
     from agents.investor_agent import InvestorAgent
@@ -171,7 +312,6 @@ def force_close_all() -> dict:
 
     log.info("[TradeMonitor] EOD — Iniciando cierre intraday de todas las posiciones...")
 
-    # Precio de cierre EOD
     try:
         current_price = get_current_price()
         log.info("[TradeMonitor] EOD — Precio de cierre: %.5f", current_price)
@@ -179,7 +319,6 @@ def force_close_all() -> dict:
         log.error("[TradeMonitor] EOD — No se pudo obtener precio: %s", exc)
         return {"closed": 0, "errors": 1}
 
-    # Posiciones abiertas con BUY/SELL y precio de entrada
     with get_conn() as conn:
         cur = get_dict_cursor(conn)
         cur.execute(
@@ -194,7 +333,7 @@ def force_close_all() -> dict:
         )
         open_ops = [dict(row) for row in cur.fetchall()]
 
-    # Marcar como canceladas las operaciones sin precio de entrada (HOLD residuales)
+    # Cancelar operaciones residuales sin precio (HOLDs mal registrados)
     with get_conn() as conn:
         cur = conn.cursor()
         cur.execute(
@@ -224,7 +363,7 @@ def force_close_all() -> dict:
                     "SELECT capital_actual FROM agentes WHERE id = %s",
                     (op["agente_id"],),
                 )
-                row        = cur.fetchone()
+                row = cur.fetchone()
                 capital_actual = float(row[0]) if row else 10.0
 
             agent  = InvestorAgent(op["agente_id"], {})
@@ -243,13 +382,11 @@ def force_close_all() -> dict:
             log.error("[TradeMonitor] EOD — Error cerrando op %d: %s", op["id"], exc)
             errors += 1
 
-    log.info(
-        "[TradeMonitor] EOD completado — cerradas=%d errores=%d", closed, errors
-    )
+    log.info("[TradeMonitor] EOD completado — cerradas=%d errores=%d", closed, errors)
     return {"closed": closed, "errors": errors}
 
 
-# ── Modo demonio ──────────────────────────────────────────────────────────────
+# ── 4. Modo demonio ───────────────────────────────────────────────────────────
 
 def run_daemon() -> None:
     log.info("[TradeMonitor] Modo demonio — polling cada %ds.", _POLL_SECONDS)
@@ -265,12 +402,12 @@ def run_daemon() -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Monitor de posiciones simuladas — INVERSIÓN EVOLUTIVA"
+        description="Monitor de posiciones + trading intraday — INVERSIÓN EVOLUTIVA"
     )
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument(
         "--run-once", action="store_true",
-        help="Verifica SL/TP una vez y termina (GitHub Actions).",
+        help="Verifica SL/TP y evalúa nuevas posiciones (GitHub Actions cada 15 min).",
     )
     group.add_argument(
         "--force-close-all", action="store_true",
