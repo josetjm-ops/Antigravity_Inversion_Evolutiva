@@ -1178,6 +1178,115 @@ def _tab_instructions() -> None:
       </div>
     </div>
 
+    <!-- ══ 9. INDEPENDENCIA E INTEGRIDAD ══ -->
+    <div class="ins-section">
+      <div class="ins-title">9 · Independencia e Integridad — Por qué no existe conflicto de interés</div>
+      <div class="ins-card ins-card-left-gold">
+        <div class="ins-body">
+          Aunque la meta de cada agente es <b>sobrevivir</b>, el sistema está diseñado para
+          que ningún agente pueda influir sobre las decisiones del Agente Juez, manipular
+          los resultados de otros agentes ni alterar su propio historial de rendimiento.
+          A continuación, los mecanismos estructurales que lo garantizan:
+        </div>
+      </div>
+
+      <!-- Separación de responsabilidades -->
+      <div class="ins-card ins-card-left-emerald" style="margin-top:12px;">
+        <div style="font-size:10px;color:{EMERALD};letter-spacing:1.5px;
+                    text-transform:uppercase;font-weight:700;margin-bottom:10px;">
+          ① Separación total de responsabilidades (código)
+        </div>
+        <div class="ins-body">
+          Los agentes inversionistas (<code>InvestorAgent</code>) y el Agente Juez
+          (<code>JudgeAgent</code>) viven en módulos completamente separados y nunca
+          se invocan mutuamente. Un agente inversionista solo puede:
+          <br><br>
+          &nbsp;• Leer datos de mercado públicos (Yahoo Finance / scraping).<br>
+          &nbsp;• Insertar o actualizar <b>sus propias</b> filas en la tabla <code>operaciones</code>.<br>
+          &nbsp;• Leer su propio capital de la tabla <code>agentes</code>.<br><br>
+          No tiene acceso, visibilidad ni referencias al código del Juez, al motor genético,
+          ni a los parámetros o resultados de otros agentes.
+        </div>
+      </div>
+
+      <!-- Métrica de fitness inmanipulable -->
+      <div class="ins-card ins-card-left-emerald" style="margin-top:12px;">
+        <div style="font-size:10px;color:{EMERALD};letter-spacing:1.5px;
+                    text-transform:uppercase;font-weight:700;margin-bottom:10px;">
+          ② El ROI es un hecho de mercado, no una opinión del agente
+        </div>
+        <div class="ins-body">
+          La métrica que el Juez usa para clasificar y eliminar es el <b>ROI acumulado</b>,
+          calculado exclusivamente a partir de precios reales:<br><br>
+          &nbsp;• Los precios de entrada y salida provienen de <b>Yahoo Finance</b>
+            (fuente externa, no controlada por ningún agente).<br>
+          &nbsp;• El P&L lo calcula el <b>Trade Monitor</b>, no el agente mismo.<br>
+          &nbsp;• El cierre de posiciones (SL/TP/EOD) lo ejecuta el Trade Monitor de forma autónoma.<br><br>
+          Un agente no puede declarar su propio P&L ni alterar precios de mercado.
+          Su ROI es un dato objetivo derivado de lo que el mercado hizo, no de lo que el agente dice.
+        </div>
+      </div>
+
+      <!-- Aislamiento LLM -->
+      <div class="ins-card ins-card-left-emerald" style="margin-top:12px;">
+        <div style="font-size:10px;color:{EMERALD};letter-spacing:1.5px;
+                    text-transform:uppercase;font-weight:700;margin-bottom:10px;">
+          ③ Aislamiento de los LLMs — cada agente habla con DeepSeek por separado
+        </div>
+        <div class="ins-body">
+          Cada sub-agente invoca a DeepSeek de forma independiente con solo la información
+          de mercado que le corresponde (RSI, noticias, señales). El prompt del sub-agente
+          <b>nunca contiene</b> información sobre otros agentes, sobre el Juez, ni sobre
+          criterios de eliminación. El LLM del Juez recibe únicamente métricas objetivas
+          de rendimiento (ROI, win rate, drawdown) y no puede ser influenciado por el
+          razonamiento de ningún sub-agente inversionista — son llamadas totalmente
+          independientes al mismo modelo.
+        </div>
+      </div>
+
+      <!-- No hay comunicación entre agentes -->
+      <div class="ins-card ins-card-left-emerald" style="margin-top:12px;">
+        <div style="font-size:10px;color:{EMERALD};letter-spacing:1.5px;
+                    text-transform:uppercase;font-weight:700;margin-bottom:10px;">
+          ④ Cero comunicación entre agentes inversionistas
+        </div>
+        <div class="ins-body">
+          Los 10 agentes no se conocen entre sí. Cada uno toma sus decisiones de forma
+          completamente independiente a partir de los mismos datos de mercado públicos.
+          No existe ningún canal de comunicación, memoria compartida ni mecanismo de
+          coordinación entre agentes. No pueden coaligarse, imitar estrategias ajenas
+          en tiempo real ni sabotear las posiciones de sus competidores.
+        </div>
+      </div>
+
+      <!-- Una posición a la vez -->
+      <div class="ins-card ins-card-left-emerald" style="margin-top:12px;">
+        <div style="font-size:10px;color:{EMERALD};letter-spacing:1.5px;
+                    text-transform:uppercase;font-weight:700;margin-bottom:10px;">
+          ⑤ Restricción secuencial — una posición abierta a la vez
+        </div>
+        <div class="ins-body">
+          Cada agente solo puede tener <b>una posición BUY o SELL abierta simultáneamente</b>.
+          Esta restricción es verificada en la base de datos antes de cada apertura.
+          Un agente no puede acumular múltiples posiciones para multiplicar artificialmente
+          su exposición ni distorsionar su P&L. La competencia es puramente sobre la calidad
+          de cada decisión individual, no sobre el volumen de operaciones abiertas a la vez.
+        </div>
+      </div>
+
+      <!-- Conclusión -->
+      <div class="ins-card" style="margin-top:12px;border-left:3px solid {GOLD};">
+        <div class="ins-body">
+          <b>En resumen:</b> los agentes compiten en un entorno cerrado donde las únicas
+          palancas disponibles son <em>cuándo entrar</em>, <em>en qué dirección</em> y
+          <em>cuánto arriesgar</em>. El mercado es el árbitro imparcial. El Juez evalúa
+          hechos, no intenciones. Ningún agente puede corromper el proceso evolutivo
+          porque el proceso no depende de lo que los agentes afirman sobre sí mismos,
+          sino de lo que el mercado hizo con sus posiciones.
+        </div>
+      </div>
+    </div>
+
     <!-- ══ NOTA TÉCNICA ══ -->
     <div style="background:{CARD2};border:1px solid {BORDER};border-radius:8px;
                 padding:14px 18px;font-size:11px;color:{DIM};line-height:1.8;">
