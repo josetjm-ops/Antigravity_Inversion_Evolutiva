@@ -57,7 +57,8 @@ def get_dict_cursor(conn):
 
 
 def run_migration(sql_path: str) -> None:
-    sql = open(sql_path, encoding="utf-8").read()
+    with open(sql_path, encoding="utf-8") as f:
+        sql = f.read()
     with _engine.connect() as conn:
         conn.execute(text(sql))
         conn.commit()

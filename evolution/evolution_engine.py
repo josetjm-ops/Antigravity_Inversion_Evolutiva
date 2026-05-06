@@ -35,7 +35,7 @@ SIGMA_RISK = float(os.getenv("MUTATION_SIGMA_RISK", "0.10"))
 MIN_ROI_HALL_OF_FAME = float(os.getenv("MIN_ROI_FOR_HALL_OF_FAME", "0.05"))
 
 # ── Rangos de seguridad para clamping post-mutación ──────────────────────────
-_BOUNDS_TECNICOS = {
+_BOUNDS_TECNICOS_PERIODS = {
     "rsi_periodo":       (5,   50,  True),   # (min, max, is_int)
     "rsi_sobrecompra":   (55,  90,  False),
     "rsi_sobreventa":    (10,  45,  False),
@@ -44,10 +44,14 @@ _BOUNDS_TECNICOS = {
     "macd_rapida":       (5,   20,  True),
     "macd_lenta":        (15,  40,  True),
     "macd_senal":        (3,   15,  True),
+}
+_BOUNDS_TECNICOS_WEIGHTS = {
     "peso_rsi":          (0.1, 0.7, False),
     "peso_ema":          (0.1, 0.7, False),
     "peso_macd":         (0.1, 0.7, False),
 }
+# Alias para compatibilidad con código que lea el dict completo
+_BOUNDS_TECNICOS = {**_BOUNDS_TECNICOS_PERIODS, **_BOUNDS_TECNICOS_WEIGHTS}
 
 _BOUNDS_MACRO = {
     "peso_noticias_alto":         (0.3, 0.9,  False),
@@ -159,10 +163,11 @@ def breed_agent(
     mac_child = crossover(parent1["params_macro"],    parent2["params_macro"],    p1_weight)
     risk_child = crossover(parent1["params_riesgo"],  parent2["params_riesgo"],   p1_weight)
 
-    # Mutación gaussiana por bloque
-    tec_child  = _mutate_block(tec_child,  _BOUNDS_TECNICOS, SIGMA_PERIODS)
-    mac_child  = _mutate_block(mac_child,  _BOUNDS_MACRO,    SIGMA_WEIGHTS)
-    risk_child = _mutate_block(risk_child, _BOUNDS_RIESGO,   SIGMA_RISK)
+    # Mutación gaussiana por bloque — períodos con SIGMA_PERIODS, pesos con SIGMA_WEIGHTS
+    tec_child  = _mutate_block(tec_child,  _BOUNDS_TECNICOS_PERIODS, SIGMA_PERIODS)
+    tec_child  = _mutate_block(tec_child,  _BOUNDS_TECNICOS_WEIGHTS, SIGMA_WEIGHTS)
+    mac_child  = _mutate_block(mac_child,  _BOUNDS_MACRO,            SIGMA_WEIGHTS)
+    risk_child = _mutate_block(risk_child, _BOUNDS_RIESGO,           SIGMA_RISK)
 
     # Normalizar pesos y aplicar constraints
     tec_child  = _normalize_weights(tec_child,  ["peso_rsi", "peso_ema", "peso_macd"])
