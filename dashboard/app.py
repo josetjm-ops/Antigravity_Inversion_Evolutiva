@@ -635,9 +635,12 @@ def _tab_operations(df_ops: pd.DataFrame) -> None:
             "accion", "precio_entrada", "precio_salida",
             "pnl", "pnl_porcentaje", "estado",
         ]].copy()
-        disp["timestamp_entrada"] = pd.to_datetime(
-            disp["timestamp_entrada"]
-        ).dt.strftime("%m/%d %H:%M")
+        disp["timestamp_entrada"] = (
+            pd.to_datetime(disp["timestamp_entrada"], utc=True)
+            .dt.tz_convert("America/Bogota")
+            .dt.tz_localize(None)
+            .dt.strftime("%m/%d %H:%M")
+        )
         disp.columns = [
             "Entrada", "Agente", "Gen", "Par",
             "Acción", "P. Entrada", "P. Salida",
@@ -739,9 +742,17 @@ def _tab_price(df_all: pd.DataFrame) -> None:
             unsafe_allow_html=True,
         )
         disp = df_agent_ops.copy()
-        disp["timestamp_entrada"] = disp["timestamp_entrada"].dt.strftime("%m/%d %H:%M")
-        disp["timestamp_salida"]  = disp["timestamp_salida"].dt.strftime("%m/%d %H:%M").where(
-            disp["timestamp_salida"].notna(), other="abierta"
+        disp["timestamp_entrada"] = (
+            disp["timestamp_entrada"]
+            .dt.tz_convert("America/Bogota").dt.tz_localize(None)
+            .dt.strftime("%m/%d %H:%M")
+        )
+        _salida_notna = disp["timestamp_salida"].notna()
+        disp["timestamp_salida"] = (
+            disp["timestamp_salida"]
+            .dt.tz_convert("America/Bogota").dt.tz_localize(None)
+            .dt.strftime("%m/%d %H:%M")
+            .where(_salida_notna, other="abierta")
         )
         disp = disp[[
             "id", "accion", "precio_entrada", "precio_salida",

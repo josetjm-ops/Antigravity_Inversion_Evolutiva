@@ -17,10 +17,8 @@ from __future__ import annotations
 import json
 import os
 import random
-from copy import deepcopy
 from dataclasses import dataclass, field
-from datetime import date, datetime, timezone
-from typing import Any
+from datetime import date
 
 from dotenv import load_dotenv
 
@@ -29,7 +27,6 @@ from db.connection import get_conn, get_dict_cursor
 load_dotenv()
 
 # ── Configuración desde .env ─────────────────────────────────────────────────
-N_SURVIVE = int(os.getenv("AGENTS_ELIMINATE_PER_CYCLE", "5"))
 N_ELIMINATE = int(os.getenv("AGENTS_ELIMINATE_PER_CYCLE", "5"))
 
 SIGMA_WEIGHTS = float(os.getenv("MUTATION_SIGMA_WEIGHTS", "0.05"))
@@ -337,8 +334,12 @@ class EvolutionEngine:
                     INSERT INTO estrategias_exitosas (
                         agente_origen_id, fecha_registro, roi_que_genero,
                         win_rate, params_tecnicos, params_macro, params_riesgo
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s)
-                    ON CONFLICT DO NOTHING
+                    )
+                    SELECT %s, %s, %s, %s, %s, %s, %s
+                    WHERE NOT EXISTS (
+                        SELECT 1 FROM estrategias_exitosas
+                        WHERE agente_origen_id = %s AND fecha_registro = %s
+                    )
                     """,
                     (
                         agent["id"], self.today,
@@ -347,12 +348,13 @@ class EvolutionEngine:
                         json.dumps(agent["params_tecnicos"]),
                         json.dumps(agent["params_macro"]),
                         json.dumps(agent["params_riesgo"]),
+                        agent["id"], self.today,
                     ),
                 )
 
     # ── Ciclo evolutivo completo ──────────────────────────────────────────────
 
-    def run(self, llm_reasoning: str | None = None) -> EvolutionResult:
+    def run(self) -> EvolutionResult:
         """
         Ejecuta el ciclo evolutivo completo y retorna un EvolutionResult con
         el resumen de lo ocurrido para que el JudgeAgent lo registre en logs_juez.

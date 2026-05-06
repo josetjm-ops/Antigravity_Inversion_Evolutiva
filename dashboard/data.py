@@ -77,10 +77,12 @@ def fetch_agents(
         ORDER BY generacion ASC, roi_total DESC
     """
     conn = _conn()
-    cur  = conn.cursor()
-    cur.execute(sql, params or None)
-    rows = cur.fetchall()
-    conn.close()
+    try:
+        cur = conn.cursor()
+        cur.execute(sql, params or None)
+        rows = cur.fetchall()
+    finally:
+        conn.close()
 
     cols = [
         "id", "generacion", "fecha_nacimiento", "estado",
@@ -111,10 +113,12 @@ def fetch_judge_logs(limit: int = 40) -> pd.DataFrame:
         LIMIT %s
     """
     conn = _conn()
-    cur  = conn.cursor()
-    cur.execute(sql, (limit,))
-    rows = cur.fetchall()
-    conn.close()
+    try:
+        cur = conn.cursor()
+        cur.execute(sql, (limit,))
+        rows = cur.fetchall()
+    finally:
+        conn.close()
 
     cols = ["id", "fecha", "tipo_evento", "agente_afectado_id",
             "descripcion", "razonamiento_llm", "created_at"]
@@ -137,10 +141,12 @@ def fetch_operations(limit: int = 100) -> pd.DataFrame:
         LIMIT %s
     """
     conn = _conn()
-    cur  = conn.cursor()
-    cur.execute(sql, (limit,))
-    rows = cur.fetchall()
-    conn.close()
+    try:
+        cur = conn.cursor()
+        cur.execute(sql, (limit,))
+        rows = cur.fetchall()
+    finally:
+        conn.close()
 
     cols = [
         "id", "agente_id", "timestamp_entrada", "timestamp_salida",
@@ -150,6 +156,8 @@ def fetch_operations(limit: int = 100) -> pd.DataFrame:
     df = _coerce(pd.DataFrame(rows, columns=cols))
     for c in ["precio_entrada", "precio_salida", "capital_usado", "pnl", "pnl_porcentaje"]:
         df[c] = pd.to_numeric(df[c], errors="coerce")
+    df["timestamp_entrada"] = pd.to_datetime(df["timestamp_entrada"], utc=True)
+    df["timestamp_salida"]  = pd.to_datetime(df["timestamp_salida"],  utc=True)
     return df
 
 
@@ -164,10 +172,12 @@ def fetch_ranking_history() -> pd.DataFrame:
         ORDER BY rh.fecha ASC, rh.posicion_ranking ASC
     """
     conn = _conn()
-    cur  = conn.cursor()
-    cur.execute(sql)
-    rows = cur.fetchall()
-    conn.close()
+    try:
+        cur = conn.cursor()
+        cur.execute(sql)
+        rows = cur.fetchall()
+    finally:
+        conn.close()
 
     cols = ["fecha", "agente_id", "posicion_ranking", "roi_diario",
             "roi_acumulado", "capital_fin_dia", "operaciones_dia",
@@ -182,6 +192,7 @@ def fetch_ranking_history() -> pd.DataFrame:
 @st.cache_data(ttl=30, show_spinner=False)
 def fetch_system_status() -> dict:
     """Métricas de estado para el sidebar — TTL de 30 s."""
+    conn = None
     try:
         conn = _conn()
         cur  = conn.cursor()
@@ -193,7 +204,6 @@ def fetch_system_status() -> dict:
         last_judge = cur.fetchone()[0]
         cur.execute("SELECT COUNT(*) FROM operaciones WHERE estado='abierta'")
         ops_open = cur.fetchone()[0]
-        conn.close()
         return {
             "ok": True,
             "n_active": n_active,
@@ -203,19 +213,24 @@ def fetch_system_status() -> dict:
         }
     except Exception as e:
         return {"ok": False, "error": str(e)}
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 @st.cache_data(ttl=60, show_spinner=False)
 def fetch_available_generations() -> list[int]:
+    conn = None
     try:
         conn = _conn()
         cur  = conn.cursor()
         cur.execute("SELECT DISTINCT generacion FROM agentes ORDER BY generacion")
-        gens = [r[0] for r in cur.fetchall()]
-        conn.close()
-        return gens
+        return [r[0] for r in cur.fetchall()]
     except Exception:
         return [1]
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 @st.cache_data(ttl=300, show_spinner=False)
@@ -256,10 +271,12 @@ def fetch_operations_by_agent(agent_id: str) -> pd.DataFrame:
         ORDER BY o.timestamp_entrada ASC
     """
     conn = _conn()
-    cur  = conn.cursor()
-    cur.execute(sql, (agent_id,))
-    rows = cur.fetchall()
-    conn.close()
+    try:
+        cur = conn.cursor()
+        cur.execute(sql, (agent_id,))
+        rows = cur.fetchall()
+    finally:
+        conn.close()
 
     cols = [
         "id", "accion", "precio_entrada", "precio_salida",

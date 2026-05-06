@@ -12,7 +12,7 @@ Flujo diario:
 from __future__ import annotations
 
 import json
-import os
+import logging
 from datetime import date, datetime, timezone
 from decimal import Decimal
 from typing import Any
@@ -20,6 +20,8 @@ from typing import Any
 from agents.base_agent import BaseAgent
 from db.connection import get_conn
 from evolution.evolution_engine import EvolutionEngine, EvolutionResult
+
+log = logging.getLogger("JudgeAgent")
 
 
 class _SafeEncoder(json.JSONEncoder):
@@ -232,19 +234,20 @@ class JudgeAgent(BaseAgent):
         Retorna un dict de auditoría completo para logging externo.
         """
         started_at = datetime.now(timezone.utc)
-        print(f"[JudgeAgent] Iniciando ciclo evolutivo {self.today}...")
+        log.info("Iniciando ciclo evolutivo %s", self.today)
 
         # 1. Ejecutar el motor evolutivo
         engine = EvolutionEngine(self.today)
         result = engine.run()
 
         if result.errors:
-            print(f"[JudgeAgent] Errores en ciclo: {result.errors}")
+            log.error("Errores en ciclo: %s", result.errors)
             return {"status": "error", "errors": result.errors, "fecha": str(self.today)}
 
-        print(f"[JudgeAgent] Supervivientes: {len(result.survivors)} | "
-              f"Eliminados: {len(result.eliminated)} | "
-              f"Nuevos: {len(result.new_agents)}")
+        log.info(
+            "Supervivientes: %d | Eliminados: %d | Nuevos: %d",
+            len(result.survivors), len(result.eliminated), len(result.new_agents),
+        )
 
         # 2. Obtener razonamiento de DeepSeek
         llm_verdict: dict = {}
@@ -252,12 +255,14 @@ class JudgeAgent(BaseAgent):
             prompt = self._build_analysis_prompt(result)
             try:
                 raw = self.reason(prompt)
-                # DeepSeek puede devolver el JSON dentro de un bloque ```json
-                clean = raw.strip().lstrip("```json").lstrip("```").rstrip("```").strip()
+                # Extrae el bloque JSON aunque DeepSeek lo envuelva en ```json ... ```
+                start = raw.find("{")
+                end   = raw.rfind("}")
+                clean = raw[start : end + 1] if start != -1 else raw.strip()
                 llm_verdict = json.loads(clean)
-                print(f"[JudgeAgent] Razonamiento LLM obtenido.")
+                log.info("Razonamiento LLM obtenido.")
             except Exception as e:
-                print(f"[JudgeAgent] LLM no disponible, usando fallback: {e}")
+                log.warning("LLM no disponible, usando fallback: %s", e)
                 llm_verdict = self._fallback_verdict(result)
 
         # 3. Persistir logs
@@ -273,7 +278,7 @@ class JudgeAgent(BaseAgent):
             "llm_verdict":  llm_verdict,
             "elapsed_sec":  round(elapsed, 2),
         }
-        print(f"[JudgeAgent] Ciclo completado en {elapsed:.2f}s.")
+        log.info("Ciclo completado en %.2fs.", elapsed)
         return summary
 
     # ── Fallback sin LLM ──────────────────────────────────────────────────────

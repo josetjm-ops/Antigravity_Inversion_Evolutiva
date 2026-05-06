@@ -157,20 +157,18 @@ def run_all_agents() -> dict:
             results.append({"agent_id": agent_id, "status": "error", "error": str(exc)})
 
     elapsed = round((datetime.now(timezone.utc) - started).total_seconds(), 2)
-    summary = {
-        "status":   "ok",
-        "total":    len(agents_data),
-        "elapsed_sec": elapsed,
-        "results":  results,
-        "precio_mercado": 0,
-    }
     ultimo_precio = float(df_ohlcv["close"].iloc[-1])
     log.info(
         "[TradingRunner] Ciclo completado en %.2fs — %d agentes · precio=%.5f",
         elapsed, len(agents_data), ultimo_precio,
     )
-    summary["precio_mercado"] = ultimo_precio
-    return summary
+    return {
+        "status":         "ok",
+        "total":          len(agents_data),
+        "elapsed_sec":    elapsed,
+        "results":        results,
+        "precio_mercado": ultimo_precio,
+    }
 
 
 # ── Punto de entrada ──────────────────────────────────────────────────────────

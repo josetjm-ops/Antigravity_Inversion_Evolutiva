@@ -4,9 +4,8 @@ Fuentes: Investing.com (ForexFactory-compatible) y DailyForex.
 Devuelve eventos estructurados para que el Sub-agente B los procese con NLP.
 """
 
-import re
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import requests
@@ -128,9 +127,19 @@ def _parse_time(time_str: Optional[str]) -> Optional[datetime]:
 def fetch_macro_snapshot(ventana_horas: int = 4) -> MacroSnapshot:
     """
     Punto de entrada principal para el Sub-agente B.
-    Retorna un MacroSnapshot con eventos y titulares actualizados.
+    Retorna un MacroSnapshot con eventos y titulares actualizados,
+    filtrado a los que ocurrieron dentro de la ventana de tiempo indicada.
     """
     snapshot = MacroSnapshot(timestamp=datetime.now(timezone.utc))
     snapshot.eventos = scrape_investing_calendar()
     snapshot.titulares = scrape_dailyforex_news()
+
+    if ventana_horas > 0 and snapshot.eventos:
+        window = timedelta(hours=ventana_horas)
+        now = snapshot.timestamp
+        snapshot.eventos = [
+            e for e in snapshot.eventos
+            if e.hora_utc is None or abs((now - e.hora_utc).total_seconds()) <= window.total_seconds()
+        ]
+
     return snapshot

@@ -469,10 +469,7 @@ def price_chart_with_operations(
         ops = df_ops.copy()
         ops["timestamp_entrada"] = _to_bogota(ops["timestamp_entrada"])
         if "timestamp_salida" in ops.columns:
-            ops["timestamp_salida"] = ops["timestamp_salida"].where(
-                ops["timestamp_salida"].isna(),
-                _to_bogota(ops["timestamp_salida"].dropna()),
-            )
+            ops["timestamp_salida"] = _to_bogota(ops["timestamp_salida"])
 
     fig = go.Figure()
 
