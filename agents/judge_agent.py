@@ -13,7 +13,13 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import date, datetime, timezone
 from decimal import Decimal
+from typing import Any
+
+from agents.base_agent import BaseAgent
+from db.connection import get_conn
+from evolution.evolution_engine import EvolutionEngine, EvolutionResult
 
 
 class _SafeEncoder(json.JSONEncoder):
@@ -21,12 +27,6 @@ class _SafeEncoder(json.JSONEncoder):
         if isinstance(obj, Decimal):
             return float(obj)
         return super().default(obj)
-from datetime import date, datetime, timezone
-from typing import Any
-
-from agents.base_agent import BaseAgent
-from db.connection import get_conn, get_dict_cursor
-from evolution.evolution_engine import EvolutionEngine, EvolutionResult
 
 _JUDGE_SYSTEM_PROMPT = """Eres el Agente Juez de un sistema de trading evolutivo EUR/USD basado en algoritmos genéticos.
 Tu rol es analizar el rendimiento de agentes de trading y emitir un veredicto razonado sobre:

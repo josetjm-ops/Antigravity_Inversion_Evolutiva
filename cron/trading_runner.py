@@ -145,17 +145,21 @@ def run_all_agents() -> dict:
                 tech_signals=tech_signals,
                 macro_snapshot=macro_snapshot,
             )
+            if result.get("skipped"):
+                log.info("[TradingRunner] %s → SKIP (posición abierta)", agent_id)
+                results.append({"agent_id": agent_id, "status": "ok", "action": "SKIP"})
+                continue
+
             action = result.get("decision", {}).get("accion_final", "HOLD")
             conf   = result.get("decision", {}).get("confianza_final", 0)
             log.info(
                 "[TradingRunner] %s → %s (conf=%.2f)", agent_id, action, conf
             )
             results.append({
-                "agent_id": agent_id,
-                "status":   "ok",
-                "action":   action,
+                "agent_id":  agent_id,
+                "status":    "ok",
+                "action":    action,
                 "confianza": conf,
-                "oanda":    result.get("oanda", {}),
             })
         except Exception as exc:
             log.error("[TradingRunner] Error en agente %s: %s", agent_id, exc)

@@ -66,6 +66,22 @@ class InvestorAgent:
             "capital_actual":  float(row["capital_actual"]),
         })
 
+    # ── Verificación de posición abierta ─────────────────────────────────────
+
+    def _has_open_position(self) -> bool:
+        """True si el agente ya tiene una operación BUY/SELL abierta."""
+        with get_conn() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT 1 FROM operaciones
+                WHERE agente_id = %s AND estado = 'abierta' AND accion IN ('BUY', 'SELL')
+                LIMIT 1
+                """,
+                (self.agent_id,),
+            )
+            return cur.fetchone() is not None
+
     # ── Pipeline principal ────────────────────────────────────────────────────
 
     def run_cycle(
@@ -77,7 +93,17 @@ class InvestorAgent:
         Ejecuta un ciclo completo: Técnico → Macro → Riesgo → DB.
         Las posiciones abiertas (BUY/SELL) quedan registradas con precio de
         entrada real y serán monitoreadas por TradeMonitor para cierre por SL/TP.
+        Si el agente ya tiene una posición abierta, el ciclo se omite.
         """
+        if self._has_open_position():
+            log.info("[InvestorAgent] %s ya tiene posición abierta — ciclo omitido.", self.agent_id)
+            return {
+                "agente_id": self.agent_id,
+                "skipped":   True,
+                "reason":    "open_position",
+                "decision":  {"accion_final": "SKIP", "confianza_final": 0},
+            }
+
         capital = float(self.params.get("capital_actual", 10.0))
 
         senal_tecnico = self.sub_technical.analyze(tech_signals)
