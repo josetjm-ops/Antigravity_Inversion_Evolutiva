@@ -5,9 +5,22 @@ Paleta oscura con acentos dorado / esmeralda / rojo.
 
 from __future__ import annotations
 
+from datetime import timedelta
+
 import pandas as pd
 import plotly.graph_objects as go
 import plotly.express as px
+
+_BOGOTA = timedelta(hours=-5)
+
+
+def _to_bogota(series: pd.Series) -> pd.Series:
+    """Convierte una Serie de timestamps UTC (aware o naive) a hora Bogotá (naive)."""
+    if series.empty:
+        return series
+    if hasattr(series.dt, "tz") and series.dt.tz is not None:
+        return series.dt.tz_convert("America/Bogota").dt.tz_localize(None)
+    return series + _BOGOTA
 
 # ── Paleta ───────────────────────────────────────────────────────────────────
 GOLD    = "#d4af37"
@@ -447,15 +460,29 @@ def price_chart_with_operations(
     if df_prices.empty:
         return _empty("Sin datos de precio — intenta de nuevo en unos segundos")
 
+    # Convertir timestamps UTC → hora Bogotá para display
+    prices = df_prices.copy()
+    prices["timestamp"] = _to_bogota(prices["timestamp"])
+
+    ops = pd.DataFrame()
+    if not df_ops.empty:
+        ops = df_ops.copy()
+        ops["timestamp_entrada"] = _to_bogota(ops["timestamp_entrada"])
+        if "timestamp_salida" in ops.columns:
+            ops["timestamp_salida"] = ops["timestamp_salida"].where(
+                ops["timestamp_salida"].isna(),
+                _to_bogota(ops["timestamp_salida"].dropna()),
+            )
+
     fig = go.Figure()
 
     # ── Velas OHLCV ──────────────────────────────────────────────────────────
     fig.add_trace(go.Candlestick(
-        x=df_prices["timestamp"],
-        open=df_prices["open"],
-        high=df_prices["high"],
-        low=df_prices["low"],
-        close=df_prices["close"],
+        x=prices["timestamp"],
+        open=prices["open"],
+        high=prices["high"],
+        low=prices["low"],
+        close=prices["close"],
         name="EUR/USD",
         increasing=dict(
             line=dict(color=EMERALD, width=1),
@@ -468,9 +495,9 @@ def price_chart_with_operations(
         hoverinfo="x+y",
     ))
 
-    if not df_ops.empty:
-        buys  = df_ops[df_ops["accion"] == "BUY"]
-        sells = df_ops[df_ops["accion"] == "SELL"]
+    if not ops.empty:
+        buys  = ops[ops["accion"] == "BUY"]
+        sells = ops[ops["accion"] == "SELL"]
 
         # ── Entradas ─────────────────────────────────────────────────────────
         if not buys.empty:
@@ -483,7 +510,7 @@ def price_chart_with_operations(
                     symbol="triangle-up", size=13,
                     color=EMERALD, line=dict(color="white", width=1),
                 ),
-                hovertemplate="<b>BUY</b> entrada<br>%{x|%d/%m %H:%M}<br>Precio: %{y:.5f}<extra></extra>",
+                hovertemplate="<b>BUY</b> entrada<br>%{x|%d/%m %H:%M} Bog.<br>Precio: %{y:.5f}<extra></extra>",
             ))
 
         if not sells.empty:
@@ -496,11 +523,11 @@ def price_chart_with_operations(
                     symbol="triangle-down", size=13,
                     color=RED, line=dict(color="white", width=1),
                 ),
-                hovertemplate="<b>SELL</b> entrada<br>%{x|%d/%m %H:%M}<br>Precio: %{y:.5f}<extra></extra>",
+                hovertemplate="<b>SELL</b> entrada<br>%{x|%d/%m %H:%M} Bog.<br>Precio: %{y:.5f}<extra></extra>",
             ))
 
         # ── Salidas (solo operaciones cerradas) ───────────────────────────────
-        closed = df_ops[df_ops["estado"] == "cerrada"].dropna(
+        closed = ops[ops["estado"] == "cerrada"].dropna(
             subset=["timestamp_salida", "precio_salida"]
         ).copy()
 
@@ -541,7 +568,7 @@ def price_chart_with_operations(
                     ),
                     customdata=pnl_vals,
                     hovertemplate=(
-                        f"<b>{label}</b><br>%{{x|%d/%m %H:%M}}<br>"
+                        f"<b>{label}</b><br>%{{x|%d/%m %H:%M}} Bog.<br>"
                         "Precio: %{y:.5f}<br>PnL: %{customdata}<extra></extra>"
                     ),
                 ))
@@ -561,6 +588,7 @@ def price_chart_with_operations(
         **_BASE,
         title=dict(text=title_str, font=dict(color=GOLD, size=13), x=0),
         xaxis=dict(
+            title=dict(text="Hora (Bogotá  UTC−5)", font=dict(color=DIM, size=10)),
             tickfont=dict(color=DIM),
             gridcolor=BORDER, showgrid=True, gridwidth=0.4,
             rangeslider=dict(visible=False),
