@@ -979,7 +979,7 @@ def _tab_instructions() -> None:
       <div class="ins-title">2 · Cómo toma decisiones un agente — Pipeline A → B → C</div>
       <div class="ins-card ins-card-left-emerald">
         <div class="ins-body" style="margin-bottom:14px;">
-          Dentro del horario de trading (<b>9:00 am – 3:00 pm Bogotá</b>), cada agente
+          Dentro del horario de trading (<b>2:00 am – 3:00 pm Bogotá</b>), cada agente
           sin posición abierta ejecuta el pipeline de tres sub-agentes en serie.
           Los indicadores técnicos (RSI, EMA, MACD) se calculan <b>en el momento exacto
           de cada evaluación</b> con los precios más recientes de Yahoo Finance —
@@ -1000,9 +1000,9 @@ def _tab_instructions() -> None:
         <div class="ins-step">
           <div class="ins-step-num">B</div>
           <div class="ins-step-text">
-            <b>Sub-agente Macro</b> — Analiza el calendario económico (Investing.com) y
-            titulares de noticias (DailyForex) para EUR/USD. DeepSeek devuelve un
-            score de sentimiento (−1.0 a +1.0). Los eventos de alto impacto tienen más peso
+            <b>Sub-agente Macro</b> — Analiza el calendario económico y titulares de noticias
+            Forex en tiempo real vía <b>Finnhub API</b>. DeepSeek devuelve un score de
+            sentimiento (−1.0 a +1.0). Los eventos de alto impacto (USD/EUR) tienen más peso
             que los de bajo impacto, según los parámetros del agente.
           </div>
         </div>
@@ -1046,7 +1046,7 @@ def _tab_instructions() -> None:
       <div class="ins-title">4 · Monitor cada 15 minutos — SL/TP + Nuevas posiciones intraday</div>
       <div class="ins-card ins-card-left-dim">
         <div class="ins-body">
-          El <b>Trade Monitor</b> corre cada 15 minutos dentro del horario 9:00 am–3:00 pm
+          El <b>Trade Monitor</b> corre cada 15 minutos dentro del horario 2:00 am–3:00 pm
           Bogotá y realiza <b>dos tareas en cada ciclo</b>:<br><br>
           <b>① Verificación de posiciones abiertas</b><br>
           Obtiene el precio actual de EUR/USD (Yahoo Finance) y comprueba si alguna posición
@@ -1059,11 +1059,11 @@ def _tab_instructions() -> None:
           el monitor descarga <b>velas OHLCV actualizadas</b> de Yahoo Finance y recalcula
           RSI, EMA y MACD con los precios del momento. Luego ejecuta el pipeline A→B→C completo
           para decidir si abrir una nueva posición.<br><br>
-          <b>Ejemplo:</b> un agente abre a las 9:00 am, su Take Profit se activa a las 10:15 am.
-          A las 10:30 am el monitor detecta que está libre, descarga los precios actualizados
-          hasta las 10:30 am y evalúa si abrir una segunda posición con los indicadores frescos
-          de ese momento — no los del amanecer. Un agente puede operar múltiples veces
-          en el mismo día, de forma secuencial (una posición abierta a la vez).
+          <b>Ejemplo:</b> un agente abre a las 3:00 am, su Take Profit se activa a las 4:15 am.
+          A las 4:30 am el monitor detecta que está libre, descarga los precios actualizados
+          hasta las 4:30 am y evalúa si abrir una segunda posición con los indicadores frescos
+          de ese momento. Un agente puede operar múltiples veces en el mismo día,
+          de forma secuencial (una posición abierta a la vez).
         </div>
       </div>
     </div>
@@ -1165,7 +1165,7 @@ def _tab_instructions() -> None:
             </div>
           </div>
           <div class="ins-timeline-item">
-            <div class="ins-time">9:00 am – 3:00 pm · cada 15 minutos</div>
+            <div class="ins-time">2:00 am – 3:00 pm · cada 15 minutos</div>
             <div class="ins-timeline-text">
               <b style="color:{TEXT};">Monitor intraday (doble función)</b><br>
               <span style="color:{DIM};">① SL/TP:</span> verifica si alguna posición abierta tocó
