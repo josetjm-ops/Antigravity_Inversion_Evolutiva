@@ -8,7 +8,7 @@ Dos responsabilidades en cada ciclo:
      veces al día, de forma secuencial (una posición abierta a la vez por agente).
 
 Horario de apertura de nuevas posiciones (configurable vía env):
-  TRADING_START_UTC  : hora UTC en que se permite abrir (default 14 = 9am Bogotá)
+  TRADING_START_UTC  : hora UTC en que se permite abrir (default 7 = 2:00 am Bogotá)
   TRADING_CUTOFF_UTC : hora UTC límite para abrir (default 20 = 3pm Bogotá)
   → Las posiciones abiertas se siguen monitoreando fuera de ese horario.
   → El EOD (force-close-all) corre a las 22:00 UTC (5pm Bogotá).
@@ -54,7 +54,7 @@ if str(ROOT) not in sys.path:
 
 _POLL_SECONDS        = int(os.getenv("TRADE_MONITOR_POLL_SECONDS", "60"))
 _MIN_CAPITAL         = float(os.getenv("MIN_CAPITAL_TO_TRADE", "2.0"))
-_TRADING_START_UTC   = int(os.getenv("TRADING_START_UTC",   "7"))    # 2:00 am Bogotá
+_TRADING_START_UTC   = int(os.getenv("TRADING_START_UTC",   "7"))    # 2:00 am Bogotá (sesión asiática/europea)
 _TRADING_CUTOFF_UTC  = int(os.getenv("TRADING_CUTOFF_UTC",  "20"))   # 3:00 pm Bogotá
 
 

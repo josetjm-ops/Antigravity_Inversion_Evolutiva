@@ -1156,15 +1156,6 @@ def _tab_instructions() -> None:
       <div class="ins-card ins-card-left-dim">
         <div class="ins-timeline">
           <div class="ins-timeline-item">
-            <div class="ins-time">8:50 am</div>
-            <div class="ins-timeline-text">
-              <b style="color:{TEXT};">Primer ciclo de Trading</b> — Los 10 agentes activos
-              ejecutan su pipeline A→B→C. Se descarga 1 DataFrame OHLCV compartido de Yahoo Finance
-              y cada agente calcula sus propios RSI, EMA y MACD en memoria con sus parámetros
-              genéticos. Los agentes que superan sus umbrales de confianza abren posición BUY o SELL.
-            </div>
-          </div>
-          <div class="ins-timeline-item">
             <div class="ins-time">2:00 am – 3:00 pm · cada 15 minutos</div>
             <div class="ins-timeline-text">
               <b style="color:{TEXT};">Monitor intraday (doble función)</b><br>
@@ -1173,7 +1164,10 @@ def _tab_instructions() -> None:
               <span style="color:{DIM};">② Nuevas posiciones:</span> para cada agente libre
               (sin posición y con capital suficiente), descarga OHLCV actualizado, recalcula
               RSI/EMA/MACD con los precios del momento y ejecuta el pipeline completo.
-              Un agente puede operar varias veces al día de forma secuencial.
+              Un agente puede operar varias veces al día de forma secuencial.<br><br>
+              <span style="color:{DIM};">A las 8:50 am corre además un ciclo de trading
+              dedicado que garantiza que todos los agentes evalúen en simultáneo al inicio
+              de la sesión europea/americana.</span>
             </div>
           </div>
           <div class="ins-timeline-item">
