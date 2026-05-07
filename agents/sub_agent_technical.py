@@ -44,16 +44,16 @@ class SubAgentTechnical(BaseAgent):
         if ema_lenta == 0:
             return "HOLD", 0.35
         diff_pct = (ema_rapida - ema_lenta) / ema_lenta
-        if diff_pct > 0.0002:
+        if diff_pct > 0.0001:
             return "BUY", min(0.90, 0.55 + abs(diff_pct) * 100)
-        if diff_pct < -0.0002:
+        if diff_pct < -0.0001:
             return "SELL", min(0.90, 0.55 + abs(diff_pct) * 100)
         return "HOLD", 0.35
 
     def _score_macd(self, macd_hist: float) -> tuple[str, float]:
-        if macd_hist > 0.0001:
+        if macd_hist > 0.00005:
             return "BUY", min(0.85, 0.5 + macd_hist * 200)
-        if macd_hist < -0.0001:
+        if macd_hist < -0.00005:
             return "SELL", min(0.85, 0.5 + abs(macd_hist) * 200)
         return "HOLD", 0.30
 

@@ -74,14 +74,19 @@ class SubAgentRisk(BaseAgent):
     ) -> tuple[str, float]:
         peso_tec = float(self.params.get("peso_tecnico_vs_macro", 0.55))
         peso_mac = 1.0 - peso_tec
-        umbral_min = float(self.params.get("umbral_confianza_minima", 0.60))
 
         # Si las señales concuerdan: promediar ponderado
         if rec_tec == rec_mac:
             conf = conf_tecnica * peso_tec + conf_macro * peso_mac
             return rec_tec, round(conf, 4)
 
-        # Si hay conflicto: la señal con mayor confianza gana si supera 0.75
+        # HOLD de un agente = abstención, no conflicto
+        if rec_mac == "HOLD" and rec_tec in ("BUY", "SELL"):
+            return rec_tec, round(conf_tecnica, 4)
+        if rec_tec == "HOLD" and rec_mac in ("BUY", "SELL"):
+            return rec_mac, round(conf_macro, 4)
+
+        # Conflicto real (BUY vs SELL): la señal más segura gana si supera 0.75
         conf_tec_w = conf_tecnica * peso_tec
         conf_mac_w = conf_macro * peso_mac
         if conf_tec_w > conf_mac_w and conf_tecnica > 0.75:
@@ -121,7 +126,7 @@ class SubAgentRisk(BaseAgent):
 
         accion_prelim, conf_prelim = self._blend_confidence(conf_tec, conf_mac, rec_tec, rec_mac)
 
-        umbral_min = float(self.params.get("umbral_confianza_minima", 0.60))
+        umbral_min = float(self.params.get("umbral_confianza_minima", 0.50))
         capital_pct = float(self.params.get("capital_por_operacion_pct", 0.50))
         capital_uso = round(capital_disponible * capital_pct, 4)
 
