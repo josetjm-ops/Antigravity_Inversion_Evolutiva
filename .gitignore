@@ -50,3 +50,6 @@ htmlcov/
 
 # ── Sistema operativo ─────────────────────────────────────────────────────────
 desktop.ini
+
+google_credentials.json
+*credentials*.json

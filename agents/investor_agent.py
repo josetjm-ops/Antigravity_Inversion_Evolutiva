@@ -25,6 +25,7 @@ from agents.sub_agent_technical import SubAgentTechnical
 from data.alpha_vantage_client import TechnicalSignals
 from data.macro_scraper import MacroSnapshot
 from db.connection import get_conn, get_dict_cursor
+from utils.sheets_logger import SheetsLogger
 
 log = logging.getLogger(__name__)
 
@@ -183,6 +184,29 @@ class InvestorAgent:
                         "UPDATE agentes SET operaciones_total = operaciones_total + 1 WHERE id = %s",
                         (self.agent_id,),
                     )
+                    
+                try:
+                    SheetsLogger().log_operation(
+                        op_id=op_id,
+                        decision={
+                            "agente_id":        decision.agente_id,
+                            "accion_final":     decision.accion_final,
+                            "confianza_final":  decision.confianza_final,
+                            "confianza_tecnica": decision.confianza_tecnica,
+                            "confianza_macro":  decision.confianza_macro,
+                            "stop_loss":        decision.stop_loss,
+                            "take_profit":      decision.take_profit,
+                            "razonamiento":     decision.razonamiento,
+                            "senal_tecnico":    decision.senal_tecnico,
+                            "senal_macro":      decision.senal_macro,
+                        },
+                        precio_entrada=precio_entrada,
+                        timestamp_entrada=datetime.now(timezone.utc),
+                        capital_usado=decision.capital_a_usar if decision.accion_final != "HOLD" else 0
+                    )
+                except Exception as e:
+                    log.error(f"[InvestorAgent] Error logging to sheets: {e}")
+                    
                 return op_id
         except Exception as exc:
             log.error("[InvestorAgent] Error persistiendo operación: %s", exc)
@@ -252,6 +276,14 @@ class InvestorAgent:
                 """,
                 (nuevo_capital, roi_delta, pnl, self.agent_id),
             )
+
+        try:
+            SheetsLogger().update_operation(
+                op_id, precio_salida, pnl,
+                timestamp_salida=datetime.now(timezone.utc),
+            )
+        except Exception as e:
+            log.error(f"[InvestorAgent] Error updating sheets: {e}")
 
         log.info(
             "[InvestorAgent] Op %d cerrada: accion=%s entrada=%.5f salida=%.5f pnl=%.4f",

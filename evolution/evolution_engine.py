@@ -23,6 +23,7 @@ from datetime import date
 from dotenv import load_dotenv
 
 from db.connection import get_conn, get_dict_cursor
+from utils.sheets_logger import SheetsLogger
 
 load_dotenv()
 
@@ -413,6 +414,25 @@ class EvolutionEngine:
             """,
             (self.today, razon, ids),
         )
+        
+        for agent in eliminated:
+            try:
+                ops_t = int(agent.get("operaciones_total", 0) or 0)
+                ops_w = int(agent.get("operaciones_ganadoras", 0) or 0)
+                SheetsLogger().update_agent_status(
+                    agent_id          = agent["id"],
+                    status            = "eliminado",
+                    roi               = float(agent.get("roi_total", 0) or 0),
+                    ops               = ops_t,
+                    ops_ganadoras     = ops_w,
+                    fitness           = float(agent.get("fitness_score", 0) or 0),
+                    fecha_eliminacion = str(self.today),
+                    razon_eliminacion = razon,
+                    capital_final     = float(agent.get("capital_actual", 10.0) or 10.0),
+                )
+            except Exception as e:
+                import logging
+                logging.getLogger(__name__).error(f"[EvolutionEngine] Error updating sheet for agent {agent['id']}: {e}")
 
     def _insert_new_agent(self, conn, agent: dict) -> None:
         cur = conn.cursor()
@@ -438,6 +458,12 @@ class EvolutionEngine:
                 "params_smc":      json.dumps(agent.get("params_smc", _DEFAULT_SMC_PARAMS)),
             },
         )
+        
+        try:
+            SheetsLogger().log_agent(agent)
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).error(f"[EvolutionEngine] Error logging new agent {agent['id']} to sheet: {e}")
 
     def _snapshot_ranking(self, conn, agents: list[dict], evento_map: dict[str, str]) -> None:
         cur = conn.cursor()
