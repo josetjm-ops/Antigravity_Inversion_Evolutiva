@@ -124,11 +124,16 @@ def run_all_agents() -> dict:
         agent_id = agent_data["id"]
         try:
             # Indicadores calculados con los parámetros genéticos propios del agente
-            tech_signals = calc_signals(df_ohlcv, agent_data["params_tecnicos"])
+            tech_signals = calc_signals(
+                df_ohlcv,
+                agent_data["params_tecnicos"],
+                agent_data.get("params_smc"),
+            )
             params = {
                 "params_tecnicos": agent_data["params_tecnicos"],
                 "params_macro":    agent_data["params_macro"],
                 "params_riesgo":   agent_data["params_riesgo"],
+                "params_smc":      agent_data.get("params_smc"),
                 "capital_actual":  float(agent_data["capital_actual"]),
             }
             agent  = InvestorAgent(agent_id, params)

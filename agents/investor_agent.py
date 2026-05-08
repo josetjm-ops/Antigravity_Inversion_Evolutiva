@@ -39,7 +39,11 @@ class InvestorAgent:
     def __init__(self, agent_id: str, params: dict):
         self.agent_id = agent_id
         self.params   = params
-        self.sub_technical = SubAgentTechnical(agent_id, params.get("params_tecnicos", {}))
+        self.sub_technical = SubAgentTechnical(
+            agent_id,
+            params.get("params_tecnicos", {}),
+            params.get("params_smc", None),
+        )
         self.sub_macro     = SubAgentMacro(agent_id, params.get("params_macro", {}))
         self.sub_risk      = SubAgentRisk(agent_id, params.get("params_riesgo", {}))
 
