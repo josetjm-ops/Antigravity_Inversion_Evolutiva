@@ -233,19 +233,25 @@ class InvestorAgent:
             )
             row = cur.fetchone()
 
-        if not row or not row["precio_entrada"]:
-            return {"error": f"Operación {op_id} no encontrada o sin precio de entrada"}
+        if not row:
+            return {"error": f"Operación {op_id} no encontrada"}
 
-        precio_entrada = float(row["precio_entrada"])
-        capital_usado  = float(row["capital_usado"])
-        accion         = row["accion"]
+        precio_entrada_raw = row["precio_entrada"]
+        capital_usado      = float(row["capital_usado"])
+        accion             = row["accion"]
 
-        if accion == "BUY":
-            pnl = round((precio_salida - precio_entrada) / precio_entrada * capital_usado, 4)
-        elif accion == "SELL":
-            pnl = round((precio_entrada - precio_salida) / precio_entrada * capital_usado, 4)
-        else:
+        if precio_entrada_raw is None:
+            # Sin precio de entrada registrado — cerrar con pnl=0 (breakeven)
+            log.warning("[InvestorAgent] Op %d sin precio_entrada — cerrando con pnl=0.", op_id)
             pnl = 0.0
+        else:
+            precio_entrada = float(precio_entrada_raw)
+            if accion == "BUY":
+                pnl = round((precio_salida - precio_entrada) / precio_entrada * capital_usado, 4)
+            elif accion == "SELL":
+                pnl = round((precio_entrada - precio_salida) / precio_entrada * capital_usado, 4)
+            else:
+                pnl = 0.0
 
         pnl_pct       = round(pnl / capital_usado * 100, 4) if capital_usado > 0 else 0.0
         nuevo_capital = round(capital_disponible + pnl, 4)

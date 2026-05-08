@@ -391,56 +391,54 @@ def force_close_all() -> dict:
         )
         open_ops = [dict(row) for row in cur.fetchall()]
 
-    # Cancelar operaciones residuales sin precio (HOLDs mal registrados)
+    closed = errors = 0
+
+    if not open_ops:
+        log.info("[TradeMonitor] EOD — Sin posiciones abiertas para cerrar.")
+    else:
+        for op in open_ops:
+            try:
+                with get_conn() as conn:
+                    cur = conn.cursor()
+                    cur.execute(
+                        "SELECT capital_actual FROM agentes WHERE id = %s",
+                        (op["agente_id"],),
+                    )
+                    row = cur.fetchone()
+                    capital_actual = float(row[0]) if row else 10.0
+
+                agent  = InvestorAgent(op["agente_id"], {})
+                result = agent.close_operation(
+                    op_id=op["id"],
+                    precio_salida=current_price,
+                    capital_disponible=capital_actual,
+                )
+                log.info(
+                    "[TradeMonitor] EOD — Op %d cerrada: accion=%s pnl=%.4f",
+                    op["id"], op["accion"], result.get("pnl", 0),
+                )
+                closed += 1
+
+            except Exception as exc:
+                log.error("[TradeMonitor] EOD — Error cerrando op %d: %s", op["id"], exc)
+                errors += 1
+
+        log.info("[TradeMonitor] EOD completado — cerradas=%d errores=%d", closed, errors)
+
+    # Cancelar HOLDs residuales atrapados en 'abierta' (corre DESPUÉS del cierre de BUY/SELL)
     with get_conn() as conn:
         cur = conn.cursor()
         cur.execute(
             """
             UPDATE operaciones
             SET estado = 'cancelada'
-            WHERE estado = 'abierta'
-              AND (accion = 'HOLD' OR precio_entrada IS NULL)
+            WHERE estado = 'abierta' AND accion = 'HOLD'
             """
         )
         orphaned = cur.rowcount
-
     if orphaned:
-        log.info("[TradeMonitor] EOD — %d operaciones sin precio marcadas canceladas.", orphaned)
+        log.info("[TradeMonitor] EOD — %d HOLDs residuales cancelados.", orphaned)
 
-    if not open_ops:
-        log.info("[TradeMonitor] EOD — Sin posiciones abiertas para cerrar.")
-        return {"closed": 0, "errors": 0}
-
-    closed = errors = 0
-
-    for op in open_ops:
-        try:
-            with get_conn() as conn:
-                cur = conn.cursor()
-                cur.execute(
-                    "SELECT capital_actual FROM agentes WHERE id = %s",
-                    (op["agente_id"],),
-                )
-                row = cur.fetchone()
-                capital_actual = float(row[0]) if row else 10.0
-
-            agent  = InvestorAgent(op["agente_id"], {})
-            result = agent.close_operation(
-                op_id=op["id"],
-                precio_salida=current_price,
-                capital_disponible=capital_actual,
-            )
-            log.info(
-                "[TradeMonitor] EOD — Op %d cerrada: accion=%s pnl=%.4f",
-                op["id"], op["accion"], result.get("pnl", 0),
-            )
-            closed += 1
-
-        except Exception as exc:
-            log.error("[TradeMonitor] EOD — Error cerrando op %d: %s", op["id"], exc)
-            errors += 1
-
-    log.info("[TradeMonitor] EOD completado — cerradas=%d errores=%d", closed, errors)
     return {"closed": closed, "errors": errors}
 
 
