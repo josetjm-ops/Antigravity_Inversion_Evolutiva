@@ -96,6 +96,76 @@ _BOUNDS_SMC = {
 }
 
 
+# ── Fitness: Calmar Ratio Proxy ──────────────────────────────────────────────
+
+_FITNESS_SQL = """
+    WITH capital_series AS (
+        SELECT agente_id, timestamp_entrada,
+               SUM(pnl) OVER (PARTITION BY agente_id ORDER BY timestamp_entrada)
+                   AS capital_acumulado
+        FROM operaciones WHERE estado = 'cerrada'
+    ),
+    drawdown_calc AS (
+        SELECT agente_id,
+               MAX(capital_acumulado) OVER (
+                   PARTITION BY agente_id
+                   ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+               ) AS peak,
+               capital_acumulado
+        FROM capital_series
+    ),
+    max_dd AS (
+        SELECT agente_id,
+               MAX((peak - capital_acumulado) / NULLIF(peak, 0)) AS max_drawdown
+        FROM drawdown_calc GROUP BY agente_id
+    ),
+    ops_diarias AS (
+        SELECT agente_id, AVG(ops_dia) AS avg_ops_dia
+        FROM (
+            SELECT agente_id, DATE(timestamp_entrada) AS dia, COUNT(*) AS ops_dia
+            FROM operaciones
+            WHERE estado IN ('cerrada', 'abierta')
+            GROUP BY agente_id, DATE(timestamp_entrada)
+        ) sub GROUP BY agente_id
+    )
+    SELECT
+        a.id,
+        a.roi_total,
+        COALESCE(d.max_drawdown, 0) AS max_drawdown,
+        COALESCE(o.avg_ops_dia,  0) AS avg_ops_dia,
+        (a.roi_total / (COALESCE(d.max_drawdown, 0.01) + 1))
+        - CASE
+            WHEN o.avg_ops_dia > 3
+                 AND (a.operaciones_ganadoras::float
+                      / NULLIF(a.operaciones_total, 0)) < 0.5
+            THEN 0.5 ELSE 0
+          END AS fitness_score
+    FROM agentes a
+    LEFT JOIN max_dd      d ON a.id = d.agente_id
+    LEFT JOIN ops_diarias o ON a.id = o.agente_id
+    WHERE a.estado = 'activo'
+"""
+
+
+def calc_fitness_scores(conn, agent_ids: list[str] | None = None) -> dict[str, float]:
+    """
+    Calmar Ratio Proxy para agentes activos.
+    Retorna {agente_id: fitness_score}.
+
+    Fórmula: roi_total / (max_drawdown + 1) — penalidad_overtrading
+    Penalidad: -0.5 si avg_ops_dia > 3 y win_rate < 50%
+    """
+    sql    = _FITNESS_SQL
+    params: tuple = ()
+    if agent_ids:
+        sql    = _FITNESS_SQL + " AND a.id = ANY(%s)"
+        params = (agent_ids,)
+
+    cur = get_dict_cursor(conn)
+    cur.execute(sql, params)
+    return {row["id"]: float(row["fitness_score"] or 0) for row in cur.fetchall()}
+
+
 # ── Helpers de mutación ──────────────────────────────────────────────────────
 
 def _clamp(value: float, lo: float, hi: float) -> float:
@@ -248,13 +318,59 @@ class EvolutionEngine:
         """
         with get_conn() as conn:
             cur = get_dict_cursor(conn)
+            # CTE con Calmar Ratio Proxy — ranking por fitness en lugar de roi_total
             cur.execute("""
-                SELECT id, generacion, fecha_nacimiento, capital_actual,
-                       roi_total, operaciones_total, operaciones_ganadoras,
-                       params_tecnicos, params_macro, params_riesgo, params_smc
-                FROM agentes
-                WHERE estado = 'activo'
-                ORDER BY roi_total DESC, fecha_nacimiento DESC, id DESC
+                WITH capital_series AS (
+                    SELECT agente_id, timestamp_entrada,
+                           SUM(pnl) OVER (PARTITION BY agente_id ORDER BY timestamp_entrada)
+                               AS capital_acumulado
+                    FROM operaciones WHERE estado = 'cerrada'
+                ),
+                drawdown_calc AS (
+                    SELECT agente_id,
+                           MAX(capital_acumulado) OVER (
+                               PARTITION BY agente_id
+                               ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+                           ) AS peak,
+                           capital_acumulado
+                    FROM capital_series
+                ),
+                max_dd AS (
+                    SELECT agente_id,
+                           MAX((peak - capital_acumulado) / NULLIF(peak, 0)) AS max_drawdown
+                    FROM drawdown_calc GROUP BY agente_id
+                ),
+                ops_diarias AS (
+                    SELECT agente_id, AVG(ops_dia) AS avg_ops_dia
+                    FROM (
+                        SELECT agente_id, DATE(timestamp_entrada) AS dia, COUNT(*) AS ops_dia
+                        FROM operaciones
+                        WHERE estado IN ('cerrada', 'abierta')
+                        GROUP BY agente_id, DATE(timestamp_entrada)
+                    ) sub GROUP BY agente_id
+                ),
+                fitness AS (
+                    SELECT a.id,
+                           (a.roi_total / (COALESCE(d.max_drawdown, 0.01) + 1))
+                           - CASE
+                               WHEN o.avg_ops_dia > 3
+                                    AND (a.operaciones_ganadoras::float
+                                         / NULLIF(a.operaciones_total, 0)) < 0.5
+                               THEN 0.5 ELSE 0
+                             END AS fitness_score
+                    FROM agentes a
+                    LEFT JOIN max_dd      d ON a.id = d.agente_id
+                    LEFT JOIN ops_diarias o ON a.id = o.agente_id
+                    WHERE a.estado = 'activo'
+                )
+                SELECT a.id, a.generacion, a.fecha_nacimiento, a.capital_actual,
+                       a.roi_total, a.operaciones_total, a.operaciones_ganadoras,
+                       a.params_tecnicos, a.params_macro, a.params_riesgo, a.params_smc,
+                       COALESCE(f.fitness_score, 0) AS fitness_score
+                FROM agentes a
+                LEFT JOIN fitness f ON a.id = f.id
+                WHERE a.estado = 'activo'
+                ORDER BY COALESCE(f.fitness_score, 0) DESC, a.fecha_nacimiento DESC, a.id DESC
             """)
             return [dict(row) for row in cur.fetchall()]
 
@@ -334,16 +450,18 @@ class EvolutionEngine:
             cap_inicial = 10.0
             roi_diario  = round((cap_actual - cap_inicial) / cap_inicial * 100, 4)
 
+            fitness = round(float(agent.get("fitness_score", 0) or 0), 6)
             cur.execute(
                 """
                 INSERT INTO ranking_historico (
                     fecha, agente_id, posicion_ranking,
                     roi_diario, roi_acumulado, capital_fin_dia,
-                    operaciones_dia, evento
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    operaciones_dia, evento, fitness_score
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (fecha, agente_id) DO UPDATE SET
                     posicion_ranking = EXCLUDED.posicion_ranking,
-                    evento           = EXCLUDED.evento
+                    evento           = EXCLUDED.evento,
+                    fitness_score    = EXCLUDED.fitness_score
                 """,
                 (
                     self.today,
@@ -354,6 +472,7 @@ class EvolutionEngine:
                     cap_actual,
                     ops_total,
                     evento_map.get(agent["id"], "evaluacion"),
+                    fitness,
                 ),
             )
 
