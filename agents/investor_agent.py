@@ -45,7 +45,11 @@ class InvestorAgent:
             params.get("params_smc", None),
         )
         self.sub_macro     = SubAgentMacro(agent_id, params.get("params_macro", {}))
-        self.sub_risk      = SubAgentRisk(agent_id, params.get("params_riesgo", {}))
+        self.sub_risk      = SubAgentRisk(
+            agent_id,
+            params.get("params_riesgo", {}),
+            params.get("params_smc", None),
+        )
 
     @classmethod
     def from_db(cls, agent_id: str) -> "InvestorAgent":
