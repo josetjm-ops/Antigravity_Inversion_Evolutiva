@@ -16,7 +16,7 @@ from __future__ import annotations
 import json
 import logging
 import os
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 import gspread
 from google.oauth2.service_account import Credentials
@@ -31,9 +31,9 @@ SCOPES = [
 # ── Headers de cada pestaña ────────────────────────────────────────────────────
 
 _HEADERS_OPS = [
-    "ID", "Agente ID", "Generación", "Timestamp Entrada (UTC)", "Acción",
+    "ID", "Agente ID", "Generación", "Timestamp Entrada (Bogotá)", "Acción",
     "Precio Entrada", "SL", "TP", "Pips SL", "R:R",
-    "Capital Usado ($)", "Estado", "Timestamp Salida (UTC)", "Precio Salida",
+    "Capital Usado ($)", "Estado", "Timestamp Salida (Bogotá)", "Precio Salida",
     "P&G ($)", "P&G %",
     "Confianza Final", "Confianza Técnica", "Confianza Macro",
     "RSI", "FVG Activo", "FVG Dirección", "FVG Pips",
@@ -50,6 +50,20 @@ _HEADERS_AGENTS = [
     "FVG min pips", "OB impulso pips", "R:R target",
     "Cuarentena (min)", "peso_fvg", "peso_ob",
 ]
+
+# ── Zona horaria Bogotá (UTC-5, sin horario de verano) ─────────────────────────
+
+_TZ_BOGOTA = timezone(timedelta(hours=-5))
+
+
+def _to_bogota(dt: datetime | None) -> str:
+    """Convierte un datetime (naive-UTC o aware) a hora Bogotá y retorna ISO string."""
+    if dt is None:
+        return ""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(_TZ_BOGOTA).strftime("%Y-%m-%d %H:%M:%S")
+
 
 # ── Helpers de columnas ────────────────────────────────────────────────────────
 
@@ -215,11 +229,7 @@ class SheetsLogger:
                 except Exception:
                     pass
 
-            ts_str = (
-                timestamp_entrada.isoformat()
-                if hasattr(timestamp_entrada, "isoformat")
-                else str(timestamp_entrada)
-            )
+            ts_str = _to_bogota(timestamp_entrada)
 
             # Número de fila que ocupará esta nueva fila
             n = len(self.ws_ops.col_values(1)) + 1  # col A incluye header
@@ -275,11 +285,7 @@ class SheetsLogger:
             if not cell:
                 log.warning("[SheetsLogger] Operación %s no encontrada en Sheets.", op_id)
                 return
-            ts_str = (
-                timestamp_salida.isoformat()
-                if (timestamp_salida and hasattr(timestamp_salida, "isoformat"))
-                else ""
-            )
+            ts_str = _to_bogota(timestamp_salida)
             # Actualiza columnas L (Estado) → M (Timestamp Salida) → N (Precio Salida)
             l_col = _col_letter(_COL_OPS["Estado"])
             n_col = _col_letter(_COL_OPS["Precio Salida"])

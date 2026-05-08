@@ -35,6 +35,7 @@ from utils.sheets_logger import (
     _pnl_formula,
     _pnl_pct_formula,
     _safe_float,
+    _to_bogota,
     _HEADERS_OPS,
     _HEADERS_AGENTS,
 )
@@ -194,10 +195,8 @@ def _op_row(op: dict, row_n: int) -> list:
         except Exception:
             pass
 
-    ts_ent = op.get("timestamp_entrada")
-    ts_ent_str = ts_ent.isoformat() if hasattr(ts_ent, "isoformat") else str(ts_ent or "")
-    ts_sal = op.get("timestamp_salida")
-    ts_sal_str = ts_sal.isoformat() if hasattr(ts_sal, "isoformat") else str(ts_sal or "")
+    ts_ent_str = _to_bogota(op.get("timestamp_entrada"))
+    ts_sal_str = _to_bogota(op.get("timestamp_salida"))
 
     # P&G: numérico para cerradas, fórmula GOOGLEFINANCE para abiertas
     if estado == "cerrada":
