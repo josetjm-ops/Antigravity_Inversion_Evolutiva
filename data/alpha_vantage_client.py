@@ -1,5 +1,5 @@
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import requests
 from dotenv import load_dotenv
@@ -13,6 +13,7 @@ _SYMBOL = "EURUSD"
 
 @dataclass
 class TechnicalSignals:
+    # ── Indicadores clásicos (requeridos) ─────────────────────────────────────
     rsi: float
     ema_rapida: float
     ema_lenta: float
@@ -21,6 +22,20 @@ class TechnicalSignals:
     macd_hist: float
     precio_actual: float
     ema_cross_alcista: bool
+
+    # ── Smart Money Concepts (opcionales — defaults seguros) ──────────────────
+    fvg_activo:      bool  = field(default=False)   # FVG detectado y no rellenado
+    fvg_direccion:   str   = field(default="NONE")  # "BULL" | "BEAR" | "NONE"
+    fvg_pips:        float = field(default=0.0)     # tamaño del FVG en pips
+    fvg_nivel_sup:   float = field(default=0.0)     # precio techo del gap
+    fvg_nivel_inf:   float = field(default=0.0)     # precio piso del gap
+    ob_activo:       bool  = field(default=False)   # Order Block válido y no mitigado
+    ob_direccion:    str   = field(default="NONE")  # "BULL" | "BEAR" | "NONE"
+    ob_nivel_sup:    float = field(default=0.0)     # precio techo del OB
+    ob_nivel_inf:    float = field(default=0.0)     # precio piso del OB
+    range_proxy:     float = field(default=0.0)     # (high-low) última vela en pips
+    range_ma20:      float = field(default=0.0)     # media móvil 20p del range en pips
+    range_spike:     bool  = field(default=False)   # range_proxy > range_ma20 * multiplier
 
 
 def _get(params: dict) -> dict:
