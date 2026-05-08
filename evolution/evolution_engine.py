@@ -72,6 +72,29 @@ _BOUNDS_RIESGO = {
     "peso_tecnico_vs_macro":      (0.30,  0.75,  False),
 }
 
+# Genes SMC — nacen con agentes nuevos desde Session 4
+_DEFAULT_SMC_PARAMS: dict = {
+    "fvg_min_pips":             5.0,
+    "ob_impulse_pips":          10.0,
+    "range_spike_multiplier":   1.5,
+    "risk_reward_target":       2.0,
+    "macro_quarantine_minutes": 60,
+    "risk_pct_per_trade":       0.015,
+    "peso_fvg":                 0.15,
+    "peso_ob":                  0.15,
+}
+
+_BOUNDS_SMC = {
+    "fvg_min_pips":             (2.0,  15.0,  False),
+    "ob_impulse_pips":          (5.0,  20.0,  False),
+    "range_spike_multiplier":   (1.2,   3.0,  False),
+    "risk_reward_target":       (1.5,   4.0,  False),
+    "macro_quarantine_minutes": (30,  120,    True),
+    "risk_pct_per_trade":       (0.01,  0.02, False),
+    "peso_fvg":                 (0.05,  0.50, False),
+    "peso_ob":                  (0.05,  0.50, False),
+}
+
 
 # ── Helpers de mutación ──────────────────────────────────────────────────────
 
@@ -159,32 +182,39 @@ def breed_agent(
     roi2 = float(parent2.get("roi_total", 0))
     p1_weight = 0.6 if roi1 >= roi2 else 0.4
 
-    tec_child = crossover(parent1["params_tecnicos"], parent2["params_tecnicos"], p1_weight)
-    mac_child = crossover(parent1["params_macro"],    parent2["params_macro"],    p1_weight)
-    risk_child = crossover(parent1["params_riesgo"],  parent2["params_riesgo"],   p1_weight)
+    tec_child  = crossover(parent1["params_tecnicos"], parent2["params_tecnicos"], p1_weight)
+    mac_child  = crossover(parent1["params_macro"],    parent2["params_macro"],    p1_weight)
+    risk_child = crossover(parent1["params_riesgo"],   parent2["params_riesgo"],   p1_weight)
+    smc_child  = crossover(
+        parent1.get("params_smc", _DEFAULT_SMC_PARAMS),
+        parent2.get("params_smc", _DEFAULT_SMC_PARAMS),
+        p1_weight,
+    )
 
-    # Mutación gaussiana por bloque — períodos con SIGMA_PERIODS, pesos con SIGMA_WEIGHTS
+    # Mutación gaussiana por bloque
     tec_child  = _mutate_block(tec_child,  _BOUNDS_TECNICOS_PERIODS, SIGMA_PERIODS)
     tec_child  = _mutate_block(tec_child,  _BOUNDS_TECNICOS_WEIGHTS, SIGMA_WEIGHTS)
     mac_child  = _mutate_block(mac_child,  _BOUNDS_MACRO,            SIGMA_WEIGHTS)
     risk_child = _mutate_block(risk_child, _BOUNDS_RIESGO,           SIGMA_RISK)
+    smc_child  = _mutate_block(smc_child,  _BOUNDS_SMC,              SIGMA_RISK)
 
     # Normalizar pesos y aplicar constraints
-    tec_child  = _normalize_weights(tec_child,  ["peso_rsi", "peso_ema", "peso_macd"])
+    tec_child  = _normalize_weights(tec_child, ["peso_rsi", "peso_ema", "peso_macd"])
     tec_child  = _enforce_ema_constraint(tec_child)
     risk_child = _enforce_sl_tp_constraint(risk_child)
 
     return {
-        "id":              child_id,
+        "id":               child_id,
         "fecha_nacimiento": birth_date,
-        "generacion":      generation,
-        "padre_1_id":      parent1["id"],
-        "padre_2_id":      parent2["id"],
-        "params_tecnicos": tec_child,
-        "params_macro":    mac_child,
-        "params_riesgo":   risk_child,
-        "capital_inicial": 10.0,
-        "capital_actual":  10.0,
+        "generacion":       generation,
+        "padre_1_id":       parent1["id"],
+        "padre_2_id":       parent2["id"],
+        "params_tecnicos":  tec_child,
+        "params_macro":     mac_child,
+        "params_riesgo":    risk_child,
+        "params_smc":       smc_child,
+        "capital_inicial":  10.0,
+        "capital_actual":   10.0,
     }
 
 
@@ -221,7 +251,7 @@ class EvolutionEngine:
             cur.execute("""
                 SELECT id, generacion, fecha_nacimiento, capital_actual,
                        roi_total, operaciones_total, operaciones_ganadoras,
-                       params_tecnicos, params_macro, params_riesgo
+                       params_tecnicos, params_macro, params_riesgo, params_smc
                 FROM agentes
                 WHERE estado = 'activo'
                 ORDER BY roi_total DESC, fecha_nacimiento DESC, id DESC
@@ -275,12 +305,12 @@ class EvolutionEngine:
             INSERT INTO agentes (
                 id, fecha_nacimiento, generacion,
                 padre_1_id, padre_2_id,
-                params_tecnicos, params_macro, params_riesgo,
+                params_tecnicos, params_macro, params_riesgo, params_smc,
                 capital_inicial, capital_actual, estado
             ) VALUES (
                 %(id)s, %(fecha_nacimiento)s, %(generacion)s,
                 %(padre_1_id)s, %(padre_2_id)s,
-                %(params_tecnicos)s, %(params_macro)s, %(params_riesgo)s,
+                %(params_tecnicos)s, %(params_macro)s, %(params_riesgo)s, %(params_smc)s,
                 %(capital_inicial)s, %(capital_actual)s, 'activo'
             )
             """,
@@ -289,6 +319,7 @@ class EvolutionEngine:
                 "params_tecnicos": json.dumps(agent["params_tecnicos"]),
                 "params_macro":    json.dumps(agent["params_macro"]),
                 "params_riesgo":   json.dumps(agent["params_riesgo"]),
+                "params_smc":      json.dumps(agent.get("params_smc", _DEFAULT_SMC_PARAMS)),
             },
         )
 

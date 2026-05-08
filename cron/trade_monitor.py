@@ -58,12 +58,52 @@ _TRADING_START_UTC   = int(os.getenv("TRADING_START_UTC",   "7"))    # 2:00 am B
 _TRADING_CUTOFF_UTC  = int(os.getenv("TRADING_CUTOFF_UTC",  "20"))   # 3:00 pm Bogotá
 
 
+# Eventos macro críticos que activan la ventana de cuarentena (silencio operacional)
+_CRITICAL_KEYWORDS = [
+    "Non-Farm", "NFP", "CPI", "GDP", "Unemployment",
+    "ECB", "Fed", "FOMC", "Interest Rate", "Inflation",
+    "Retail Sales", "PMI",
+]
+
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _within_trading_hours() -> bool:
     """True si la hora UTC actual está dentro del horario permitido para abrir posiciones."""
     now_utc = datetime.now(timezone.utc)
     return _TRADING_START_UTC <= now_utc.hour < _TRADING_CUTOFF_UTC
+
+
+def _is_critical_event(titulo: str) -> bool:
+    """True si el título del evento contiene alguna keyword crítica."""
+    titulo_lower = titulo.lower()
+    return any(kw.lower() in titulo_lower for kw in _CRITICAL_KEYWORDS)
+
+
+def _in_macro_quarantine(snapshot, quarantine_min: int) -> tuple[bool, str]:
+    """
+    True si hay un evento de alto impacto crítico dentro de la ventana de cuarentena.
+    Retorna (en_cuarentena, nombre_evento).
+    Solo examina eventos con hora_utc definida e impacto = "alto".
+    """
+    from datetime import timedelta
+    if quarantine_min <= 0:
+        return False, ""
+
+    now_utc  = datetime.now(timezone.utc)
+    window   = timedelta(minutes=quarantine_min)
+
+    for evento in snapshot.eventos:
+        if evento.impacto != "alto":
+            continue
+        if evento.hora_utc is None:
+            continue
+        if not _is_critical_event(evento.titulo):
+            continue
+        if abs((evento.hora_utc - now_utc).total_seconds()) <= window.total_seconds():
+            return True, evento.titulo
+
+    return False, ""
 
 
 # ── 1. Monitoreo SL/TP ───────────────────────────────────────────────────────
@@ -219,6 +259,7 @@ def _evaluate_new_positions() -> dict:
                    a.params_tecnicos,
                    a.params_macro,
                    a.params_riesgo,
+                   a.params_smc,
                    a.capital_actual::float AS capital_actual
             FROM agentes a
             WHERE a.estado = 'activo'
@@ -261,18 +302,30 @@ def _evaluate_new_positions() -> dict:
     for agent_data in candidates:
         agent_id = agent_data["id"]
         try:
+            # Ventana de cuarentena macro — gen propio del agente
+            smc_params      = agent_data.get("params_smc") or {}
+            quarantine_min  = int(smc_params.get("macro_quarantine_minutes", 60))
+            in_q, evento_q  = _in_macro_quarantine(macro_snapshot, quarantine_min)
+            if in_q:
+                log.info(
+                    "[TradeMonitor] %s — QUARANTINE (%dmin) por '%s' — HOLD forzado.",
+                    agent_id, quarantine_min, evento_q,
+                )
+                evaluated += 1
+                continue
+
             # Indicadores con parámetros genéticos propios del agente
             tech_signals = calc_signals(
                 df_ohlcv,
                 agent_data["params_tecnicos"],
-                agent_data.get("params_smc"),
+                smc_params or None,
             )
 
             params = {
                 "params_tecnicos": agent_data["params_tecnicos"],
                 "params_macro":    agent_data["params_macro"],
                 "params_riesgo":   agent_data["params_riesgo"],
-                "params_smc":      agent_data.get("params_smc"),
+                "params_smc":      smc_params or None,
                 "capital_actual":  agent_data["capital_actual"],
             }
             agent  = InvestorAgent(agent_id, params)

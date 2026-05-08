@@ -56,7 +56,7 @@ def _fetch_active_agents() -> list[dict]:
         cur = get_dict_cursor(conn)
         cur.execute(
             """
-            SELECT id, params_tecnicos, params_macro, params_riesgo, capital_actual
+            SELECT id, params_tecnicos, params_macro, params_riesgo, params_smc, capital_actual
             FROM agentes
             WHERE estado = 'activo'
             ORDER BY roi_total DESC
