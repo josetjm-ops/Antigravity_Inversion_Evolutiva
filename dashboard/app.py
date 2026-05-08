@@ -376,10 +376,15 @@ def _sidebar() -> tuple[list[str], list[int]]:
 # KPIs
 # ═══════════════════════════════════════════════════════════════════════════════
 def _kpis(df_active: pd.DataFrame, df_all: pd.DataFrame) -> None:
-    n_act    = len(df_active)
-    best_roi = float(df_active["roi_total"].max()) if not df_active.empty else 0.0
-    avg_roi  = float(df_active["roi_total"].mean()) if not df_active.empty else 0.0
-    max_gen  = int(df_all["generacion"].max()) if not df_all.empty else 1
+    n_act        = len(df_active)
+    best_roi     = float(df_active["roi_total"].max()) if not df_active.empty else 0.0
+    avg_roi      = float(df_active["roi_total"].mean()) if not df_active.empty else 0.0
+    max_gen      = int(df_all["generacion"].max()) if not df_all.empty else 1
+    best_fitness = (
+        float(df_active["fitness_score"].max())
+        if not df_active.empty and "fitness_score" in df_active.columns
+        else 0.0
+    )
 
     if not df_active.empty:
         t_ops = int(df_active["operaciones_total"].sum())
@@ -402,14 +407,16 @@ def _kpis(df_active: pd.DataFrame, df_all: pd.DataFrame) -> None:
         d, dc = _delta(avg_roi)
         st.metric("ROI Promedio", f"{avg_roi:.2f}%", delta=d, delta_color=dc)
 
-    # Fila 2: 2 métricas
-    c4, c5 = st.columns(2)
+    # Fila 2: 3 métricas
+    c4, c5, c6 = st.columns(3)
     with c4:
         st.metric("Generación Actual", f"Gen {max_gen}",
                   delta=f"{max_gen - 1} ciclos" if max_gen > 1 else "Génesis")
     with c5:
         d, dc = _delta(wr - 50)
         st.metric("Win Rate Global", f"{wr:.1f}%", delta=d, delta_color=dc)
+    with c6:
+        st.metric("Mejor Fitness (Calmar)", f"{best_fitness:.4f}")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -427,23 +434,27 @@ def _tab_population(df: pd.DataFrame) -> None:
     st.markdown("<br>", unsafe_allow_html=True)
     st.markdown('<span class="ie-label">Rankings de Agentes</span>', unsafe_allow_html=True)
 
+    _fitness_col = ["fitness_score"] if "fitness_score" in df.columns else []
     disp = df[[
-        "id", "generacion", "estado", "roi_total", "capital_actual",
+        "id", "generacion", "estado", *_fitness_col, "roi_total", "capital_actual",
         "operaciones_total", "win_rate_pct", "padre_1_id", "fecha_nacimiento",
     ]].copy()
     disp.columns = [
-        "ID Agente", "Gen", "Estado", "ROI %", "Capital ($)",
-        "Ops", "Win Rate %", "Padre Principal", "Nacimiento",
+        "ID Agente", "Gen", "Estado", *( ["Fitness"] if _fitness_col else []),
+        "ROI %", "Capital ($)", "Ops", "Win Rate %", "Padre Principal", "Nacimiento",
     ]
-    disp["ROI %"]      = disp["ROI %"].round(4)
+    disp["ROI %"]       = disp["ROI %"].round(4)
     disp["Capital ($)"] = disp["Capital ($)"].round(4)
+    if "Fitness" in disp.columns:
+        disp["Fitness"] = disp["Fitness"].round(4)
 
     st.dataframe(
         disp,
         use_container_width=True,
         height=min(400, len(disp) * 36 + 60),
         column_config={
-            "ROI %": st.column_config.NumberColumn(format="%.4f %%"),
+            "Fitness":     st.column_config.NumberColumn(format="%.4f"),
+            "ROI %":       st.column_config.NumberColumn(format="%.4f %%"),
             "Capital ($)": st.column_config.NumberColumn(format="$%.4f"),
             "Win Rate %":  st.column_config.ProgressColumn(
                 format="%.1f %%", min_value=0, max_value=100,
@@ -479,15 +490,24 @@ def _tab_evolution(df_all: pd.DataFrame, df_hist: pd.DataFrame) -> None:
     if not children.empty:
         st.markdown("<br>", unsafe_allow_html=True)
         st.markdown('<span class="ie-label">Árbol Genealógico</span>', unsafe_allow_html=True)
+        _fit_col = ["fitness_score"] if "fitness_score" in children.columns else []
         gen_df = children[[
-            "id", "generacion", "padre_1_id", "padre_2_id", "roi_total", "estado",
+            "id", "generacion", "padre_1_id", "padre_2_id", *_fit_col, "roi_total", "estado",
         ]].copy()
-        gen_df.columns = ["Agente Hijo", "Gen", "Padre 1", "Padre 2", "ROI %", "Estado"]
+        gen_df.columns = [
+            "Agente Hijo", "Gen", "Padre 1", "Padre 2",
+            *(["Fitness"] if _fit_col else []), "ROI %", "Estado",
+        ]
         gen_df["ROI %"] = gen_df["ROI %"].round(4)
+        if "Fitness" in gen_df.columns:
+            gen_df["Fitness"] = gen_df["Fitness"].round(4)
         st.dataframe(
             gen_df, use_container_width=True,
             height=min(320, len(gen_df) * 36 + 60),
-            column_config={"ROI %": st.column_config.NumberColumn(format="%.4f %%")},
+            column_config={
+                "Fitness": st.column_config.NumberColumn(format="%.4f"),
+                "ROI %":   st.column_config.NumberColumn(format="%.4f %%"),
+            },
             hide_index=True,
         )
     else:
@@ -892,7 +912,7 @@ def _tab_instructions() -> None:
       }}
       .ins-param-grid {{
         display: grid;
-        grid-template-columns: repeat(3, 1fr);
+        grid-template-columns: repeat(2, 1fr);
         gap: 10px;
         margin-top: 10px;
       }}
@@ -963,11 +983,20 @@ def _tab_instructions() -> None:
           <div class="ins-param-box">
             <div class="ins-param-label">🛡️ Parámetros de Riesgo</div>
             <div class="ins-param-items">
-              Stop Loss % (0.5%–5%)<br>
-              Take Profit % (1%–10%)<br>
-              Capital por operación<br>
+              Riesgo por trade (1–2% equity)<br>
+              Ratio riesgo/beneficio (1.5–4.0)<br>
               Confianza mínima para operar<br>
               Máx. drawdown diario
+            </div>
+          </div>
+          <div class="ins-param-box">
+            <div class="ins-param-label">🔮 Genes SMC</div>
+            <div class="ins-param-items">
+              FVG mínimo en pips (2–15)<br>
+              OB impulso mínimo en pips (5–25)<br>
+              Multiplicador spike de rango (1.2–3.0)<br>
+              Cuarentena macro (30–120 min)<br>
+              Pesos FVG / OB (0.05–0.50)
             </div>
           </div>
         </div>
@@ -991,10 +1020,13 @@ def _tab_instructions() -> None:
         <div class="ins-step">
           <div class="ins-step-num">A</div>
           <div class="ins-step-text">
-            <b>Sub-agente Técnico</b> — Analiza RSI, EMA y MACD con los parámetros genéticos
-            propios del agente. Calcula una señal ponderada (BUY / SELL / HOLD) con nivel de
-            confianza. Si la confianza está en zona ambigua (0.45–0.65), consulta al LLM
-            DeepSeek para confirmar o ajustar la señal.
+            <b>Sub-agente Técnico</b> — Detecta señales SMC: <b>Fair Value Gaps</b> (FVG)
+            alcistas y bajistas en las últimas 50 velas, <b>Order Blocks</b> (OB) en las
+            últimas 80 velas, y un <b>Range Proxy</b> (high–low en pips) como sustituto de
+            volumen. Complementa con RSI, EMA y MACD. Calcula una señal ponderada con
+            pesos genéticos individuales (FVG, OB, RSI, EMA, MACD). Un spike de rango
+            amplifica la confianza ×1.15 cuando hay expansión de volatilidad. Si la confianza
+            cae en zona ambigua (0.45–0.65), consulta a DeepSeek para confirmar.
           </div>
         </div>
         <div class="ins-step">
@@ -1013,8 +1045,11 @@ def _tab_instructions() -> None:
             pesos configurables. Si las señales coinciden, promedia. Si hay conflicto,
             gana la que supere 0.75 de confianza; si ninguna lo hace, emite <b>HOLD</b>.
             Si la confianza final no alcanza el umbral mínimo del agente, también emite
-            <b>HOLD</b>. Si la acción es BUY o SELL, calcula Stop Loss, Take Profit
-            y capital a usar, y consulta a DeepSeek para validación final.
+            <b>HOLD</b>. Si la acción es BUY o SELL, calcula el <b>Stop Loss estructural</b>
+            anclado al Order Block más cercano (o al FVG como fallback), el Take Profit con
+            el ratio R:R genético del agente, y el capital usando sizing dinámico basado en
+            pips (1–2% de equity en riesgo, máx. 20% de capital). Luego consulta a DeepSeek
+            para validación final.
           </div>
         </div>
       </div>
@@ -1031,7 +1066,8 @@ def _tab_instructions() -> None:
           <b>¿Cuándo emite HOLD un agente?</b><br>
           &nbsp;• Cuando las señales técnica y macro están en conflicto y ninguna tiene confianza suficiente.<br>
           &nbsp;• Cuando la confianza combinada está por debajo del umbral mínimo del agente.<br>
-          &nbsp;• Cuando ya tiene una posición abierta de un ciclo anterior (no abre un segundo trade).<br><br>
+          &nbsp;• Cuando ya tiene una posición abierta de un ciclo anterior (no abre un segundo trade).<br>
+          &nbsp;• Cuando un evento macroeconómico crítico (NFP, CPI, FOMC, ECB, GDP) cae dentro de la ventana de cuarentena del agente (gen <code>macro_quarantine_minutes</code>, rango 30–120 min). El agente espera en silencio hasta que la ventana expire.<br><br>
           <b>¿Por qué es válido como estrategia de supervivencia?</b><br>
           Si el mercado está muy volátil e incierto y otros agentes abren posiciones perdedoras,
           el agente que hizo HOLD conserva su capital intacto. Con el tiempo, un agente que
@@ -1056,9 +1092,10 @@ def _tab_instructions() -> None:
           &nbsp;• <b style="color:{DIM};">◎ Cierre EOD (5:00 pm Bogotá)</b> — posiciones aún abiertas se cierran obligatoriamente al precio de mercado antes de la evaluación del Juez.<br><br>
           <b>② Evaluación de nuevas posiciones</b><br>
           Para cada agente que quedó libre (sin posición abierta y con capital suficiente),
-          el monitor descarga <b>velas OHLCV actualizadas</b> de Yahoo Finance y recalcula
-          RSI, EMA y MACD con los precios del momento. Luego ejecuta el pipeline A→B→C completo
-          para decidir si abrir una nueva posición.<br><br>
+          el monitor descarga <b>velas OHLCV actualizadas</b> de Yahoo Finance, recalcula
+          señales SMC (FVG, OB, Range Proxy) y técnicas (RSI, EMA, MACD) con los precios
+          del momento, y ejecuta el pipeline A→B→C completo incluyendo Stop Loss estructural
+          anclado al OB/FVG activo para decidir si abrir una nueva posición.<br><br>
           <b>Ejemplo:</b> un agente abre a las 3:00 am, su Take Profit se activa a las 4:15 am.
           A las 4:30 am el monitor detecta que está libre, descarga los precios actualizados
           hasta las 4:30 am y evalúa si abrir una segunda posición con los indicadores frescos
@@ -1078,18 +1115,20 @@ def _tab_instructions() -> None:
         <div class="ins-step">
           <div class="ins-step-num">1</div>
           <div class="ins-step-text">
-            <b>Clasificación por ROI</b> — Todos los agentes activos se ordenan por
-            rentabilidad acumulada (ROI total). En empate exacto de ROI,
-            <b>sobrevive el agente más reciente</b> — un agente joven con el mismo
-            ROI tiene más potencial adaptativo.
+            <b>Clasificación por Calmar Ratio (Fitness)</b> — Todos los agentes activos
+            se ordenan por su <b>fitness score</b>: Calmar Ratio Proxy =
+            <code>ROI / (max_drawdown + 1)</code>, con penalidad de −0.5 si el agente
+            opera más de 3 veces/día con win rate &lt; 50%. Un agente con ROI 5% pero
+            drawdown 50% pierde frente a uno con ROI 3% y drawdown controlado del 5%.
           </div>
         </div>
         <div class="ins-step">
           <div class="ins-step-num">2</div>
           <div class="ins-step-text">
-            <b>Eliminación de los 5 peores</b> — Los 5 agentes con menor ROI son
-            marcados como <s>eliminado</s>. No importa si llevan poco tiempo —
-            si no generan resultados, son descartados. Su capital virtual desaparece con ellos.
+            <b>Eliminación de los 5 peores</b> — Los 5 agentes con menor fitness
+            (Calmar Ratio) son marcados como <s>eliminado</s>. No importa si llevan poco
+            tiempo — si su rendimiento ajustado al riesgo es inferior, son descartados.
+            Su capital virtual desaparece con ellos.
           </div>
         </div>
         <div class="ins-step">
@@ -1129,9 +1168,10 @@ def _tab_instructions() -> None:
           &nbsp;• Períodos enteros (RSI, EMA): σ = 8%<br>
           &nbsp;• Parámetros de riesgo (SL, TP): σ = 10%<br><br>
           <b>Restricciones de seguridad post-mutación:</b><br>
-          &nbsp;• Los pesos RSI/EMA/MACD se renormalizan para sumar 1.0.<br>
+          &nbsp;• Los pesos RSI/EMA/MACD/FVG/OB se renormalizan para sumar 1.0.<br>
           &nbsp;• La EMA rápida siempre es menor que la EMA lenta.<br>
-          &nbsp;• El Take Profit es siempre ≥ 1.5× el Stop Loss.
+          &nbsp;• Los genes SMC (fvg_min_pips, ob_impulse_pips, risk_reward_target, macro_quarantine_minutes, risk_pct_per_trade, peso_fvg, peso_ob) se recortan a sus rangos de seguridad evolutivos.<br>
+          &nbsp;• El riesgo por operación se fuerza dentro del rango 1–2% del equity (hard limits no mutables).
         </div>
       </div>
     </div>
@@ -1163,7 +1203,7 @@ def _tab_instructions() -> None:
               su Stop Loss o Take Profit y la cierra al precio exacto del nivel.<br>
               <span style="color:{DIM};">② Nuevas posiciones:</span> para cada agente libre
               (sin posición y con capital suficiente), descarga OHLCV actualizado, recalcula
-              RSI/EMA/MACD con los precios del momento y ejecuta el pipeline completo.
+              SMC (FVG, OB, Range Proxy) + RSI/EMA/MACD con los precios del momento y ejecuta el pipeline completo.
               Un agente puede operar varias veces al día de forma secuencial.<br><br>
               <span style="color:{DIM};">A las 8:50 am corre además un ciclo de trading
               dedicado que garantiza que todos los agentes evalúen en simultáneo al inicio
@@ -1175,7 +1215,7 @@ def _tab_instructions() -> None:
             <div class="ins-timeline-text">
               <b style="color:{TEXT};">Cierre EOD + Ciclo Evolutivo</b> — Primero se cierran
               obligatoriamente todas las posiciones abiertas al precio de mercado. Luego el
-              Agente Juez clasifica por ROI, elimina los 5 peores, y crea 5 nuevos agentes
+              Agente Juez clasifica por Calmar Ratio (fitness), elimina los 5 peores, y crea 5 nuevos agentes
               con parámetros mutados. Todo queda registrado en el log de auditoría.
             </div>
           </div>
@@ -1218,17 +1258,18 @@ def _tab_instructions() -> None:
       <div class="ins-card ins-card-left-emerald" style="margin-top:12px;">
         <div style="font-size:10px;color:{EMERALD};letter-spacing:1.5px;
                     text-transform:uppercase;font-weight:700;margin-bottom:10px;">
-          ② El ROI es un hecho de mercado, no una opinión del agente
+          ② El Calmar Ratio (fitness) es un hecho de mercado, no una opinión del agente
         </div>
         <div class="ins-body">
-          La métrica que el Juez usa para clasificar y eliminar es el <b>ROI acumulado</b>,
-          calculado exclusivamente a partir de precios reales:<br><br>
+          La métrica que el Juez usa para clasificar y eliminar es el <b>Calmar Ratio (fitness)</b>,
+          calculado exclusivamente a partir de precios reales — ROI y max drawdown
+          derivados de las operaciones cerradas en la base de datos:<br><br>
           &nbsp;• Los precios de entrada y salida provienen de <b>Yahoo Finance</b>
             (fuente externa, no controlada por ningún agente).<br>
           &nbsp;• El P&L lo calcula el <b>Trade Monitor</b>, no el agente mismo.<br>
           &nbsp;• El cierre de posiciones (SL/TP/EOD) lo ejecuta el Trade Monitor de forma autónoma.<br><br>
           Un agente no puede declarar su propio P&L ni alterar precios de mercado.
-          Su ROI es un dato objetivo derivado de lo que el mercado hizo, no de lo que el agente dice.
+          Su fitness (Calmar Ratio) es un dato objetivo derivado del historial de operaciones cerradas — no de lo que el agente afirma sobre sí mismo.
         </div>
       </div>
 
@@ -1296,14 +1337,17 @@ def _tab_instructions() -> None:
     <div style="background:{CARD2};border:1px solid {BORDER};border-radius:8px;
                 padding:14px 18px;font-size:11px;color:{DIM};line-height:1.8;">
       <b style="color:{GOLD};">Nota técnica:</b>
-      Los indicadores técnicos (RSI, EMA, MACD) y los precios de monitoreo se obtienen todos
-      de <b style="color:{TEXT};">Yahoo Finance</b> (gratuito, sin límite de llamadas, sin API key).
-      Se descarga 1 DataFrame OHLCV por ciclo, compartido entre todos los agentes;
-      cada agente calcula sus propios indicadores en memoria con sus parámetros genéticos.
+      Las velas OHLCV (1 DataFrame compartido por ciclo) se obtienen de
+      <b style="color:{TEXT};">Yahoo Finance</b> (gratuito, sin API key). El volumen de
+      EUR/USD siempre es 0 en Yahoo (par OTC) — por eso se usa el <b style="color:{TEXT};">
+      Range Proxy</b> <code>(high−low) × 10 000</code> en pips como sustituto de VSA.
+      Cada agente calcula en memoria sus propias señales SMC (FVG, OB) y técnicas
+      (RSI, EMA, MACD) usando sus genes evolutivos únicos.
       El razonamiento de los agentes y del Juez usa <b style="color:{TEXT};">DeepSeek</b>
-      (modelo <code>deepseek-chat</code>).
-      La base de datos es <b style="color:{TEXT};">PostgreSQL en Neon</b>.
-      Los workflows corren en <b style="color:{TEXT};">GitHub Actions</b> de forma completamente autónoma.
+      (modelo <code>deepseek-chat</code>). El fitness (Calmar Ratio Proxy) se calcula
+      vía SQL sobre las operaciones cerradas en <b style="color:{TEXT};">PostgreSQL — Neon</b>.
+      Los workflows corren en <b style="color:{TEXT};">GitHub Actions + cron-job.org</b>
+      de forma completamente autónoma.
     </div>
     """, unsafe_allow_html=True)
 

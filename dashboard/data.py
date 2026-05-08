@@ -56,25 +56,31 @@ def fetch_agents(
 ) -> pd.DataFrame:
     where, params = [], []
     if estados:
-        where.append("estado = ANY(%s)"); params.append(estados)
+        where.append("a.estado = ANY(%s)"); params.append(estados)
     if gens:
-        where.append("generacion = ANY(%s)"); params.append(gens)
+        where.append("a.generacion = ANY(%s)"); params.append(gens)
     where_sql = ("WHERE " + " AND ".join(where)) if where else ""
 
     sql = f"""
         SELECT
-            id, generacion, fecha_nacimiento, estado,
-            capital_inicial, capital_actual,
-            roi_total, operaciones_total, operaciones_ganadoras,
-            padre_1_id, padre_2_id,
-            fecha_eliminacion, razon_eliminacion,
-            CASE WHEN operaciones_total > 0
-                 THEN ROUND(operaciones_ganadoras::numeric / operaciones_total * 100, 2)
+            a.id, a.generacion, a.fecha_nacimiento, a.estado,
+            a.capital_inicial, a.capital_actual,
+            a.roi_total, a.operaciones_total, a.operaciones_ganadoras,
+            a.padre_1_id, a.padre_2_id,
+            a.fecha_eliminacion, a.razon_eliminacion,
+            CASE WHEN a.operaciones_total > 0
+                 THEN ROUND(a.operaciones_ganadoras::numeric / a.operaciones_total * 100, 2)
                  ELSE 0 END AS win_rate_pct,
-            created_at
-        FROM agentes
+            a.created_at,
+            COALESCE(rh_latest.fitness_score, 0)::float AS fitness_score
+        FROM agentes a
+        LEFT JOIN LATERAL (
+            SELECT fitness_score FROM ranking_historico
+            WHERE agente_id = a.id
+            ORDER BY fecha DESC LIMIT 1
+        ) rh_latest ON true
         {where_sql}
-        ORDER BY generacion ASC, roi_total DESC
+        ORDER BY a.generacion ASC, COALESCE(rh_latest.fitness_score, a.roi_total) DESC
     """
     conn = _conn()
     try:
@@ -90,11 +96,11 @@ def fetch_agents(
         "operaciones_total", "operaciones_ganadoras",
         "padre_1_id", "padre_2_id",
         "fecha_eliminacion", "razon_eliminacion",
-        "win_rate_pct", "created_at",
+        "win_rate_pct", "created_at", "fitness_score",
     ]
     df = _coerce(pd.DataFrame(rows, columns=cols))
 
-    for c in ["roi_total", "capital_actual", "capital_inicial", "win_rate_pct"]:
+    for c in ["roi_total", "capital_actual", "capital_inicial", "win_rate_pct", "fitness_score"]:
         df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0.0)
     df["operaciones_total"]    = df["operaciones_total"].fillna(0).astype(int)
     df["operaciones_ganadoras"] = df["operaciones_ganadoras"].fillna(0).astype(int)
@@ -166,7 +172,8 @@ def fetch_ranking_history() -> pd.DataFrame:
     sql = """
         SELECT rh.fecha, rh.agente_id, rh.posicion_ranking,
                rh.roi_diario, rh.roi_acumulado, rh.capital_fin_dia,
-               rh.operaciones_dia, rh.evento, a.generacion
+               rh.operaciones_dia, rh.evento, a.generacion,
+               rh.fitness_score
         FROM ranking_historico rh
         JOIN agentes a ON a.id = rh.agente_id
         ORDER BY rh.fecha ASC, rh.posicion_ranking ASC
@@ -181,9 +188,9 @@ def fetch_ranking_history() -> pd.DataFrame:
 
     cols = ["fecha", "agente_id", "posicion_ranking", "roi_diario",
             "roi_acumulado", "capital_fin_dia", "operaciones_dia",
-            "evento", "generacion"]
+            "evento", "generacion", "fitness_score"]
     df = _coerce(pd.DataFrame(rows, columns=cols))
-    for c in ["roi_diario", "roi_acumulado", "capital_fin_dia"]:
+    for c in ["roi_diario", "roi_acumulado", "capital_fin_dia", "fitness_score"]:
         df[c] = pd.to_numeric(df[c], errors="coerce")
     df["fecha"] = pd.to_datetime(df["fecha"])
     return df
