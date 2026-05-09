@@ -1005,6 +1005,27 @@ def _tab_instructions() -> None:
           </div>
         </div>
       </div>
+
+      <!-- Capital compartido -->
+      <div class="ins-card ins-card-left-amber" style="margin-top:12px;">
+        <div style="font-size:10px;color:{AMBER};letter-spacing:1.5px;
+                    text-transform:uppercase;font-weight:700;margin-bottom:10px;">
+          💰 Pool de capital compartido — Igualdad de condiciones cada día
+        </div>
+        <div class="ins-body">
+          El sistema arrancó con <b>$100 USD virtuales</b> divididos en partes iguales:
+          <b>$10 por agente</b>. A partir del primer día, ese pool fluctúa únicamente por
+          las ganancias y pérdidas reales de trading — no se inyecta ni retira capital externo.<br><br>
+          Al cierre de cada jornada (<b>5:00 pm Bogotá, lunes a viernes</b>), tras el ciclo
+          evolutivo, el sistema suma el <code>capital_actual</code> de los 10 agentes activos
+          resultantes y lo divide en partes iguales. <b>Todos los agentes inician el día
+          siguiente con exactamente el mismo capital</b>, independientemente de si ganaron,
+          perdieron o fueron recién creados.<br><br>
+          Esto garantiza que la competencia sea <em>puramente estratégica</em>: ningún agente
+          llega al día siguiente con ventaja de capital por haber tenido suerte el día anterior.
+          El único mérito que importa es la calidad de la estrategia, medida día a día.
+        </div>
+      </div>
     </div>
 
     <!-- ══ 2. CÓMO DECIDE UN AGENTE ══ -->
