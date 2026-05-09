@@ -48,6 +48,10 @@ class RiskDecision:
     senal_macro: dict
     confianza_tecnica: float
     confianza_macro: float
+    sl_fuente: str = "pct"
+    atr_valor: float = 0.0
+    trailing_activation_pips: float = 0.0
+    trailing_distance_pips: float = 0.0
 
 
 class SubAgentRisk(BaseAgent):
@@ -82,19 +86,20 @@ class SubAgentRisk(BaseAgent):
         accion: str,
         capital: float,
         senal_tecnico: dict | None = None,
-    ) -> tuple[float | None, float | None, float, float]:
+    ) -> tuple[float | None, float | None, float, float, str, float]:
         """
-        Calcula (stop_loss, take_profit, capital_uso, sl_pips).
+        Calcula (stop_loss, take_profit, capital_uso, sl_pips, sl_fuente, atr_valor).
 
         Jerarquía de SL:
           1. OB activo no mitigado — nivel estructural más fuerte
           2. FVG activo no rellenado — nivel estructural secundario
-          3. Porcentaje fijo (stop_loss_pct) — fallback
+          3. ATR × atr_factor — SL dinámico realista (reemplaza % fijo)
+          4. Porcentaje fijo (stop_loss_pct) — fallback si ATR no disponible
 
         TP = SL × risk_reward_target (gen mutable, default 2.0).
         """
         if accion == "HOLD":
-            return None, None, 0.0, 0.0
+            return None, None, 0.0, 0.0, "hold", 0.0
 
         ind = (senal_tecnico or {}).get("indicadores", {})
 
@@ -108,6 +113,7 @@ class SubAgentRisk(BaseAgent):
         # ── 1. SL estructural ─────────────────────────────────────────────────
         sl_precio: float | None = None
         sl_fuente = "pct"
+        atr_valor = 0.0
 
         if ob_activo:
             candidate = ob_nivel_inf if accion == "BUY" else ob_nivel_sup
@@ -129,13 +135,28 @@ class SubAgentRisk(BaseAgent):
                 sl_precio = None
                 sl_fuente = "pct"
 
-        # ── 2. SL porcentual (fallback) ────────────────────────────────────────
+        # ── 2. SL basado en ATR (reemplaza fallback % fijo) ───────────────────
         if sl_precio is None:
-            sl_pct = float(self.params.get("stop_loss_pct", 0.02))
-            sl_precio = (
-                round(precio * (1 - sl_pct), 5) if accion == "BUY"
-                else round(precio * (1 + sl_pct), 5)
-            )
+            atr = float(ind.get("atr", 0.0))
+            atr_factor = float(self.params_smc.get("atr_factor",
+                               self.params.get("atr_factor", 1.5)))
+            if atr > 0:
+                dist = max(atr * atr_factor, 0.0005)   # mín 5 pips
+                dist = min(dist, 0.0050)               # máx 50 pips
+                sl_precio = (
+                    round(precio - dist, 5) if accion == "BUY"
+                    else round(precio + dist, 5)
+                )
+                sl_fuente = "ATR"
+                atr_valor = atr
+            else:
+                # ── 3. SL porcentual (fallback legacy si ATR = 0) ─────────────
+                sl_pct = float(self.params.get("stop_loss_pct", 0.02))
+                sl_precio = (
+                    round(precio * (1 - sl_pct), 5) if accion == "BUY"
+                    else round(precio * (1 + sl_pct), 5)
+                )
+                sl_fuente = "pct"
 
         sl_pips = round(abs(precio - sl_precio) * 10_000, 2)
 
@@ -163,7 +184,7 @@ class SubAgentRisk(BaseAgent):
             round(take_profit, 5), risk_reward, capital_uso,
         )
 
-        return round(sl_precio, 5), take_profit, capital_uso, sl_pips
+        return round(sl_precio, 5), take_profit, capital_uso, sl_pips, sl_fuente, atr_valor
 
     # ── Blend confidence ──────────────────────────────────────────────────────
 
@@ -239,14 +260,20 @@ class SubAgentRisk(BaseAgent):
         if conf_prelim < umbral_min:
             accion_prelim = "HOLD"
 
-        stop_loss, take_profit, capital_uso, sl_pips = self._compute_levels(
+        stop_loss, take_profit, capital_uso, sl_pips, sl_fuente, atr_valor = self._compute_levels(
             precio_actual, accion_prelim, capital_disponible, senal_tecnico
+        )
+
+        trailing_activation_pips = float(
+            self.params_smc.get("trailing_activation_pips", 15.0)
+        )
+        trailing_distance_pips = float(
+            self.params_smc.get("trailing_distance_pips", 10.0)
         )
 
         accion_final = accion_prelim
         conf_final   = conf_prelim
         ind          = senal_tecnico.get("indicadores", {})
-        sl_fuente    = "OB" if ind.get("ob_activo") else ("FVG" if ind.get("fvg_activo") else "pct")
         rr           = float(self.params_smc.get("risk_reward_target",
                              self.params.get("risk_reward_target", 2.0)))
 
@@ -301,4 +328,8 @@ class SubAgentRisk(BaseAgent):
             senal_macro=senal_macro,
             confianza_tecnica=conf_tec,
             confianza_macro=conf_mac,
+            sl_fuente=sl_fuente,
+            atr_valor=atr_valor,
+            trailing_activation_pips=trailing_activation_pips,
+            trailing_distance_pips=trailing_distance_pips,
         )

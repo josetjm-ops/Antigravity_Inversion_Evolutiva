@@ -152,11 +152,13 @@ class InvestorAgent:
                     INSERT INTO operaciones (
                         agente_id, timestamp_entrada, par, accion,
                         precio_entrada, capital_usado,
-                        senal_tecnico, senal_macro, decision_riesgo, estado
+                        senal_tecnico, senal_macro, decision_riesgo, estado,
+                        sl_dinamico, precio_extremo_favorable
                     ) VALUES (
                         %s, %s, 'EUR/USD', %s,
                         %s, %s, %s, %s, %s,
-                        CASE WHEN %s = 'HOLD' THEN 'cancelada' ELSE 'abierta' END
+                        CASE WHEN %s = 'HOLD' THEN 'cancelada' ELSE 'abierta' END,
+                        %s, %s
                     ) RETURNING id
                     """,
                     (
@@ -168,13 +170,21 @@ class InvestorAgent:
                         json.dumps(decision.senal_tecnico),
                         json.dumps(decision.senal_macro),
                         json.dumps({
-                            "accion_final":    decision.accion_final,
-                            "confianza_final": decision.confianza_final,
-                            "stop_loss":       decision.stop_loss,
-                            "take_profit":     decision.take_profit,
-                            "razonamiento":    decision.razonamiento,
+                            "accion_final":             decision.accion_final,
+                            "confianza_final":          decision.confianza_final,
+                            "confianza_tecnica":        decision.confianza_tecnica,
+                            "confianza_macro":          decision.confianza_macro,
+                            "stop_loss":                decision.stop_loss,
+                            "take_profit":              decision.take_profit,
+                            "razonamiento":             decision.razonamiento,
+                            "sl_fuente":                decision.sl_fuente,
+                            "atr_valor":                decision.atr_valor,
+                            "trailing_activation_pips": decision.trailing_activation_pips,
+                            "trailing_distance_pips":   decision.trailing_distance_pips,
                         }),
                         decision.accion_final,
+                        decision.stop_loss if decision.accion_final != "HOLD" else None,
+                        precio_entrada if decision.accion_final != "HOLD" else None,
                     ),
                 )
                 op_id = cur.fetchone()[0]

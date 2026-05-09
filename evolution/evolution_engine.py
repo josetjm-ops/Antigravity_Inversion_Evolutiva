@@ -83,6 +83,11 @@ _DEFAULT_SMC_PARAMS: dict = {
     "risk_pct_per_trade":       0.015,
     "peso_fvg":                 0.15,
     "peso_ob":                  0.15,
+    # ATR-based SL + Trailing Stop (Session 6)
+    "atr_factor":               1.5,    # SL = ATR × 1.5 ≈ 12-22 pips
+    "trailing_activation_pips": 15.0,   # activar trailing tras 15 pips de profit
+    "trailing_distance_pips":   10.0,   # mantener trailing a 10 pips del extremo
+    "atr_period":               14,
 }
 
 _BOUNDS_SMC = {
@@ -94,6 +99,11 @@ _BOUNDS_SMC = {
     "risk_pct_per_trade":       (0.01,  0.02, False),
     "peso_fvg":                 (0.05,  0.50, False),
     "peso_ob":                  (0.05,  0.50, False),
+    # ATR-based SL + Trailing Stop (Session 6)
+    "atr_factor":               (0.8,   3.0,  False),
+    "trailing_activation_pips": (5.0,  40.0,  False),
+    "trailing_distance_pips":   (5.0,  25.0,  False),
+    "atr_period":               (7,    21,    True),
 }
 
 

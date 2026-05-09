@@ -186,6 +186,33 @@ def detect_order_blocks(df: pd.DataFrame, impulse_pips: float = 10.0) -> dict:
     return empty
 
 
+def calc_atr(df: pd.DataFrame, period: int = 14) -> float:
+    """
+    Average True Range (Wilder) sobre velas OHLCV de 15 min.
+
+    True Range = max(high-low, |high-prev_close|, |low-prev_close|)
+    ATR = media exponencial del TR con suavizado Wilder (com=period-1).
+
+    Para EUR/USD en 15min el ATR típico es 0.0008–0.0015 (8–15 pips).
+    Retorna el valor en precio (no en pips); multiplica × 10 000 para pips.
+    """
+    if len(df) < period + 1:
+        return round(float((df["high"] - df["low"]).mean()), 6)
+
+    high       = df["high"]
+    low        = df["low"]
+    prev_close = df["close"].shift(1)
+
+    tr = pd.concat([
+        high - low,
+        (high - prev_close).abs(),
+        (low  - prev_close).abs(),
+    ], axis=1).max(axis=1)
+
+    atr_val = float(tr.ewm(com=period - 1, adjust=False).mean().iloc[-1])
+    return round(atr_val, 6)
+
+
 def calc_range_proxy(df: pd.DataFrame, multiplier: float = 1.5) -> tuple[float, float, bool]:
     """
     Calcula el Range Proxy (high - low en pips) como sustituto del volumen.
@@ -238,6 +265,7 @@ def calc_signals(
     fvg_min_pips       = float(params_smc.get("fvg_min_pips",            5.0))
     ob_impulse_pips    = float(params_smc.get("ob_impulse_pips",         10.0))
     range_multiplier   = float(params_smc.get("range_spike_multiplier",   1.5))
+    atr_period         = int(params_smc.get("atr_period",                14))
 
     # ── RSI ───────────────────────────────────────────────────────────────────
     delta    = close.diff()
@@ -262,15 +290,17 @@ def calc_signals(
     fvg  = detect_fvg(df, min_pips=fvg_min_pips)
     ob   = detect_order_blocks(df, impulse_pips=ob_impulse_pips)
     rng_actual, rng_ma20, rng_spike = calc_range_proxy(df, multiplier=range_multiplier)
+    atr_val = calc_atr(df, period=atr_period)
 
     log.debug(
         "[Indicators] RSI(%d)=%.2f EMA%d=%.5f EMA%d=%.5f MACD_hist=%.5f precio=%.5f "
-        "FVG=%s(%s %.1fpips) OB=%s(%s) Range=%.1f/%.1f spike=%s",
+        "FVG=%s(%s %.1fpips) OB=%s(%s) Range=%.1f/%.1f spike=%s ATR(%d)=%.1fpips",
         rsi_p, rsi_val, ema_r, ema_r_val, ema_l, ema_l_val,
         float(hist.iloc[-1]), precio,
         fvg["activo"], fvg["direccion"], fvg["pips"],
         ob["activo"], ob["direccion"],
         rng_actual, rng_ma20, rng_spike,
+        atr_period, atr_val * 10_000,
     )
 
     return TechnicalSignals(
@@ -298,6 +328,8 @@ def calc_signals(
         range_proxy=rng_actual,
         range_ma20=rng_ma20,
         range_spike=rng_spike,
+        # ATR dinámico
+        atr=atr_val,
     )
 
 

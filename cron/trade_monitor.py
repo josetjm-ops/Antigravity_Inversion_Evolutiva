@@ -106,6 +106,49 @@ def _in_macro_quarantine(snapshot, quarantine_min: int) -> tuple[bool, str]:
     return False, ""
 
 
+# ── Trailing Stop ─────────────────────────────────────────────────────────────
+
+def _apply_trailing_stop(op: dict, current_price: float) -> tuple[float, float]:
+    """
+    Calcula el nuevo SL dinámico y extremo favorable si el trailing está activo.
+
+    El trailing solo se activa cuando el profit supera `trailing_activation_pips`.
+    El SL nunca empeora (solo se mueve a favor del trader).
+    Retorna (nuevo_sl, nuevo_extremo_favorable).
+    """
+    activation_pips = op.get("trailing_activation_pips") or 0.0
+    sl_actual       = op["stop_loss"]
+    precio_entrada  = op["precio_entrada"]
+    extremo_actual  = op.get("precio_extremo_favorable") or precio_entrada
+    accion          = op["accion"]
+
+    if activation_pips <= 0:
+        return sl_actual, extremo_actual
+
+    trailing_dist = (op.get("trailing_distance_pips") or 10.0) * 0.0001
+
+    # Actualizar extremo favorable
+    if accion == "BUY":
+        nuevo_extremo = max(extremo_actual, current_price)
+        profit_pips   = (nuevo_extremo - precio_entrada) * 10_000
+    else:
+        nuevo_extremo = min(extremo_actual, current_price)
+        profit_pips   = (precio_entrada - nuevo_extremo) * 10_000
+
+    if profit_pips < activation_pips:
+        return sl_actual, nuevo_extremo
+
+    # Proponer nuevo SL — nunca empeora
+    if accion == "BUY":
+        sl_propuesto = round(nuevo_extremo - trailing_dist, 5)
+        nuevo_sl     = max(sl_actual, sl_propuesto)
+    else:
+        sl_propuesto = round(nuevo_extremo + trailing_dist, 5)
+        nuevo_sl     = min(sl_actual, sl_propuesto)
+
+    return nuevo_sl, nuevo_extremo
+
+
 # ── 1. Monitoreo SL/TP ───────────────────────────────────────────────────────
 
 def sync_once() -> dict:
@@ -127,10 +170,15 @@ def sync_once() -> dict:
                 o.id,
                 o.agente_id,
                 o.accion,
-                o.precio_entrada::float          AS precio_entrada,
-                o.capital_usado::float            AS capital_usado,
-                (o.decision_riesgo->>'stop_loss')::float   AS stop_loss,
-                (o.decision_riesgo->>'take_profit')::float AS take_profit
+                o.precio_entrada::float AS precio_entrada,
+                o.capital_usado::float  AS capital_usado,
+                COALESCE(o.sl_dinamico,
+                    (o.decision_riesgo->>'stop_loss')::float)           AS stop_loss,
+                (o.decision_riesgo->>'take_profit')::float              AS take_profit,
+                COALESCE(o.precio_extremo_favorable,
+                    o.precio_entrada)::float                            AS precio_extremo_favorable,
+                (o.decision_riesgo->>'trailing_activation_pips')::float AS trailing_activation_pips,
+                (o.decision_riesgo->>'trailing_distance_pips')::float   AS trailing_distance_pips
             FROM operaciones o
             WHERE o.estado = 'abierta'
               AND o.accion IN ('BUY', 'SELL')
@@ -158,6 +206,25 @@ def sync_once() -> dict:
         if current_price is not None:
             for op in open_ops:
                 try:
+                    # Aplicar trailing stop antes de verificar SL/TP
+                    nuevo_sl, nuevo_extremo = _apply_trailing_stop(op, current_price)
+                    if nuevo_sl != op["stop_loss"] or nuevo_extremo != op.get("precio_extremo_favorable"):
+                        with get_conn() as conn:
+                            cur = conn.cursor()
+                            cur.execute(
+                                """
+                                UPDATE operaciones
+                                SET sl_dinamico = %s, precio_extremo_favorable = %s
+                                WHERE id = %s
+                                """,
+                                (nuevo_sl, nuevo_extremo, op["id"]),
+                            )
+                        log.info(
+                            "[TradeMonitor] Trailing — Op %d (%s) SL %.5f→%.5f extremo=%.5f",
+                            op["id"], op["accion"], op["stop_loss"], nuevo_sl, nuevo_extremo,
+                        )
+                        op["stop_loss"] = nuevo_sl
+
                     resultado = check_sl_tp(
                         action=op["accion"],
                         entry_price=op["precio_entrada"],

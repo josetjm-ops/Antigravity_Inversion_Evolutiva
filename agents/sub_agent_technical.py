@@ -200,6 +200,8 @@ class SubAgentTechnical(BaseAgent):
                 "range_proxy":     signals.range_proxy,
                 "range_ma20":      signals.range_ma20,
                 "range_spike":     signals.range_spike,
+                "atr":             round(signals.atr, 6),
+                "atr_pips":        round(signals.atr * 10_000, 2),
             },
             "scores_individuales": {
                 "rsi":         {"señal": rsi_rec,  "confianza": round(rsi_conf, 4)},

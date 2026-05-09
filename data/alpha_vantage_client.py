@@ -36,6 +36,7 @@ class TechnicalSignals:
     range_proxy:     float = field(default=0.0)     # (high-low) última vela en pips
     range_ma20:      float = field(default=0.0)     # media móvil 20p del range en pips
     range_spike:     bool  = field(default=False)   # range_proxy > range_ma20 * multiplier
+    atr:             float = field(default=0.0)     # ATR(14) Wilder en precio, ej. 0.0012 = 12 pips
 
 
 def _get(params: dict) -> dict:
