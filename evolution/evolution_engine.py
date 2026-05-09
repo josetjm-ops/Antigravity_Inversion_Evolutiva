@@ -309,6 +309,8 @@ class EvolutionResult:
     new_agents: list[dict] = field(default_factory=list)
     ranking_snapshot: list[dict] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+    capital_pool_total: float = 0.0
+    capital_por_agente: float = 0.0
 
 
 class EvolutionEngine:
@@ -543,6 +545,53 @@ class EvolutionEngine:
                     ),
                 )
 
+    # ── Redistribución de capital ────────────────────────────────────────────
+
+    def _redistribute_capital(self, conn, new_agent_ids: list[str]) -> tuple[float, float]:
+        """
+        Suma el capital_actual de todos los agentes activos y lo reparte en partes iguales.
+
+        El pool total solo fluctúa por P&L real de trading; no se inyecta capital nuevo.
+        Los agentes nuevos reciben su cuota del pool existente (capital_inicial = cuota).
+        Los supervivientes mantienen su capital_inicial histórico; solo cambia capital_actual.
+
+        Retorna (pool_total, capital_por_agente).
+        """
+        import logging
+        log_r = logging.getLogger(__name__)
+
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT COUNT(*), COALESCE(SUM(capital_actual), 0) FROM agentes WHERE estado = 'activo'"
+        )
+        row = cur.fetchone()
+        n_agentes     = int(row[0])
+        pool_total    = float(row[1])
+
+        if n_agentes == 0:
+            return 0.0, 0.0
+
+        capital_por_agente = round(pool_total / n_agentes, 4)
+
+        # Todos los agentes activos quedan con el mismo capital para mañana
+        cur.execute(
+            "UPDATE agentes SET capital_actual = %s WHERE estado = 'activo'",
+            (capital_por_agente,),
+        )
+
+        # Los agentes nuevos registran su capital_inicial real (no el hardcoded 10.0)
+        if new_agent_ids:
+            cur.execute(
+                "UPDATE agentes SET capital_inicial = %s WHERE id = ANY(%s)",
+                (capital_por_agente, new_agent_ids),
+            )
+
+        log_r.info(
+            "[EvolutionEngine] Capital redistribuido: pool=%.4f / %d agentes = %.4f c/u",
+            pool_total, n_agentes, capital_por_agente,
+        )
+        return pool_total, capital_por_agente
+
     # ── Ciclo evolutivo completo ──────────────────────────────────────────────
 
     def run(self) -> EvolutionResult:
@@ -605,11 +654,16 @@ class EvolutionEngine:
                     self._insert_new_agent(conn, child)
                 self._save_hall_of_fame(conn, survivors)
 
-                # Snapshot de ranking: supervivientes + nuevos
+                # Snapshot de ranking: capital real del día ANTES de redistribuir
                 all_for_snapshot = survivors + new_agents
                 self._snapshot_ranking(conn, all_for_snapshot, evento_map)
-                # También registrar los eliminados en el snapshot
                 self._snapshot_ranking(conn, eliminated, evento_map)
+
+                # Redistribuir capital equitativamente entre todos los agentes activos
+                new_agent_ids = [a["id"] for a in new_agents]
+                pool_total, capital_por_agente = self._redistribute_capital(conn, new_agent_ids)
+                result.capital_pool_total  = pool_total
+                result.capital_por_agente  = capital_por_agente
 
             result.ranking_snapshot = [
                 {"id": a["id"], "posicion": i + 1, "roi": a.get("roi_total", 0)}

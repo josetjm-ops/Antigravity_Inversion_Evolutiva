@@ -179,13 +179,17 @@ class JudgeAgent(BaseAgent):
                     f"Ciclo evolutivo {self.today}: "
                     f"{len(result.survivors)} supervivientes, "
                     f"{len(result.eliminated)} eliminados, "
-                    f"{len(result.new_agents)} nuevos agentes."
+                    f"{len(result.new_agents)} nuevos agentes. "
+                    f"Pool redistribuido: ${result.capital_pool_total:.4f} / "
+                    f"10 agentes = ${result.capital_por_agente:.4f} c/u."
                 ),
                 datos={
-                    "survivors":  [a["id"] for a in result.survivors],
-                    "eliminated": [a["id"] for a in result.eliminated],
-                    "new_agents": [a["id"] for a in result.new_agents],
-                    "insight_mercado": insight,
+                    "survivors":            [a["id"] for a in result.survivors],
+                    "eliminated":           [a["id"] for a in result.eliminated],
+                    "new_agents":           [a["id"] for a in result.new_agents],
+                    "capital_pool_total":   result.capital_pool_total,
+                    "capital_por_agente":   result.capital_por_agente,
+                    "insight_mercado":      insight,
                     "recomendacion_parametros": rec_params,
                 },
                 razonamiento=veredicto_general,
@@ -287,14 +291,20 @@ class JudgeAgent(BaseAgent):
         self._persist_logs(result, llm_verdict)
 
         elapsed = (datetime.now(timezone.utc) - started_at).total_seconds()
+        log.info(
+            "Capital redistribuido: pool=%.4f / 10 agentes = %.4f c/u",
+            result.capital_pool_total, result.capital_por_agente,
+        )
         summary = {
-            "status":       "success",
-            "fecha":        str(self.today),
-            "survivors":    [a["id"] for a in result.survivors],
-            "eliminated":   [a["id"] for a in result.eliminated],
-            "new_agents":   [a["id"] for a in result.new_agents],
-            "llm_verdict":  llm_verdict,
-            "elapsed_sec":  round(elapsed, 2),
+            "status":               "success",
+            "fecha":                str(self.today),
+            "survivors":            [a["id"] for a in result.survivors],
+            "eliminated":           [a["id"] for a in result.eliminated],
+            "new_agents":           [a["id"] for a in result.new_agents],
+            "capital_pool_total":   result.capital_pool_total,
+            "capital_por_agente":   result.capital_por_agente,
+            "llm_verdict":          llm_verdict,
+            "elapsed_sec":          round(elapsed, 2),
         }
         log.info("Ciclo completado en %.2fs.", elapsed)
         return summary
