@@ -5,6 +5,7 @@ Streamlit dashboard: dark luxury theme · gold / emerald palette.
 
 from __future__ import annotations
 
+import base64
 import sys
 import os
 from datetime import datetime, timezone
@@ -26,6 +27,14 @@ if _ROOT not in sys.path:
 
 from dashboard import data as D
 from dashboard import charts as C
+
+# ── Logo ──────────────────────────────────────────────────────────────────────
+def _logo_b64() -> str:
+    _logo_path = os.path.join(os.path.dirname(__file__), "logo.png")
+    with open(_logo_path, "rb") as f:
+        return base64.b64encode(f.read()).decode()
+
+_LOGO = _logo_b64()
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # PALETA Y CONSTANTES
@@ -275,13 +284,18 @@ def _header() -> None:
     left, right = st.columns([5, 2])
     with left:
         st.markdown(f"""
-        <div style="padding:16px 0 20px 0; border-bottom:1px solid {BORDER}; margin-bottom:22px;">
-          <div style="font-size:20px;font-weight:800;letter-spacing:3px;color:{GOLD};">
-            ⚡&nbsp; INVERSIÓN EVOLUTIVA
-          </div>
-          <div style="font-size:10px;color:{DIM};letter-spacing:3.5px;
-                      text-transform:uppercase;margin-top:4px;">
-            Command Center · EUR/USD · Algorithmic Evolution
+        <div style="padding:16px 0 20px 0; border-bottom:1px solid {BORDER}; margin-bottom:22px;
+                    display:flex; align-items:center; gap:16px;">
+          <img src="data:image/png;base64,{_LOGO}"
+               style="width:52px;height:52px;border-radius:12px;flex-shrink:0;">
+          <div>
+            <div style="font-size:20px;font-weight:800;letter-spacing:3px;color:{GOLD};">
+              INVERSIÓN EVOLUTIVA
+            </div>
+            <div style="font-size:10px;color:{DIM};letter-spacing:3.5px;
+                        text-transform:uppercase;margin-top:4px;">
+              Command Center · EUR/USD · Algorithmic Evolution
+            </div>
           </div>
         </div>
         """, unsafe_allow_html=True)
@@ -301,10 +315,18 @@ def _header() -> None:
 def _sidebar() -> tuple[list[str], list[int]]:
     with st.sidebar:
         st.markdown(f"""
-        <div style="padding:14px 0 10px; border-bottom:1px solid {BORDER}; margin-bottom:16px;">
-          <span style="font-size:9px;letter-spacing:2px;color:{GOLD};text-transform:uppercase;">
-            Filtros &amp; Control
-          </span>
+        <div style="padding:10px 0 14px; border-bottom:1px solid {BORDER}; margin-bottom:16px;
+                    display:flex; align-items:center; gap:10px;">
+          <img src="data:image/png;base64,{_LOGO}"
+               style="width:36px;height:36px;border-radius:8px;flex-shrink:0;">
+          <div>
+            <div style="font-size:11px;font-weight:800;letter-spacing:1.5px;color:{GOLD};">
+              INV. EVOLUTIVA
+            </div>
+            <div style="font-size:9px;letter-spacing:2px;color:{DIM};text-transform:uppercase;">
+              Filtros &amp; Control
+            </div>
+          </div>
         </div>
         """, unsafe_allow_html=True)
 
