@@ -134,23 +134,24 @@ html, body {
 /* ═══ APP HEADER ═══ */
 .app-header {
   display: flex;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
-  padding: 24px 20px 0 20px;
-  gap: 16px;
+  padding: 32px 20px 0 20px;
+  gap: 12px;
 }
 .app-logo {
-  width: 64px;
-  height: 64px;
-  border-radius: 12px;
-  box-shadow: 0 0 16px rgba(212, 175, 55, 0.25);
+  width: 112px;
+  height: 112px;
+  border-radius: 20px;
+  box-shadow: 0 0 24px rgba(212, 175, 55, 0.35);
 }
 .app-header-title {
   font-family: 'Hanken Grotesk', sans-serif;
-  font-size: 23px;
+  font-size: 24px;
   font-weight: 800;
   color: var(--text);
-  letter-spacing: 1.5px;
+  letter-spacing: 2px;
 }
 
 /* ═══ SECTION HEADERS ═══ */
