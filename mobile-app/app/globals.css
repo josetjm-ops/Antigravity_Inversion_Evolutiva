@@ -47,8 +47,8 @@ html, body {
   gap: 20px;
 }
 .loading-pulse {
-  width: 48px;
-  height: 48px;
+  width: 64px;
+  height: 64px;
   border-radius: 50%;
   background: var(--gold);
   animation: pulse 1.4s ease-in-out infinite;
@@ -58,7 +58,7 @@ html, body {
   50% { transform: scale(1.1); opacity: 1; }
 }
 .loading-text {
-  font-size: 11px;
+  font-size: 15px;
   color: var(--dim);
   letter-spacing: 3px;
   text-transform: uppercase;
@@ -70,7 +70,7 @@ html, body {
   padding: 12px 0 24px;
 }
 .hero-label {
-  font-size: 11px;
+  font-size: 15px;
   color: var(--dim);
   letter-spacing: 4px;
   text-transform: uppercase;
@@ -79,14 +79,14 @@ html, body {
 }
 .hero-value {
   font-family: 'Hanken Grotesk', sans-serif;
-  font-size: 38px;
+  font-size: 42px;
   font-weight: 800;
   color: var(--gold);
   line-height: 1;
   margin-bottom: 6px;
 }
 .hero-sub {
-  font-size: 10px;
+  font-size: 14px;
   color: var(--dim);
   letter-spacing: 2px;
   text-transform: uppercase;
@@ -108,7 +108,7 @@ html, body {
 }
 .metric-card:active { border-color: var(--gold); }
 .metric-label {
-  font-size: 10px;
+  font-size: 14px;
   font-weight: 600;
   letter-spacing: 1.5px;
   text-transform: uppercase;
@@ -117,7 +117,7 @@ html, body {
 }
 .metric-value {
   font-family: 'Hanken Grotesk', sans-serif;
-  font-size: 22px;
+  font-size: 26px;
   font-weight: 700;
   color: var(--text);
 }
@@ -125,7 +125,7 @@ html, body {
 .metric-value.emerald { color: var(--emerald); }
 .metric-value.red { color: var(--red); }
 .metric-suffix {
-  font-size: 13px;
+  font-size: 17px;
   font-weight: 400;
   color: var(--dim);
   margin-left: 4px;
@@ -140,14 +140,14 @@ html, body {
   gap: 16px;
 }
 .app-logo {
-  width: 48px;
-  height: 48px;
+  width: 64px;
+  height: 64px;
   border-radius: 12px;
   box-shadow: 0 0 16px rgba(212, 175, 55, 0.25);
 }
 .app-header-title {
   font-family: 'Hanken Grotesk', sans-serif;
-  font-size: 19px;
+  font-size: 23px;
   font-weight: 800;
   color: var(--text);
   letter-spacing: 1.5px;
@@ -155,13 +155,13 @@ html, body {
 
 /* ═══ SECTION HEADERS ═══ */
 .section-title {
-  font-size: 15px;
+  font-size: 19px;
   font-weight: 700;
   color: var(--text);
   margin-bottom: 14px;
 }
 .page-title {
-  font-size: 20px;
+  font-size: 24px;
   font-weight: 800;
   color: var(--text);
   text-align: center;
@@ -179,7 +179,7 @@ html, body {
   flex: 1;
   text-align: center;
   padding: 14px 0;
-  font-size: 14px;
+  font-size: 18px;
   font-weight: 600;
   color: var(--dim);
   cursor: pointer;
@@ -213,14 +213,14 @@ html, body {
 }
 .agent-info { flex: 1; }
 .agent-gen {
-  font-size: 11px;
+  font-size: 15px;
   font-weight: 700;
   color: var(--dim);
   letter-spacing: 1px;
   margin-bottom: 4px;
 }
 .agent-id {
-  font-size: 15px;
+  font-size: 19px;
   font-weight: 700;
   color: var(--text);
   margin-bottom: 8px;
@@ -228,7 +228,7 @@ html, body {
 .agent-stats {
   display: flex;
   gap: 14px;
-  font-size: 12px;
+  font-size: 16px;
 }
 .agent-stat-label { color: var(--dim); }
 .agent-stat-value { font-weight: 600; margin-left: 4px; }
@@ -238,7 +238,7 @@ html, body {
   margin-left: 16px;
 }
 .fitness-label {
-  font-size: 9px;
+  font-size: 13px;
   color: var(--gold);
   letter-spacing: 1.5px;
   text-transform: uppercase;
@@ -247,7 +247,7 @@ html, body {
 }
 .fitness-value {
   font-family: 'Hanken Grotesk', sans-serif;
-  font-size: 24px;
+  font-size: 32px;
   font-weight: 800;
   color: var(--gold);
 }
@@ -267,13 +267,13 @@ html, body {
   margin-bottom: 10px;
 }
 .gen-badge {
-  font-size: 11px;
+  font-size: 15px;
   font-weight: 700;
   color: var(--gold);
   letter-spacing: 1px;
 }
 .status-badge {
-  font-size: 9px;
+  font-size: 13px;
   font-weight: 700;
   text-transform: uppercase;
   padding: 3px 8px;
@@ -291,7 +291,7 @@ html, body {
   background: var(--red-dim);
 }
 .gen-child-id {
-  font-size: 16px;
+  font-size: 20px;
   font-weight: 700;
   color: var(--text);
   margin-bottom: 12px;
@@ -303,7 +303,7 @@ html, body {
   padding: 12px;
 }
 .gen-parent {
-  font-size: 12px;
+  font-size: 16px;
   color: var(--dim);
   margin-bottom: 6px;
 }
@@ -329,12 +329,12 @@ html, body {
   margin-bottom: 10px;
 }
 .op-id {
-  font-size: 12px;
+  font-size: 16px;
   font-weight: 600;
   color: var(--text);
 }
 .op-type {
-  font-size: 10px;
+  font-size: 14px;
   font-weight: 700;
   padding: 3px 10px;
   border-radius: 4px;
@@ -356,7 +356,7 @@ html, body {
   gap: 8px;
 }
 .op-detail-label {
-  font-size: 9px;
+  font-size: 13px;
   color: var(--dim);
   text-transform: uppercase;
   letter-spacing: 0.5px;
@@ -364,7 +364,7 @@ html, body {
 }
 .op-detail-value {
   font-family: 'Hanken Grotesk', sans-serif;
-  font-size: 13px;
+  font-size: 17px;
   font-weight: 700;
   color: var(--text);
 }
@@ -378,7 +378,7 @@ html, body {
   text-align: center;
 }
 .empty-text {
-  font-size: 14px;
+  font-size: 18px;
   color: var(--dim);
 }
 
@@ -417,12 +417,12 @@ html, body {
   transition: all 0.2s;
 }
 .nav-icon {
-  font-size: 22px;
+  font-size: 26px;
   opacity: 0.4;
   transition: opacity 0.2s;
 }
 .nav-label {
-  font-size: 10px;
+  font-size: 14px;
   font-weight: 600;
   color: var(--dim);
   letter-spacing: 0.5px;
@@ -451,7 +451,7 @@ html, body {
   background: var(--card);
   border: 1px solid var(--border);
   color: var(--dim);
-  font-size: 16px;
+  font-size: 20px;
   cursor: pointer;
   display: flex;
   align-items: center;
@@ -481,7 +481,7 @@ html, body {
   margin-bottom: 24px;
 }
 .chart-title {
-  font-size: 12px;
+  font-size: 16px;
   font-weight: 700;
   color: var(--text);
   letter-spacing: 0.5px;
@@ -498,7 +498,7 @@ html, body {
   flex-direction: column;
   justify-content: space-between;
   align-items: flex-end;
-  font-size: 9px;
+  font-size: 13px;
   color: var(--dim);
   font-family: 'Hanken Grotesk', sans-serif;
   padding-bottom: 22px;
@@ -522,7 +522,7 @@ html, body {
   min-width: 0;
 }
 .chart-bar-value {
-  font-size: 9px;
+  font-size: 13px;
   font-family: 'Hanken Grotesk', sans-serif;
   font-weight: 700;
   color: var(--gold);
@@ -544,7 +544,7 @@ html, body {
   min-height: 2px;
 }
 .chart-bar-label {
-  font-size: 10px;
+  font-size: 14px;
   font-weight: 600;
   color: var(--dim);
   white-space: nowrap;
@@ -573,7 +573,7 @@ html, body {
   margin-bottom: 8px;
 }
 .evo-summary-title {
-  font-size: 11px;
+  font-size: 15px;
   font-weight: 700;
   color: var(--dim);
   text-transform: uppercase;
@@ -583,7 +583,7 @@ html, body {
 .evo-summary-stats {
   display: flex;
   justify-content: space-between;
-  font-size: 13px;
+  font-size: 17px;
   font-weight: 600;
   margin-bottom: 12px;
 }
@@ -603,7 +603,7 @@ html, body {
   transition: width 0.5s ease;
 }
 .evo-success-rate {
-  font-size: 11px;
+  font-size: 15px;
   color: var(--gold);
   font-weight: 700;
   text-align: right;
@@ -639,21 +639,21 @@ html, body {
   text-align: center;
 }
 .dna-parent-label {
-  font-size: 9px;
+  font-size: 13px;
   color: var(--dim);
   text-transform: uppercase;
   letter-spacing: 0.5px;
   margin-bottom: 4px;
 }
 .dna-parent-id {
-  font-size: 11px;
+  font-size: 15px;
   font-weight: 700;
   color: var(--text);
   margin-bottom: 6px;
 }
 .dna-parent-fit {
   font-family: 'Hanken Grotesk', sans-serif;
-  font-size: 12px;
+  font-size: 16px;
   font-weight: 600;
   color: var(--gold);
 }
@@ -672,7 +672,7 @@ html, body {
   opacity: 0.5;
 }
 .dna-arrow {
-  font-size: 10px;
+  font-size: 14px;
   color: var(--gold);
   margin-top: -4px;
   opacity: 0.5;
@@ -692,13 +692,13 @@ html, body {
   margin-bottom: 8px;
 }
 .dna-child-gen {
-  font-size: 11px;
+  font-size: 15px;
   font-weight: 700;
   color: var(--dim);
   letter-spacing: 1px;
 }
 .dna-child-id {
-  font-size: 15px;
+  font-size: 19px;
   font-weight: 700;
   color: var(--text);
   margin-bottom: 12px;
@@ -713,7 +713,7 @@ html, body {
   flex-direction: column;
 }
 .dna-child-fitness .label {
-  font-size: 9px;
+  font-size: 13px;
   color: var(--dim);
   text-transform: uppercase;
   letter-spacing: 0.5px;
@@ -721,7 +721,7 @@ html, body {
 }
 .dna-child-fitness .value {
   font-family: 'Hanken Grotesk', sans-serif;
-  font-size: 18px;
+  font-size: 22px;
   font-weight: 800;
   color: var(--text);
 }
@@ -729,7 +729,7 @@ html, body {
   display: flex;
   align-items: center;
   gap: 4px;
-  font-size: 11px;
+  font-size: 15px;
   font-weight: 600;
   padding: 4px 8px;
   border-radius: 4px;
@@ -743,7 +743,7 @@ html, body {
   background: var(--red-dim);
 }
 .delta-desc {
-  font-size: 9px;
+  font-size: 13px;
   font-weight: 500;
   opacity: 0.8;
   margin-left: 2px;
