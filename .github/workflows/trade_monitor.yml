@@ -1,6 +1,8 @@
 name: "Monitor de Trades (SL/TP + Nuevas Posiciones)"
 
 "on":
+  schedule:
+    - cron: "*/15 7-21 * * 1-5"   # cada 15 min, lunes-viernes, 7am-9pm UTC (2am-4pm Bogotá)
   workflow_dispatch: {}             # disparo manual para pruebas
 
 jobs:
@@ -12,11 +14,14 @@ jobs:
       issues: write
 
     env:
-      DATABASE_URL:      ${{ secrets.DATABASE_URL }}
-      DEEPSEEK_API_KEY:  ${{ secrets.DEEPSEEK_API_KEY }}
-      FINNHUB_API_KEY:   ${{ secrets.FINNHUB_API_KEY }}
-      LOG_LEVEL:         "INFO"
-      ENVIRONMENT:       "production"
+      DATABASE_URL:             ${{ secrets.DATABASE_URL }}
+      DEEPSEEK_API_KEY:         ${{ secrets.DEEPSEEK_API_KEY }}
+      FINNHUB_API_KEY:          ${{ secrets.FINNHUB_API_KEY }}
+      ALPHA_VANTAGE_API_KEY:    ${{ secrets.ALPHA_VANTAGE_API_KEY }}
+      GOOGLE_SHEET_ID:          ${{ secrets.GOOGLE_SHEET_ID }}
+      GOOGLE_CREDENTIALS_JSON:  ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
+      LOG_LEVEL:                "INFO"
+      ENVIRONMENT:              "production"
 
     steps:
       - name: "Checkout del repositorio"

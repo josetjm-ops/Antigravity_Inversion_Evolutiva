@@ -143,7 +143,6 @@ function InicioView({ data }) {
     <div className="fade-in">
       {/* Hero: Capital Total */}
       <div className="hero">
-        <div className="hero-label">Inversión Evolutiva</div>
         <div className="hero-value">${status.totalCapital.toFixed(2)}</div>
         <div className="hero-sub">Capital Total Portafolio</div>
       </div>
@@ -544,6 +543,11 @@ export default function Home() {
       </button>
 
       <div className="app">
+        <header className="app-header">
+          <img src="/icon-192.png" alt="Logo" className="app-logo" />
+          <span className="app-header-title">INVERSIÓN EVOLUTIVA</span>
+        </header>
+
         {view === "inicio" ? (
           <InicioView data={data} />
         ) : (

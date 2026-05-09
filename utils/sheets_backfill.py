@@ -31,7 +31,6 @@ from db.connection import get_conn, get_dict_cursor
 from utils.sheets_logger import (
     SheetsLogger,
     _col_letter,
-    _COL_OPS,
     _pnl_formula,
     _pnl_pct_formula,
     _safe_float,
@@ -49,14 +48,11 @@ _BATCH = 50
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
 def _clear_sheet(ws, headers: list[str]) -> None:
-    """Borra todas las filas excepto la cabecera."""
-    total = ws.row_count
-    if total > 1:
-        ws.delete_rows(2, total)
-    # Re-escribir headers por si acaso
+    """Borra todo el contenido y reescribe solo la cabecera."""
+    ws.clear()
     end_col = _col_letter(len(headers))
-    ws.update(f"A1:{end_col}1", [headers], value_input_option="USER_ENTERED")
-    log.info("Pestaña '%s' limpiada (%d filas borradas).", ws.title, total - 1)
+    ws.update([headers], f"A1:{end_col}1", value_input_option="USER_ENTERED")
+    log.info("Pestaña '%s' limpiada y headers restaurados.", ws.title)
 
 
 def _write_batches(ws, rows: list[list]) -> None:
@@ -139,6 +135,7 @@ def _fetch_operations() -> list[dict]:
             o.pnl_porcentaje::float  AS pnl_porcentaje,
             o.estado,
             o.senal_tecnico,
+            o.senal_macro,
             o.decision_riesgo,
             a.generacion
         FROM operaciones o
@@ -209,8 +206,16 @@ def _op_row(op: dict, row_n: int) -> list:
         pnl_val    = _pnl_formula(row_n)
         pnl_pct_val = _pnl_pct_formula(row_n)
 
-    confianza_tec = dr.get("confianza_tecnica") or ind.get("confianza_tecnica") or ""
-    confianza_mac = dr.get("confianza_macro")   or ind.get("confianza_macro")   or ""
+    sm = op.get("senal_macro") or {}
+    if isinstance(sm, str):
+        try:
+            sm = json.loads(sm)
+        except Exception:
+            sm = {}
+
+    # Prioridad: decision_riesgo (futuras ops) → señal original (históricas)
+    confianza_tec = dr.get("confianza_tecnica") or st.get("confianza") or ""
+    confianza_mac = dr.get("confianza_macro")   or sm.get("confianza") or ""
 
     return [
         op.get("id", ""),

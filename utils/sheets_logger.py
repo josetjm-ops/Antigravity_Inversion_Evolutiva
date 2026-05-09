@@ -172,7 +172,7 @@ class SheetsLogger:
             ws = self.spreadsheet.add_worksheet(
                 title=title, rows=2000, cols=len(headers)
             )
-            ws.update("A1", [headers], value_input_option="USER_ENTERED")
+            ws.update([headers], "A1", value_input_option="USER_ENTERED")
             log.info("[SheetsLogger] Pestaña '%s' creada con headers.", title)
             return ws
 
@@ -183,7 +183,7 @@ class SheetsLogger:
             existing = []
         if existing != headers:
             end_col = _col_letter(len(headers))
-            ws.update(f"A1:{end_col}1", [headers], value_input_option="USER_ENTERED")
+            ws.update([headers], f"A1:{end_col}1", value_input_option="USER_ENTERED")
             log.info("[SheetsLogger] Headers de '%s' actualizados.", title)
         return ws
 

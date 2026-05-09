@@ -67,7 +67,7 @@ html, body {
 /* ═══ HEADER / HERO ═══ */
 .hero {
   text-align: center;
-  padding: 28px 0 24px;
+  padding: 12px 0 24px;
 }
 .hero-label {
   font-size: 11px;
@@ -131,6 +131,27 @@ html, body {
   margin-left: 4px;
 }
 
+/* ═══ APP HEADER ═══ */
+.app-header {
+  display: flex;
+  align-items: center;
+  padding: 16px 20px 0 20px;
+  gap: 12px;
+}
+.app-logo {
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  box-shadow: 0 0 12px rgba(212, 175, 55, 0.2);
+}
+.app-header-title {
+  font-family: 'Hanken Grotesk', sans-serif;
+  font-size: 14px;
+  font-weight: 800;
+  color: var(--text);
+  letter-spacing: 1.5px;
+}
+
 /* ═══ SECTION HEADERS ═══ */
 .section-title {
   font-size: 15px;
@@ -144,7 +165,7 @@ html, body {
   color: var(--text);
   text-align: center;
   margin-bottom: 20px;
-  padding-top: 24px;
+  padding-top: 10px;
 }
 
 /* ═══ TABS (Ranking / Genealogía) ═══ */
