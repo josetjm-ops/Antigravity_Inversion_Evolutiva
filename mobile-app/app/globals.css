@@ -1,0 +1,728 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Hanken+Grotesk:wght@400;700;800&display=swap');
+
+:root {
+  --bg: #0A0A0A;
+  --card: #141414;
+  --card-hover: #1A1A1A;
+  --border: #2A2A2A;
+  --gold: #D4AF37;
+  --gold-dim: rgba(212, 175, 55, 0.12);
+  --emerald: #50C878;
+  --emerald-dim: rgba(80, 200, 120, 0.12);
+  --red: #E05252;
+  --red-dim: rgba(224, 82, 82, 0.12);
+  --text: #FFFFFF;
+  --dim: #888888;
+  --radius: 12px;
+}
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body {
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  overflow-x: hidden;
+}
+
+/* ═══ APP SHELL ═══ */
+.app {
+  max-width: 480px;
+  margin: 0 auto;
+  min-height: 100dvh;
+  padding: 0 20px;
+  padding-bottom: 90px;
+}
+
+/* ═══ LOADING SCREEN ═══ */
+.loading-screen {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100dvh;
+  gap: 20px;
+}
+.loading-pulse {
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  background: var(--gold);
+  animation: pulse 1.4s ease-in-out infinite;
+}
+@keyframes pulse {
+  0%, 100% { transform: scale(0.8); opacity: 0.4; }
+  50% { transform: scale(1.1); opacity: 1; }
+}
+.loading-text {
+  font-size: 11px;
+  color: var(--dim);
+  letter-spacing: 3px;
+  text-transform: uppercase;
+}
+
+/* ═══ HEADER / HERO ═══ */
+.hero {
+  text-align: center;
+  padding: 28px 0 24px;
+}
+.hero-label {
+  font-size: 11px;
+  color: var(--dim);
+  letter-spacing: 4px;
+  text-transform: uppercase;
+  font-weight: 600;
+  margin-bottom: 8px;
+}
+.hero-value {
+  font-family: 'Hanken Grotesk', sans-serif;
+  font-size: 38px;
+  font-weight: 800;
+  color: var(--gold);
+  line-height: 1;
+  margin-bottom: 6px;
+}
+.hero-sub {
+  font-size: 10px;
+  color: var(--dim);
+  letter-spacing: 2px;
+  text-transform: uppercase;
+}
+
+/* ═══ METRIC GRID ═══ */
+.metric-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  margin-bottom: 28px;
+}
+.metric-card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px;
+  transition: border-color 0.2s;
+}
+.metric-card:active { border-color: var(--gold); }
+.metric-label {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
+  color: var(--dim);
+  margin-bottom: 6px;
+}
+.metric-value {
+  font-family: 'Hanken Grotesk', sans-serif;
+  font-size: 22px;
+  font-weight: 700;
+  color: var(--text);
+}
+.metric-value.gold { color: var(--gold); }
+.metric-value.emerald { color: var(--emerald); }
+.metric-value.red { color: var(--red); }
+.metric-suffix {
+  font-size: 13px;
+  font-weight: 400;
+  color: var(--dim);
+  margin-left: 4px;
+}
+
+/* ═══ SECTION HEADERS ═══ */
+.section-title {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--text);
+  margin-bottom: 14px;
+}
+.page-title {
+  font-size: 20px;
+  font-weight: 800;
+  color: var(--text);
+  text-align: center;
+  margin-bottom: 20px;
+  padding-top: 24px;
+}
+
+/* ═══ TABS (Ranking / Genealogía) ═══ */
+.tabs {
+  display: flex;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 20px;
+}
+.tab {
+  flex: 1;
+  text-align: center;
+  padding: 14px 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--dim);
+  cursor: pointer;
+  border-bottom: 3px solid transparent;
+  transition: all 0.25s;
+  background: none;
+  border-top: none;
+  border-left: none;
+  border-right: none;
+}
+.tab.active {
+  color: var(--gold);
+  border-bottom-color: var(--gold);
+}
+
+/* ═══ AGENT CARDS (Ranking) ═══ */
+.agent-card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px;
+  margin-bottom: 12px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  transition: border-color 0.2s, transform 0.15s;
+}
+.agent-card:active {
+  transform: scale(0.98);
+  border-color: var(--gold);
+}
+.agent-info { flex: 1; }
+.agent-gen {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--dim);
+  letter-spacing: 1px;
+  margin-bottom: 4px;
+}
+.agent-id {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--text);
+  margin-bottom: 8px;
+}
+.agent-stats {
+  display: flex;
+  gap: 14px;
+  font-size: 12px;
+}
+.agent-stat-label { color: var(--dim); }
+.agent-stat-value { font-weight: 600; margin-left: 4px; }
+.agent-fitness {
+  text-align: right;
+  flex-shrink: 0;
+  margin-left: 16px;
+}
+.fitness-label {
+  font-size: 9px;
+  color: var(--gold);
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
+  font-weight: 700;
+  margin-bottom: 4px;
+}
+.fitness-value {
+  font-family: 'Hanken Grotesk', sans-serif;
+  font-size: 24px;
+  font-weight: 800;
+  color: var(--gold);
+}
+
+/* ═══ GENEALOGY CARDS ═══ */
+.gen-card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px;
+  margin-bottom: 12px;
+}
+.gen-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 10px;
+}
+.gen-badge {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--gold);
+  letter-spacing: 1px;
+}
+.status-badge {
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  padding: 3px 8px;
+  border-radius: 4px;
+  letter-spacing: 0.5px;
+}
+.status-badge.activo {
+  color: var(--emerald);
+  border: 1px solid var(--emerald);
+  background: var(--emerald-dim);
+}
+.status-badge.eliminado {
+  color: var(--red);
+  border: 1px solid var(--red);
+  background: var(--red-dim);
+}
+.gen-child-id {
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--text);
+  margin-bottom: 12px;
+}
+.gen-parents {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px;
+}
+.gen-parent {
+  font-size: 12px;
+  color: var(--dim);
+  margin-bottom: 6px;
+}
+.gen-parent:last-child { margin-bottom: 0; }
+.gen-parent-id {
+  color: var(--text);
+  font-weight: 600;
+  margin-left: 4px;
+}
+
+/* ═══ OPERATIONS LIST ═══ */
+.op-card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+  margin-bottom: 10px;
+}
+.op-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 10px;
+}
+.op-id {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+}
+.op-type {
+  font-size: 10px;
+  font-weight: 700;
+  padding: 3px 10px;
+  border-radius: 4px;
+  letter-spacing: 0.5px;
+}
+.op-type.buy {
+  color: var(--emerald);
+  background: var(--emerald-dim);
+  border: 1px solid var(--emerald);
+}
+.op-type.sell {
+  color: var(--red);
+  background: var(--red-dim);
+  border: 1px solid var(--red);
+}
+.op-details {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr 1fr;
+  gap: 8px;
+}
+.op-detail-label {
+  font-size: 9px;
+  color: var(--dim);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 2px;
+}
+.op-detail-value {
+  font-family: 'Hanken Grotesk', sans-serif;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text);
+}
+
+/* ═══ EMPTY STATE ═══ */
+.empty-state {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 40px 20px;
+  text-align: center;
+}
+.empty-text {
+  font-size: 14px;
+  color: var(--dim);
+}
+
+/* ═══ BOTTOM NAV ═══ */
+.bottom-nav {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 70px;
+  background: rgba(14, 14, 14, 0.92);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border-top: 1px solid var(--border);
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  z-index: 100;
+  padding-bottom: env(safe-area-inset-bottom, 0);
+}
+.nav-inner {
+  display: flex;
+  max-width: 480px;
+  width: 100%;
+  justify-content: space-around;
+}
+.nav-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 8px 24px;
+  cursor: pointer;
+  border: none;
+  background: none;
+  transition: all 0.2s;
+}
+.nav-icon {
+  font-size: 22px;
+  opacity: 0.4;
+  transition: opacity 0.2s;
+}
+.nav-label {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--dim);
+  letter-spacing: 0.5px;
+  transition: color 0.2s;
+}
+.nav-item.active .nav-icon { opacity: 1; }
+.nav-item.active .nav-label { color: var(--gold); }
+
+/* ═══ FADE ANIMATION ═══ */
+.fade-in {
+  animation: fadeIn 0.3s ease-out;
+}
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* ═══ REFRESH BUTTON ═══ */
+.refresh-btn {
+  position: fixed;
+  top: 12px;
+  right: 12px;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: var(--card);
+  border: 1px solid var(--border);
+  color: var(--dim);
+  font-size: 16px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 50;
+  transition: all 0.2s;
+}
+.refresh-btn:active {
+  border-color: var(--gold);
+  color: var(--gold);
+  transform: rotate(180deg);
+}
+.refresh-btn.spinning {
+  animation: spin 0.8s linear;
+}
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+/* ═══ FITNESS BAR CHART ═══ */
+.chart-container {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 20px 16px 16px;
+  margin-bottom: 24px;
+}
+.chart-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text);
+  letter-spacing: 0.5px;
+  margin-bottom: 16px;
+  text-align: center;
+}
+.chart-area {
+  display: flex;
+  gap: 8px;
+  height: 180px;
+}
+.chart-y-axis {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  align-items: flex-end;
+  font-size: 9px;
+  color: var(--dim);
+  font-family: 'Hanken Grotesk', sans-serif;
+  padding-bottom: 22px;
+  min-width: 32px;
+}
+.chart-bars {
+  display: flex;
+  flex: 1;
+  gap: 6px;
+  align-items: flex-end;
+  border-left: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  padding: 0 8px 0 8px;
+}
+.chart-bar-col {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+.chart-bar-value {
+  font-size: 9px;
+  font-family: 'Hanken Grotesk', sans-serif;
+  font-weight: 700;
+  color: var(--gold);
+  white-space: nowrap;
+}
+.chart-bar-track {
+  width: 100%;
+  max-width: 40px;
+  height: 120px;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+}
+.chart-bar-fill {
+  width: 100%;
+  border-radius: 4px 4px 0 0;
+  background: linear-gradient(180deg, var(--gold) 0%, rgba(212, 175, 55, 0.4) 100%);
+  transition: height 0.6s cubic-bezier(0.22, 1, 0.36, 1);
+  min-height: 2px;
+}
+.chart-bar-label {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--dim);
+  white-space: nowrap;
+}
+
+/* ═══ CAPITAL LINE CHART ═══ */
+.capital-svg {
+  display: block;
+  border-radius: 6px;
+  overflow: visible;
+}
+
+/* ═══ DNA CROSS CARDS (GENEALOGY) ═══ */
+.genealogy-container {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+/* Summary Bar */
+.evo-summary {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px;
+  margin-bottom: 8px;
+}
+.evo-summary-title {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--dim);
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  margin-bottom: 12px;
+}
+.evo-summary-stats {
+  display: flex;
+  justify-content: space-between;
+  font-size: 13px;
+  font-weight: 600;
+  margin-bottom: 12px;
+}
+.stat-improved { color: var(--emerald); }
+.stat-declined { color: var(--red); }
+.evo-progress-bg {
+  height: 6px;
+  background: var(--bg);
+  border-radius: 3px;
+  overflow: hidden;
+  margin-bottom: 8px;
+}
+.evo-progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--emerald) 0%, var(--gold) 100%);
+  border-radius: 3px;
+  transition: width 0.5s ease;
+}
+.evo-success-rate {
+  font-size: 11px;
+  color: var(--gold);
+  font-weight: 700;
+  text-align: right;
+}
+
+/* DNA Card */
+.dna-card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px;
+  position: relative;
+  overflow: hidden;
+}
+.dna-card.improved {
+  border-left: 3px solid var(--emerald);
+}
+.dna-card.declined {
+  border-left: 3px solid var(--red);
+}
+
+/* Parents */
+.dna-parents {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+.dna-parent {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px;
+  text-align: center;
+}
+.dna-parent-label {
+  font-size: 9px;
+  color: var(--dim);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 4px;
+}
+.dna-parent-id {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text);
+  margin-bottom: 6px;
+}
+.dna-parent-fit {
+  font-family: 'Hanken Grotesk', sans-serif;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--gold);
+}
+
+/* Connector */
+.dna-connector {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  margin: 8px 0;
+}
+.dna-line {
+  width: 2px;
+  height: 16px;
+  background: var(--gold);
+  opacity: 0.5;
+}
+.dna-arrow {
+  font-size: 10px;
+  color: var(--gold);
+  margin-top: -4px;
+  opacity: 0.5;
+}
+
+/* Child */
+.dna-child {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 14px;
+}
+.dna-child-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+.dna-child-gen {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--dim);
+  letter-spacing: 1px;
+}
+.dna-child-id {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--text);
+  margin-bottom: 12px;
+}
+.dna-child-metrics {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-end;
+}
+.dna-child-fitness {
+  display: flex;
+  flex-direction: column;
+}
+.dna-child-fitness .label {
+  font-size: 9px;
+  color: var(--dim);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 2px;
+}
+.dna-child-fitness .value {
+  font-family: 'Hanken Grotesk', sans-serif;
+  font-size: 18px;
+  font-weight: 800;
+  color: var(--text);
+}
+.dna-delta {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 4px 8px;
+  border-radius: 4px;
+}
+.dna-delta.positive {
+  color: var(--emerald);
+  background: var(--emerald-dim);
+}
+.dna-delta.negative {
+  color: var(--red);
+  background: var(--red-dim);
+}
+.delta-desc {
+  font-size: 9px;
+  font-weight: 500;
+  opacity: 0.8;
+  margin-left: 2px;
+}
