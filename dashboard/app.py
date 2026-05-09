@@ -993,10 +993,14 @@ def _tab_instructions() -> None:
             <div class="ins-param-label">🔮 Genes SMC</div>
             <div class="ins-param-items">
               FVG mínimo en pips (2–15)<br>
-              OB impulso mínimo en pips (5–25)<br>
+              OB impulso mínimo en pips (5–20)<br>
               Multiplicador spike de rango (1.2–3.0)<br>
               Cuarentena macro (30–120 min)<br>
-              Pesos FVG / OB (0.05–0.50)
+              Pesos FVG / OB (0.05–0.50)<br>
+              ATR factor SL (0.8–3.0)<br>
+              Trailing activation pips (5–40)<br>
+              Trailing distance pips (5–25)<br>
+              Período ATR (7–21)
             </div>
           </div>
         </div>
@@ -1045,10 +1049,16 @@ def _tab_instructions() -> None:
             pesos configurables. Si las señales coinciden, promedia. Si hay conflicto,
             gana la que supere 0.75 de confianza; si ninguna lo hace, emite <b>HOLD</b>.
             Si la confianza final no alcanza el umbral mínimo del agente, también emite
-            <b>HOLD</b>. Si la acción es BUY o SELL, calcula el <b>Stop Loss estructural</b>
-            anclado al Order Block más cercano (o al FVG como fallback), el Take Profit con
-            el ratio R:R genético del agente, y el capital usando sizing dinámico basado en
-            pips (1–2% de equity en riesgo, máx. 20% de capital). Luego consulta a DeepSeek
+            <b>HOLD</b>. Si la acción es BUY o SELL, calcula el <b>Stop Loss</b> siguiendo
+            una jerarquía de 4 niveles: <b>① Order Block</b> activo no mitigado →
+            <b>② Fair Value Gap</b> activo no rellenado → <b>③ ATR × atr_factor</b>
+            (distancia real de mercado, ~12–22 pips típico, gen mutable) →
+            <b>④ porcentaje fijo</b> (fallback legacy si ATR = 0).
+            El Take Profit se calcula como <code>SL × risk_reward_target</code> (gen mutable,
+            default 2.0×). El sizing es dinámico: 1–2% de equity en riesgo por pips,
+            máx. 20% de capital. El <b>trailing stop</b> (gen <code>trailing_activation_pips</code>
+            y <code>trailing_distance_pips</code>) queda registrado en la operación para que
+            el Trade Monitor lo aplique en cada ciclo de 15 minutos. Luego consulta a DeepSeek
             para validación final.
           </div>
         </div>
@@ -1084,11 +1094,15 @@ def _tab_instructions() -> None:
         <div class="ins-body">
           El <b>Trade Monitor</b> corre cada 15 minutos dentro del horario 2:00 am–3:00 pm
           Bogotá y realiza <b>dos tareas en cada ciclo</b>:<br><br>
-          <b>① Verificación de posiciones abiertas</b><br>
-          Obtiene el precio actual de EUR/USD (Yahoo Finance) y comprueba si alguna posición
-          tocó su Stop Loss o Take Profit:<br>
+          <b>① Trailing Stop + Verificación SL/TP</b><br>
+          Obtiene el precio actual de EUR/USD (Yahoo Finance) y primero actualiza el
+          <b>trailing stop</b> de cada posición abierta: si el profit supera el gen
+          <code>trailing_activation_pips</code>, el SL dinámico se mueve hacia
+          <code>extremo_favorable − trailing_distance_pips</code>. El SL <b>nunca empeora</b>
+          — solo se mueve a favor del agente. Una vez actualizado el SL, verifica si el precio
+          tocó el Stop Loss o Take Profit:<br>
           &nbsp;• <b style="color:{EMERALD};">✓ Take Profit alcanzado</b> — se cierra con ganancia al precio exacto del TP.<br>
-          &nbsp;• <b style="color:{RED};">✗ Stop Loss alcanzado</b> — se cierra con pérdida controlada al precio exacto del SL.<br>
+          &nbsp;• <b style="color:{RED};">✗ Stop Loss alcanzado</b> — se cierra con pérdida controlada al precio del SL (puede ser el SL dinámico movido por trailing).<br>
           &nbsp;• <b style="color:{DIM};">◎ Cierre EOD (5:00 pm Bogotá)</b> — posiciones aún abiertas se cierran obligatoriamente al precio de mercado antes de la evaluación del Juez.<br><br>
           <b>② Evaluación de nuevas posiciones</b><br>
           Para cada agente que quedó libre (sin posición abierta y con capital suficiente),
@@ -1128,7 +1142,7 @@ def _tab_instructions() -> None:
             <b>Eliminación de los 5 peores</b> — Los 5 agentes con menor fitness
             (Calmar Ratio) son marcados como <s>eliminado</s>. No importa si llevan poco
             tiempo — si su rendimiento ajustado al riesgo es inferior, son descartados.
-            Su capital virtual desaparece con ellos.
+            Su capital vuelve al <b>pool común del sistema</b> y se redistribuye entre todos.
           </div>
         </div>
         <div class="ins-step">
@@ -1143,7 +1157,17 @@ def _tab_instructions() -> None:
           <div class="ins-step-num">4</div>
           <div class="ins-step-text">
             <b>Creación de 5 nuevos agentes</b> — Se generan 5 agentes de la siguiente
-            generación mediante cruce genético y mutación.
+            generación mediante cruce genético y mutación gaussiana a partir de los supervivientes.
+          </div>
+        </div>
+        <div class="ins-step">
+          <div class="ins-step-num">5</div>
+          <div class="ins-step-text">
+            <b>Redistribución igualitaria de capital</b> — Se suma el <code>capital_actual</code>
+            de los 10 agentes activos resultantes (supervivientes + nuevos) y se divide en
+            partes iguales. Todos inician el día siguiente con <b>exactamente el mismo capital</b>.
+            El pool total solo fluctúa por las ganancias y pérdidas reales de trading —
+            ninguna operación interna inyecta ni retira dinero del sistema.
           </div>
         </div>
       </div>
@@ -1170,7 +1194,12 @@ def _tab_instructions() -> None:
           <b>Restricciones de seguridad post-mutación:</b><br>
           &nbsp;• Los pesos RSI/EMA/MACD/FVG/OB se renormalizan para sumar 1.0.<br>
           &nbsp;• La EMA rápida siempre es menor que la EMA lenta.<br>
-          &nbsp;• Los genes SMC (fvg_min_pips, ob_impulse_pips, risk_reward_target, macro_quarantine_minutes, risk_pct_per_trade, peso_fvg, peso_ob) se recortan a sus rangos de seguridad evolutivos.<br>
+          &nbsp;• Los genes SMC se recortan a sus rangos evolutivos:
+          <code>fvg_min_pips</code> (2–15), <code>ob_impulse_pips</code> (5–20),
+          <code>risk_reward_target</code> (1.5–4.0), <code>macro_quarantine_minutes</code> (30–120),
+          <code>risk_pct_per_trade</code> (1–2%), <code>peso_fvg/peso_ob</code> (0.05–0.50),
+          <code>atr_factor</code> (0.8–3.0), <code>trailing_activation_pips</code> (5–40),
+          <code>trailing_distance_pips</code> (5–25), <code>atr_period</code> (7–21).<br>
           &nbsp;• El riesgo por operación se fuerza dentro del rango 1–2% del equity (hard limits no mutables).
         </div>
       </div>
@@ -1204,19 +1233,23 @@ def _tab_instructions() -> None:
               <span style="color:{DIM};">② Nuevas posiciones:</span> para cada agente libre
               (sin posición y con capital suficiente), descarga OHLCV actualizado, recalcula
               SMC (FVG, OB, Range Proxy) + RSI/EMA/MACD con los precios del momento y ejecuta el pipeline completo.
-              Un agente puede operar varias veces al día de forma secuencial.<br><br>
-              <span style="color:{DIM};">A las 8:50 am corre además un ciclo de trading
-              dedicado que garantiza que todos los agentes evalúen en simultáneo al inicio
-              de la sesión europea/americana.</span>
+              Un agente puede operar varias veces al día de forma secuencial.
             </div>
           </div>
           <div class="ins-timeline-item">
-            <div class="ins-time">5:00 pm</div>
+            <div class="ins-time">5:00 pm · lunes a viernes</div>
             <div class="ins-timeline-text">
-              <b style="color:{TEXT};">Cierre EOD + Ciclo Evolutivo</b> — Primero se cierran
-              obligatoriamente todas las posiciones abiertas al precio de mercado. Luego el
-              Agente Juez clasifica por Calmar Ratio (fitness), elimina los 5 peores, y crea 5 nuevos agentes
-              con parámetros mutados. Todo queda registrado en el log de auditoría.
+              <b style="color:{TEXT};">Cierre EOD + Ciclo Evolutivo + Redistribución</b><br>
+              <span style="color:{DIM};">① Cierre forzado:</span> todas las posiciones abiertas
+              se cierran al precio de mercado del momento.<br>
+              <span style="color:{DIM};">② Selección natural:</span> el Agente Juez clasifica
+              los 10 agentes por Calmar Ratio (fitness), elimina los 5 peores y crea 5 nuevos
+              con parámetros mutados de los supervivientes.<br>
+              <span style="color:{DIM};">③ Redistribución de capital:</span> se suma el capital
+              de los 10 agentes activos resultantes y se divide en partes iguales.
+              Todos inician el día siguiente con el mismo capital.
+              Todo queda registrado en el log de auditoría.<br>
+              <span style="color:{DIM};">Los sábados y domingos este ciclo no corre — no hay trading.</span>
             </div>
           </div>
         </div>
@@ -1337,17 +1370,18 @@ def _tab_instructions() -> None:
     <div style="background:{CARD2};border:1px solid {BORDER};border-radius:8px;
                 padding:14px 18px;font-size:11px;color:{DIM};line-height:1.8;">
       <b style="color:{GOLD};">Nota técnica:</b>
-      Las velas OHLCV (1 DataFrame compartido por ciclo) se obtienen de
-      <b style="color:{TEXT};">Yahoo Finance</b> (gratuito, sin API key). El volumen de
-      EUR/USD siempre es 0 en Yahoo (par OTC) — por eso se usa el <b style="color:{TEXT};">
-      Range Proxy</b> <code>(high−low) × 10 000</code> en pips como sustituto de VSA.
-      Cada agente calcula en memoria sus propias señales SMC (FVG, OB) y técnicas
-      (RSI, EMA, MACD) usando sus genes evolutivos únicos.
+      Las velas OHLCV (~420 velas de 15min, 5 días) se obtienen de
+      <b style="color:{TEXT};">Yahoo Finance</b> (gratuito, sin API key) — 1 descarga compartida
+      por ciclo, cada agente calcula sus señales en memoria con sus propios genes.
+      El volumen EUR/USD es siempre 0 (par OTC), por eso se usa el
+      <b style="color:{TEXT};">Range Proxy</b> <code>(high−low) × 10 000</code> en pips
+      como sustituto de VSA. El <b style="color:{TEXT};">ATR</b> (Wilder 14 períodos)
+      se calcula sobre las mismas velas y sirve como base del SL dinámico.
       El razonamiento de los agentes y del Juez usa <b style="color:{TEXT};">DeepSeek</b>
-      (modelo <code>deepseek-chat</code>). El fitness (Calmar Ratio Proxy) se calcula
-      vía SQL sobre las operaciones cerradas en <b style="color:{TEXT};">PostgreSQL — Neon</b>.
-      Los workflows corren en <b style="color:{TEXT};">GitHub Actions + cron-job.org</b>
-      de forma completamente autónoma.
+      (<code>deepseek-chat</code>). El fitness (Calmar Ratio Proxy) se calcula
+      vía SQL sobre operaciones cerradas en <b style="color:{TEXT};">PostgreSQL — Neon</b>.
+      Los workflows (monitor cada 15min y juez diario lunes–viernes) corren en
+      <b style="color:{TEXT};">GitHub Actions</b> de forma completamente autónoma.
     </div>
     """, unsafe_allow_html=True)
 
