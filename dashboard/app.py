@@ -287,7 +287,7 @@ def _header() -> None:
         <div style="padding:16px 0 20px 0; border-bottom:1px solid {BORDER}; margin-bottom:22px;
                     display:flex; align-items:center; gap:16px;">
           <img src="data:image/png;base64,{_LOGO}"
-               style="width:52px;height:52px;border-radius:12px;flex-shrink:0;">
+               style="width:130px;height:130px;border-radius:20px;flex-shrink:0;">
           <div>
             <div style="font-size:20px;font-weight:800;letter-spacing:3px;color:{GOLD};">
               INVERSIÓN EVOLUTIVA
