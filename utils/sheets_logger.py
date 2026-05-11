@@ -92,18 +92,18 @@ _L_PNL        = _col_letter(_COL_OPS["P&G ($)"])          # O
 def _pnl_formula(n: int) -> str:
     """Fórmula P&G ($) para la fila `n` usando GOOGLEFINANCE cuando está abierta."""
     return (
-        f'=IF({_L_ESTADO}{n}="cancelada",0,'
-        f'IF({_L_ESTADO}{n}="abierta",'
-        f'IF({_L_ACCION}{n}="BUY",(GOOGLEFINANCE("CURRENCY:EURUSD")-{_L_P_ENT}{n})/{_L_P_ENT}{n}*{_L_CAPITAL}{n},'
-        f'({_L_P_ENT}{n}-GOOGLEFINANCE("CURRENCY:EURUSD"))/{_L_P_ENT}{n}*{_L_CAPITAL}{n}),'
-        f'IF({_L_ACCION}{n}="BUY",({_L_P_SAL}{n}-{_L_P_ENT}{n})/{_L_P_ENT}{n}*{_L_CAPITAL}{n},'
+        f'=IF({_L_ESTADO}{n}="cancelada";0;'
+        f'IF({_L_ESTADO}{n}="abierta";'
+        f'IF({_L_ACCION}{n}="BUY";(GOOGLEFINANCE("CURRENCY:EURUSD")-{_L_P_ENT}{n})/{_L_P_ENT}{n}*{_L_CAPITAL}{n};'
+        f'({_L_P_ENT}{n}-GOOGLEFINANCE("CURRENCY:EURUSD"))/{_L_P_ENT}{n}*{_L_CAPITAL}{n});'
+        f'IF({_L_ACCION}{n}="BUY";({_L_P_SAL}{n}-{_L_P_ENT}{n})/{_L_P_ENT}{n}*{_L_CAPITAL}{n};'
         f'({_L_P_ENT}{n}-{_L_P_SAL}{n})/{_L_P_ENT}{n}*{_L_CAPITAL}{n})))'
     )
 
 
 def _pnl_pct_formula(n: int) -> str:
     """Fórmula P&G % para la fila `n`."""
-    return f'=IF({_L_CAPITAL}{n}=0,0,{_L_PNL}{n}/{_L_CAPITAL}{n}*100)'
+    return f'=IF({_L_CAPITAL}{n}=0;0;{_L_PNL}{n}/{_L_CAPITAL}{n}*100)'
 
 
 # ── Singleton ──────────────────────────────────────────────────────────────────
