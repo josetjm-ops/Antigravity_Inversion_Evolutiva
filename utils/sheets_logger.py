@@ -19,7 +19,6 @@ import os
 from datetime import datetime, timedelta, timezone
 
 import gspread
-from google.oauth2.service_account import Credentials
 
 log = logging.getLogger(__name__)
 
@@ -137,21 +136,21 @@ class SheetsLogger:
             return
 
         try:
-            # Prioridad 1: contenido JSON directo (GitHub Actions secret)
-            info  = json.loads(creds_env)
-            creds = Credentials.from_service_account_info(info, scopes=SCOPES)
-        except (json.JSONDecodeError, ValueError):
-            # Prioridad 2: ruta a archivo JSON (desarrollo local)
-            if not os.path.exists(creds_env):
-                log.warning(
-                    "[SheetsLogger] Credenciales no encontradas en '%s'. Sheets deshabilitado.",
-                    creds_env,
-                )
-                return
-            creds = Credentials.from_service_account_file(creds_env, scopes=SCOPES)
+            try:
+                # Prioridad 1: contenido JSON directo (GitHub Actions secret)
+                info = json.loads(creds_env)
+                client = gspread.service_account_from_dict(info, scopes=SCOPES)
+            except (json.JSONDecodeError, ValueError):
+                # Prioridad 2: ruta a archivo JSON (desarrollo local)
+                if not os.path.exists(creds_env):
+                    log.warning(
+                        "[SheetsLogger] Credenciales no encontradas en '%s'. Sheets deshabilitado.",
+                        creds_env,
+                    )
+                    return
+                client = gspread.service_account(filename=creds_env, scopes=SCOPES)
 
-        try:
-            self.client      = gspread.authorize(creds)
+            self.client      = client
             self.spreadsheet = self.client.open_by_key(self.sheet_id)
             self._ensure_worksheets()
             log.info("[SheetsLogger] Conectado a Google Sheets correctamente.")
