@@ -2,15 +2,16 @@
 Runner de trading diario.
 
 Carga todos los agentes activos desde PostgreSQL, ejecuta su pipeline
-(Técnico → Macro → Riesgo → OANDA) y registra los resultados.
+(Técnico → Macro → Riesgo → Broker Simulado) y registra los resultados.
 
 Diseño:
   - Los 10 agentes comparten el mismo precio de mercado y snapshot macro del
     momento de ejecución para minimizar llamadas a APIs externas.
   - Cada agente aplica sus propios parámetros genéticos (RSI periodo, pesos, etc.)
     sobre esos datos compartidos.
-  - Si un agente ya tiene un trade abierto en OANDA, se omite (InvestorAgent lo
-    detecta internamente vía has_open_trade).
+  - Si un agente ya tiene un trade abierto (estado='abierta' en DB), se omite.
+  - La ejecución de órdenes y seguimiento de SL/TP la gestiona TradeMonitor
+    usando precios reales de Yahoo Finance (broker simulado, sin broker externo).
 
 Nota: Alpha Vantage free tier permite 25 llamadas/día.
   Con 10 agentes × 5 llamadas c/u = 50 llamadas → supera el límite.
