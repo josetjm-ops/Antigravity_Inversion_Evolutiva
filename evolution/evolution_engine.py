@@ -547,9 +547,15 @@ class EvolutionEngine:
 
     # ── Redistribución de capital ────────────────────────────────────────────
 
-    def _redistribute_capital(self, conn, new_agent_ids: list[str]) -> tuple[float, float]:
+    def _redistribute_capital(
+        self, conn, new_agent_ids: list[str], pool_override: float | None = None
+    ) -> tuple[float, float]:
         """
-        Suma el capital_actual de todos los agentes activos y lo reparte en partes iguales.
+        Reparte el pool de capital equitativamente entre todos los agentes activos.
+
+        pool_override debe ser el SUM(capital_actual) de los 10 agentes ANTES de que
+        el ciclo evolutivo elimine/nazca ninguno — es decir, el pool real post-EOD.
+        Sin override (fallback), re-consulta la DB (incluye nuevos a $10, valor incorrecto).
 
         El pool total solo fluctúa por P&L real de trading; no se inyecta capital nuevo.
         Los agentes nuevos reciben su cuota del pool existente (capital_inicial = cuota).
@@ -561,12 +567,16 @@ class EvolutionEngine:
         log_r = logging.getLogger(__name__)
 
         cur = conn.cursor()
-        cur.execute(
-            "SELECT COUNT(*), COALESCE(SUM(capital_actual), 0) FROM agentes WHERE estado = 'activo'"
-        )
-        row = cur.fetchone()
-        n_agentes     = int(row[0])
-        pool_total    = float(row[1])
+        cur.execute("SELECT COUNT(*) FROM agentes WHERE estado = 'activo'")
+        n_agentes = int(cur.fetchone()[0])
+
+        if pool_override is not None:
+            pool_total = pool_override
+        else:
+            cur.execute(
+                "SELECT COALESCE(SUM(capital_actual), 0) FROM agentes WHERE estado = 'activo'"
+            )
+            pool_total = float(cur.fetchone()[0])
 
         if n_agentes == 0:
             return 0.0, 0.0
@@ -634,6 +644,14 @@ class EvolutionEngine:
 
             result.new_agents = new_agents
 
+            # Pool real del día: suma de todos los agentes ANTES de eliminar/nacer ninguno.
+            # Se usa en _redistribute_capital para que las pérdidas/ganancias del día
+            # se reflejen correctamente (los nuevos nacen con $10 hardcoded, lo que
+            # inflaría el pool si se re-consultara la DB después de su inserción).
+            pool_total_eod = round(
+                sum(float(a.get("capital_actual", 10.0)) for a in agents), 4
+            )
+
             # Construir mapa de eventos para el snapshot
             evento_map: dict[str, str] = {}
             for a in eliminated:
@@ -661,7 +679,9 @@ class EvolutionEngine:
 
                 # Redistribuir capital equitativamente entre todos los agentes activos
                 new_agent_ids = [a["id"] for a in new_agents]
-                pool_total, capital_por_agente = self._redistribute_capital(conn, new_agent_ids)
+                pool_total, capital_por_agente = self._redistribute_capital(
+                    conn, new_agent_ids, pool_override=pool_total_eod
+                )
                 result.capital_pool_total  = pool_total
                 result.capital_por_agente  = capital_por_agente
 

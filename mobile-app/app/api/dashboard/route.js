@@ -68,12 +68,13 @@ export async function GET() {
       ORDER BY o.timestamp_entrada DESC
     `);
 
-    // 4. Capital history (total capital per day — excluir eliminados evita doble conteo)
+    // 4. Capital history: suma supervivientes + eliminados (capital real de trading).
+    //    Se excluyen 'nacimiento' porque su capital_fin_dia es $10 hardcodeado, no trading.
     const capitalHistRes = await client.query(`
       SELECT rh.fecha::text AS fecha,
              SUM(rh.capital_fin_dia::float) AS capital_total
       FROM ranking_historico rh
-      WHERE rh.evento != 'eliminacion'
+      WHERE rh.evento != 'nacimiento'
       GROUP BY rh.fecha
       ORDER BY rh.fecha ASC
     `);
