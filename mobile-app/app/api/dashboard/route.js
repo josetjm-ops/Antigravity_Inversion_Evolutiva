@@ -68,11 +68,12 @@ export async function GET() {
       ORDER BY o.timestamp_entrada DESC
     `);
 
-    // 4. Capital history (total capital per day)
+    // 4. Capital history (total capital per day — excluir eliminados evita doble conteo)
     const capitalHistRes = await client.query(`
       SELECT rh.fecha::text AS fecha,
              SUM(rh.capital_fin_dia::float) AS capital_total
       FROM ranking_historico rh
+      WHERE rh.evento != 'eliminacion'
       GROUP BY rh.fecha
       ORDER BY rh.fecha ASC
     `);

@@ -143,7 +143,7 @@ function InicioView({ data }) {
     <div className="fade-in">
       {/* Hero: Capital Total */}
       <div className="hero">
-        <div className="hero-value">${status.totalCapital.toFixed(2)}</div>
+        <div className="hero-value">${status.totalCapital.toFixed(4)}</div>
         <div className="hero-sub">Capital Total Portafolio</div>
       </div>
 

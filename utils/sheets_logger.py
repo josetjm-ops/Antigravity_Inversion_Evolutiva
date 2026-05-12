@@ -289,8 +289,8 @@ class SheetsLogger:
             l_col = _col_letter(_COL_OPS["Estado"])
             n_col = _col_letter(_COL_OPS["Precio Salida"])
             self.ws_ops.update(
-                f"{l_col}{cell.row}:{n_col}{cell.row}",
                 [["cerrada", ts_str, precio_salida]],
+                f"{l_col}{cell.row}:{n_col}{cell.row}",
                 value_input_option="USER_ENTERED",
             )
             log.info("[SheetsLogger] Operación %s cerrada en Sheets.", op_id)
