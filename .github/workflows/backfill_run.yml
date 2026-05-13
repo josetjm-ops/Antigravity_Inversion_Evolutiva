@@ -1,4 +1,4 @@
-name: "Backfill Google Sheets"
+name: "Sincronizar Sheets (Backfill Manual)"
 
 "on":
   workflow_dispatch:
