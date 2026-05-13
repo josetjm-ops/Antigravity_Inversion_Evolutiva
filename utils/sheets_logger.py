@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 from datetime import datetime, timedelta, timezone
 
 import gspread
@@ -104,6 +105,32 @@ def _pnl_formula(n: int) -> str:
 def _pnl_pct_formula(n: int) -> str:
     """Fórmula P&G % para la fila `n`."""
     return f'=IF({_L_CAPITAL}{n}=0;0;{_L_PNL}{n}/{_L_CAPITAL}{n}*100)'
+
+
+# ── Retry helper ──────────────────────────────────────────────────────────────
+
+def _api_call(fn, *args, max_attempts: int = 4, **kwargs):
+    """
+    Ejecuta fn(*args, **kwargs) con reintentos ante rate-limit (429 /
+    RESOURCE_EXHAUSTED) de la API de Google Sheets.
+    Backoff: 2s → 4s → 8s entre intentos.
+    Cualquier otro error se propaga inmediatamente.
+    """
+    for attempt in range(max_attempts):
+        try:
+            return fn(*args, **kwargs)
+        except gspread.exceptions.APIError as exc:
+            msg = str(exc)
+            is_quota = "429" in msg or "RESOURCE_EXHAUSTED" in msg or "Quota exceeded" in msg
+            if is_quota and attempt < max_attempts - 1:
+                delay = 2 ** (attempt + 1)          # 2s, 4s, 8s
+                log.warning(
+                    "[SheetsLogger] Rate-limit — reintentando en %ds (intento %d/%d)",
+                    delay, attempt + 1, max_attempts,
+                )
+                time.sleep(delay)
+            else:
+                raise
 
 
 # ── Singleton ──────────────────────────────────────────────────────────────────
@@ -231,7 +258,7 @@ class SheetsLogger:
             ts_str = _to_bogota(timestamp_entrada)
 
             # Número de fila que ocupará esta nueva fila
-            n = len(self.ws_ops.col_values(1)) + 1  # col A incluye header
+            n = len(_api_call(self.ws_ops.col_values, 1)) + 1  # col A incluye header
 
             row = [
                 op_id,
@@ -263,7 +290,7 @@ class SheetsLogger:
                 decision.get("razonamiento", ""),
             ]
 
-            self.ws_ops.append_row(row, value_input_option="USER_ENTERED")
+            _api_call(self.ws_ops.append_row, row, value_input_option="USER_ENTERED")
             log.info("[SheetsLogger] Operación %s registrada en Sheets.", op_id)
         except Exception as exc:
             log.error("[SheetsLogger] Error registrando operación %s: %s", op_id, exc)
@@ -280,22 +307,29 @@ class SheetsLogger:
         if not self.client or self.ws_ops is None:
             return
         try:
-            cell = self.ws_ops.find(str(op_id), in_column=_COL_OPS["ID"])
+            cell = _api_call(self.ws_ops.find, str(op_id), in_column=_COL_OPS["ID"])
             if not cell:
-                log.warning("[SheetsLogger] Operación %s no encontrada en Sheets.", op_id)
+                log.error(
+                    "[SheetsLogger] Operación %s no encontrada en Sheets — "
+                    "puede no haberse registrado al abrir.", op_id,
+                )
                 return
             ts_str = _to_bogota(timestamp_salida)
             # Actualiza columnas L (Estado) → M (Timestamp Salida) → N (Precio Salida)
             l_col = _col_letter(_COL_OPS["Estado"])
             n_col = _col_letter(_COL_OPS["Precio Salida"])
-            self.ws_ops.update(
+            _api_call(
+                self.ws_ops.update,
                 [["cerrada", ts_str, precio_salida]],
                 f"{l_col}{cell.row}:{n_col}{cell.row}",
                 value_input_option="USER_ENTERED",
             )
             log.info("[SheetsLogger] Operación %s cerrada en Sheets.", op_id)
         except gspread.exceptions.CellNotFound:
-            log.warning("[SheetsLogger] Operación %s no encontrada en Sheets.", op_id)
+            log.error(
+                "[SheetsLogger] Operación %s no encontrada en Sheets — "
+                "puede no haberse registrado al abrir.", op_id,
+            )
         except Exception as exc:
             log.error("[SheetsLogger] Error cerrando operación %s: %s", op_id, exc)
 
@@ -346,7 +380,7 @@ class SheetsLogger:
                 smc.get("peso_fvg", ""),
                 smc.get("peso_ob", ""),
             ]
-            self.ws_agents.append_row(row, value_input_option="USER_ENTERED")
+            _api_call(self.ws_agents.append_row, row, value_input_option="USER_ENTERED")
             log.info("[SheetsLogger] Agente %s registrado en Sheets.", agent_data.get("id"))
         except Exception as exc:
             log.error("[SheetsLogger] Error registrando agente %s: %s", agent_data.get("id"), exc)
@@ -367,7 +401,7 @@ class SheetsLogger:
         if not self.client or self.ws_agents is None:
             return
         try:
-            cell = self.ws_agents.find(str(agent_id), in_column=_COL_AGT["ID"])
+            cell = _api_call(self.ws_agents.find, str(agent_id), in_column=_COL_AGT["ID"])
             if not cell:
                 log.warning("[SheetsLogger] Agente %s no encontrado en Sheets.", agent_id)
                 return
@@ -393,7 +427,7 @@ class SheetsLogger:
                     updates.append(wr_upd)
 
             if updates:
-                self.ws_agents.batch_update(updates)
+                _api_call(self.ws_agents.batch_update, updates)
             log.info("[SheetsLogger] Agente %s actualizado en Sheets → %s.", agent_id, status)
         except gspread.exceptions.CellNotFound:
             log.warning("[SheetsLogger] Agente %s no encontrado en Sheets.", agent_id)

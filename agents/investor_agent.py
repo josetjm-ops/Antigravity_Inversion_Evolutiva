@@ -144,6 +144,8 @@ class InvestorAgent:
         self, decision: RiskDecision, precio_entrada: float | None
     ) -> int | None:
         """Inserta la operación en `operaciones` y actualiza el contador del agente."""
+        op_id = None
+        ts_entrada = datetime.now(timezone.utc)
         try:
             with get_conn() as conn:
                 cur = conn.cursor()
@@ -163,7 +165,7 @@ class InvestorAgent:
                     """,
                     (
                         decision.agente_id,
-                        datetime.now(timezone.utc),
+                        ts_entrada,
                         decision.accion_final,
                         precio_entrada,
                         decision.capital_a_usar if decision.accion_final != "HOLD" else 0,
@@ -194,30 +196,29 @@ class InvestorAgent:
                         "UPDATE agentes SET operaciones_total = operaciones_total + 1 WHERE id = %s",
                         (self.agent_id,),
                     )
-                    
-                try:
-                    SheetsLogger().log_operation(
-                        op_id=op_id,
-                        decision={
-                            "agente_id":        decision.agente_id,
-                            "accion_final":     decision.accion_final,
-                            "confianza_final":  decision.confianza_final,
-                            "confianza_tecnica": decision.confianza_tecnica,
-                            "confianza_macro":  decision.confianza_macro,
-                            "stop_loss":        decision.stop_loss,
-                            "take_profit":      decision.take_profit,
-                            "razonamiento":     decision.razonamiento,
-                            "senal_tecnico":    decision.senal_tecnico,
-                            "senal_macro":      decision.senal_macro,
-                        },
-                        precio_entrada=precio_entrada,
-                        timestamp_entrada=datetime.now(timezone.utc),
-                        capital_usado=decision.capital_a_usar if decision.accion_final != "HOLD" else 0
-                    )
-                except Exception as e:
-                    log.error(f"[InvestorAgent] Error logging to sheets: {e}")
-                    
-                return op_id
+            # DB committed — registrar en Sheets fuera de la transacción
+            try:
+                SheetsLogger().log_operation(
+                    op_id=op_id,
+                    decision={
+                        "agente_id":         decision.agente_id,
+                        "accion_final":      decision.accion_final,
+                        "confianza_final":   decision.confianza_final,
+                        "confianza_tecnica": decision.confianza_tecnica,
+                        "confianza_macro":   decision.confianza_macro,
+                        "stop_loss":         decision.stop_loss,
+                        "take_profit":       decision.take_profit,
+                        "razonamiento":      decision.razonamiento,
+                        "senal_tecnico":     decision.senal_tecnico,
+                        "senal_macro":       decision.senal_macro,
+                    },
+                    precio_entrada=precio_entrada,
+                    timestamp_entrada=ts_entrada,
+                    capital_usado=decision.capital_a_usar if decision.accion_final != "HOLD" else 0,
+                )
+            except Exception as e:
+                log.error("[InvestorAgent] Error registrando operación %s en Sheets: %s", op_id, e)
+            return op_id
         except Exception as exc:
             log.error("[InvestorAgent] Error persistiendo operación: %s", exc)
             return None
