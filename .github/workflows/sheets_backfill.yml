@@ -1,6 +1,9 @@
 name: "Backfill Google Sheets"
 
 on:
+  push:
+    branches: [master]
+    paths: [".trigger-backfill"]
   workflow_dispatch:
     inputs:
       motivo:
