@@ -1,0 +1,40 @@
+name: "Backfill Google Sheets (run)"
+
+on:
+  push:
+    branches: [master]
+    paths: [".github/workflows/backfill_run.yml"]
+
+jobs:
+  backfill:
+    name: "Sincronizar DB → Google Sheets"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    env:
+      DATABASE_URL:             ${{ secrets.DATABASE_URL }}
+      DEEPSEEK_API_KEY:         ${{ secrets.DEEPSEEK_API_KEY }}
+      FINNHUB_API_KEY:          ${{ secrets.FINNHUB_API_KEY }}
+      ALPHA_VANTAGE_API_KEY:    ${{ secrets.ALPHA_VANTAGE_API_KEY }}
+      GOOGLE_SHEET_ID:          ${{ secrets.GOOGLE_SHEET_ID }}
+      GOOGLE_CREDENTIALS_JSON:  ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
+
+    steps:
+      - name: "Checkout del repositorio"
+        uses: actions/checkout@v4
+
+      - name: "Configurar Python 3.11"
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: "Instalar dependencias"
+        run: pip install -r requirements.txt
+
+      - name: "Ejecutar backfill"
+        run: python -m utils.sheets_backfill
+
+      - name: "Confirmar resultado"
+        if: always()
+        run: echo "Backfill completado a las $(date -u +'%Y-%m-%d %H:%M UTC')"
