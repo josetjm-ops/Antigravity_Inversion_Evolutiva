@@ -1,7 +1,12 @@
-name: "Backfill Google Sheets (run)"
-# Trigger: 2026-05-13 secrets reconfigurados
+name: "Backfill Google Sheets"
 
 on:
+  workflow_dispatch:
+    inputs:
+      motivo:
+        description: "Motivo del backfill (opcional)"
+        required: false
+        default: "sincronización manual"
   push:
     branches: [master]
     paths: [".github/workflows/backfill_run.yml"]
@@ -14,9 +19,6 @@ jobs:
 
     env:
       DATABASE_URL:             ${{ secrets.DATABASE_URL }}
-      DEEPSEEK_API_KEY:         ${{ secrets.DEEPSEEK_API_KEY }}
-      FINNHUB_API_KEY:          ${{ secrets.FINNHUB_API_KEY }}
-      ALPHA_VANTAGE_API_KEY:    ${{ secrets.ALPHA_VANTAGE_API_KEY }}
       GOOGLE_SHEET_ID:          ${{ secrets.GOOGLE_SHEET_ID }}
       GOOGLE_CREDENTIALS_JSON:  ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
 
@@ -33,53 +35,12 @@ jobs:
       - name: "Instalar dependencias"
         run: pip install -r requirements.txt
 
-      - name: "Diagnostico de secretos y conexion"
-        id: diag
-        continue-on-error: true
-        run: |
-          set -o pipefail
-          python utils/diagnose_backfill.py 2>&1 | tee /tmp/diagnostico.log
-          echo "DIAG_EXIT=${PIPESTATUS[0]}" >> $GITHUB_OUTPUT
+      - name: "Diagnostico previo"
+        run: python utils/diagnose_backfill.py
 
       - name: "Ejecutar backfill"
-        id: bfill
-        continue-on-error: true
-        run: |
-          set -o pipefail
-          python -m utils.sheets_backfill 2>&1 | tee /tmp/backfill.log
-          echo "BFILL_EXIT=${PIPESTATUS[0]}" >> $GITHUB_OUTPUT
+        run: python -m utils.sheets_backfill
 
-      - name: "Publicar logs en step summary"
+      - name: "Confirmar resultado"
         if: always()
-        run: |
-          echo "## Diagnostico (exit=${{ steps.diag.outputs.DIAG_EXIT }})" >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
-          if [ -f /tmp/diagnostico.log ]; then cat /tmp/diagnostico.log >> $GITHUB_STEP_SUMMARY; else echo "(no log)" >> $GITHUB_STEP_SUMMARY; fi
-          echo '```' >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "## Backfill (exit=${{ steps.bfill.outputs.BFILL_EXIT }})" >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
-          if [ -f /tmp/backfill.log ]; then cat /tmp/backfill.log >> $GITHUB_STEP_SUMMARY; else echo "(no log)" >> $GITHUB_STEP_SUMMARY; fi
-          echo '```' >> $GITHUB_STEP_SUMMARY
-
-      - name: "Imprimir logs (visibles en API publica como check-run output)"
-        if: always()
-        run: |
-          echo "=== DIAGNOSTICO LOG ==="
-          if [ -f /tmp/diagnostico.log ]; then cat /tmp/diagnostico.log; fi
-          echo ""
-          echo "=== BACKFILL LOG ==="
-          if [ -f /tmp/backfill.log ]; then cat /tmp/backfill.log; fi
-
-      - name: "Marcar fallo si hubo errores"
-        if: always()
-        run: |
-          DIAG=${{ steps.diag.outputs.DIAG_EXIT }}
-          BFILL=${{ steps.bfill.outputs.BFILL_EXIT }}
-          echo "Diagnostico exit: $DIAG"
-          echo "Backfill exit: $BFILL"
-          if [ "$DIAG" != "0" ] || [ "$BFILL" != "0" ]; then
-            echo "Hubo errores — revisar logs"
-            exit 1
-          fi
-          echo "Backfill completado a las $(date -u +'%Y-%m-%d %H:%M UTC')"
+        run: echo "Backfill completado a las $(date -u +'%Y-%m-%d %H:%M UTC') — motivo: ${{ github.event.inputs.motivo || 'push trigger' }}"
