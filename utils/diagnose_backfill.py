@@ -118,6 +118,10 @@ def main() -> None:
         print(f"DIAGNÓSTICO FALLIDO — {len(errors)} error(es):")
         for err in errors:
             print(f"  · {err}")
+            # GitHub Actions annotation — visible via public API
+            # Sanitizar saltos de línea para que quepa en una sola annotation
+            safe = str(err).replace("\n", " | ").replace("\r", " ")[:500]
+            print(f"::error title=Diagnostico fallido::{safe}")
         sys.exit(1)
     else:
         print("DIAGNÓSTICO OK — todos los servicios accesibles.")
