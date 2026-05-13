@@ -33,18 +33,52 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: "Diagnostico de secretos y conexion"
-        run: python utils/diagnose_backfill.py 2>&1 | tee /tmp/diagnostico.log; exit ${PIPESTATUS[0]}
+        id: diag
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          python utils/diagnose_backfill.py 2>&1 | tee /tmp/diagnostico.log
+          echo "DIAG_EXIT=${PIPESTATUS[0]}" >> $GITHUB_OUTPUT
 
       - name: "Ejecutar backfill"
-        run: python -m utils.sheets_backfill 2>&1 | tee /tmp/backfill.log; exit ${PIPESTATUS[0]}
+        id: bfill
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          python -m utils.sheets_backfill 2>&1 | tee /tmp/backfill.log
+          echo "BFILL_EXIT=${PIPESTATUS[0]}" >> $GITHUB_OUTPUT
 
-      - name: "Subir logs como artefacto"
+      - name: "Publicar logs en step summary"
         if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: backfill-logs-${{ github.run_id }}
-          path: /tmp/*.log
+        run: |
+          echo "## Diagnostico (exit=${{ steps.diag.outputs.DIAG_EXIT }})" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          if [ -f /tmp/diagnostico.log ]; then cat /tmp/diagnostico.log >> $GITHUB_STEP_SUMMARY; else echo "(no log)" >> $GITHUB_STEP_SUMMARY; fi
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "## Backfill (exit=${{ steps.bfill.outputs.BFILL_EXIT }})" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          if [ -f /tmp/backfill.log ]; then cat /tmp/backfill.log >> $GITHUB_STEP_SUMMARY; else echo "(no log)" >> $GITHUB_STEP_SUMMARY; fi
+          echo '```' >> $GITHUB_STEP_SUMMARY
 
-      - name: "Confirmar resultado"
+      - name: "Imprimir logs (visibles en API publica como check-run output)"
         if: always()
-        run: echo "Backfill completado a las $(date -u +'%Y-%m-%d %H:%M UTC')"
+        run: |
+          echo "=== DIAGNOSTICO LOG ==="
+          if [ -f /tmp/diagnostico.log ]; then cat /tmp/diagnostico.log; fi
+          echo ""
+          echo "=== BACKFILL LOG ==="
+          if [ -f /tmp/backfill.log ]; then cat /tmp/backfill.log; fi
+
+      - name: "Marcar fallo si hubo errores"
+        if: always()
+        run: |
+          DIAG=${{ steps.diag.outputs.DIAG_EXIT }}
+          BFILL=${{ steps.bfill.outputs.BFILL_EXIT }}
+          echo "Diagnostico exit: $DIAG"
+          echo "Backfill exit: $BFILL"
+          if [ "$DIAG" != "0" ] || [ "$BFILL" != "0" ]; then
+            echo "Hubo errores — revisar logs"
+            exit 1
+          fi
+          echo "Backfill completado a las $(date -u +'%Y-%m-%d %H:%M UTC')"
