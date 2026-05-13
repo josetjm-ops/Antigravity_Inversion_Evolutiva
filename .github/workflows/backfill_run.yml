@@ -33,10 +33,17 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: "Diagnostico de secretos y conexion"
-        run: python utils/diagnose_backfill.py
+        run: python utils/diagnose_backfill.py 2>&1 | tee /tmp/diagnostico.log; exit ${PIPESTATUS[0]}
 
       - name: "Ejecutar backfill"
-        run: python -m utils.sheets_backfill
+        run: python -m utils.sheets_backfill 2>&1 | tee /tmp/backfill.log; exit ${PIPESTATUS[0]}
+
+      - name: "Subir logs como artefacto"
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backfill-logs-${{ github.run_id }}
+          path: /tmp/*.log
 
       - name: "Confirmar resultado"
         if: always()
