@@ -81,6 +81,11 @@ function CapitalChart({ history, currentCapital }) {
   const line = coords.map((p, i) => `${i === 0 ? "M" : "L"}${p.x},${p.y}`).join(" ");
   const area = `${line} L${coords.at(-1).x},${H - pad.b} L${coords[0].x},${H - pad.b} Z`;
   const delta = points.at(-1).value - points[0].value;
+  const xAxisTicksCapital = Array.from({ length: 5 }, (_, i) => {
+    const idx = Math.round(i * (points.length - 1) / 4);
+    const [, m, d] = points[idx].date.split("-");
+    return { idx, x: x(idx), label: `${d}/${m}`, anchor: i === 0 ? "start" : i === 4 ? "end" : "middle" };
+  });
 
   return (
     <section className="panel">
@@ -108,13 +113,17 @@ function CapitalChart({ history, currentCapital }) {
             </g>
           );
         })}
+        {xAxisTicksCapital.filter((_, i) => i > 0 && i < 4).map(({ idx, x: xPos }) => (
+          <line key={`xtick-${idx}`} x1={xPos} x2={xPos} y1={pad.t} y2={H - pad.b} className="grid-line" />
+        ))}
         <path d={area} fill="url(#capitalFill)" />
         <path d={line} className="capital-line" />
         {coords.filter((_, i) => i === 0 || i === coords.length - 1).map((p) => (
           <circle key={p.date} cx={p.x} cy={p.y} r="5" className="capital-dot" />
         ))}
-        <text x={pad.l} y={H - 8} className="axis-label">{points[0].date}</text>
-        <text x={W - pad.r - 78} y={H - 8} className="axis-label">{points.at(-1).date}</text>
+        {xAxisTicksCapital.map(({ idx, x: xPos, label, anchor }) => (
+          <text key={`xlabel-${idx}`} x={xPos} y={H - 8} textAnchor={anchor} className="axis-label">{label}</text>
+        ))}
       </svg>
     </section>
   );
