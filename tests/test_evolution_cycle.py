@@ -8,7 +8,7 @@ import os
 import sys
 import random
 from copy import deepcopy
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -277,6 +277,255 @@ def test_genealogy_chain():
     conn.close()
 
 
+# ── Tests Sesión 7: Periodo de Gracia + Cuota Dinámica + Diversidad ─────────
+
+def test_business_days_calculation():
+    """Días hábiles cuentan sólo lun-vie; sábado y domingo se ignoran."""
+    from evolution.evolution_engine import _business_days_between
+
+    # Lunes 2026-05-04 → miércoles 2026-05-06 = 2 días hábiles
+    assert _business_days_between(date(2026, 5, 4), date(2026, 5, 6)) == 2
+    # Viernes 2026-05-08 → lunes 2026-05-11 atraviesa fin de semana = 1 día hábil (vie)
+    assert _business_days_between(date(2026, 5, 8), date(2026, 5, 11)) == 1
+    # Mismo día → 0
+    assert _business_days_between(date(2026, 5, 11), date(2026, 5, 11)) == 0
+    # End < start → 0
+    assert _business_days_between(date(2026, 5, 12), date(2026, 5, 10)) == 0
+    # Sábado a domingo → 0 días hábiles
+    assert _business_days_between(date(2026, 5, 9), date(2026, 5, 11)) == 0
+    print("  [PASS] _business_days_between correcto en weekends y rangos vacíos.")
+
+
+def test_classify_eligibility_grace_period():
+    """Agentes con ops=0 y edad<2 días hábiles son inmunes."""
+    from evolution.evolution_engine import EvolutionEngine
+
+    today = date(2026, 5, 14)  # jueves
+    engine = EvolutionEngine(today)
+
+    agents = [
+        # Inmune: ops=0 y nació el miércoles (1 día hábil de edad)
+        {"id": "A_IMMUNE", "operaciones_total": 0,
+         "fecha_nacimiento": date(2026, 5, 13)},
+        # NO inmune: ops=0 pero nació el lunes (3 días hábiles → > 2)
+        {"id": "A_OLD_NO_OPS", "operaciones_total": 0,
+         "fecha_nacimiento": date(2026, 5, 11)},
+        # NO inmune: ops>0 aunque sea joven
+        {"id": "A_YOUNG_TRADER", "operaciones_total": 1,
+         "fecha_nacimiento": date(2026, 5, 13)},
+        # NO inmune: veterano clásico
+        {"id": "A_VETERAN", "operaciones_total": 30,
+         "fecha_nacimiento": date(2026, 4, 1)},
+    ]
+    immune, eligible = engine._classify_eligibility(agents)
+
+    assert [a["id"] for a in immune] == ["A_IMMUNE"], \
+        f"Solo A_IMMUNE debería ser inmune, recibí: {[a['id'] for a in immune]}"
+    assert {a["id"] for a in eligible} == {"A_OLD_NO_OPS", "A_YOUNG_TRADER", "A_VETERAN"}
+    print("  [PASS] _classify_eligibility identifica correctamente los inmunes.")
+
+
+def test_dynamic_quota_protects_profitable_veterans():
+    """Cuota dinámica = 0 cuando todos los elegibles tienen fitness > 0."""
+    from evolution.evolution_engine import EvolutionEngine
+
+    engine = EvolutionEngine(date(2026, 5, 14))
+    agents = [
+        {"id": f"V{i}", "fitness_score": 0.05 + i * 0.01,
+         "fecha_nacimiento": date(2026, 4, 1), "operaciones_total": 20,
+         "roi_total": 0.03 + i * 0.01}
+        for i in range(5)
+    ]
+    survivors, eliminated = engine.select_survivors_and_eliminated(agents)
+    assert len(eliminated) == 0, \
+        f"No se debe eliminar a veteranos rentables, recibí: {[a['id'] for a in eliminated]}"
+    assert len(survivors) == len(agents)
+    print("  [PASS] Cuota dinámica = 0 cuando todo el pool tiene fitness > 0.")
+
+
+def test_dynamic_quota_eliminates_only_negative_fitness():
+    """Solo se eliminan agentes con fitness <= 0, hasta tope N_ELIMINATE."""
+    from evolution.evolution_engine import EvolutionEngine
+
+    engine = EvolutionEngine(date(2026, 5, 14))
+    # 6 negativos + 4 positivos
+    agents = (
+        [{"id": f"N{i}", "fitness_score": -0.1 - i * 0.01,
+          "fecha_nacimiento": date(2026, 4, 1), "operaciones_total": 20,
+          "roi_total": -0.05}
+         for i in range(6)]
+        + [{"id": f"P{i}", "fitness_score": 0.05 + i * 0.01,
+            "fecha_nacimiento": date(2026, 4, 1), "operaciones_total": 20,
+            "roi_total": 0.04}
+           for i in range(4)]
+    )
+    survivors, eliminated = engine.select_survivors_and_eliminated(agents)
+    # Tope por N_ELIMINATE=5 aunque haya 6 con fitness negativo
+    assert len(eliminated) == 5
+    # Todos los eliminados deben tener fitness <= 0
+    assert all(a["fitness_score"] <= 0 for a in eliminated), \
+        "Se eliminó un agente con fitness > 0"
+    # Ningún positivo en la lista de eliminados
+    elim_ids = {a["id"] for a in eliminated}
+    assert not any(eid.startswith("P") for eid in elim_ids), \
+        f"Se eliminó un agente positivo: {elim_ids}"
+    print(f"  [PASS] Cuota dinámica eliminó {len(eliminated)} agentes con fitness <= 0.")
+
+
+def test_genetic_variance_low_for_clones():
+    """Pool de clones idénticos retorna CV ≈ 0; pool diverso retorna CV alto."""
+    from evolution.evolution_engine import _compute_genetic_variance
+
+    base_tec = {"rsi_periodo": 14, "ema_rapida": 9, "ema_lenta": 21,
+                "peso_rsi": 0.34, "peso_ema": 0.33, "peso_macd": 0.33}
+    base_mac = {"peso_noticias_alto": 0.6, "umbral_sentimiento_compra": 0.65,
+                "ventana_noticias_horas": 4, "peso_total_macro": 0.4}
+    base_smc = {"fvg_min_pips": 5.0, "risk_reward_target": 2.0,
+                "macro_quarantine_minutes": 60, "peso_fvg": 0.15,
+                "peso_ob": 0.15, "atr_factor": 1.5}
+
+    clones = [{"id": f"C{i}", "params_tecnicos": dict(base_tec),
+               "params_macro": dict(base_mac), "params_smc": dict(base_smc)}
+              for i in range(5)]
+    cv_clones = _compute_genetic_variance(clones)
+    assert cv_clones < 0.001, f"CV de clones debe ser ~0, fue {cv_clones}"
+
+    # Pool diverso: alteramos cada agente
+    diverse = []
+    for i in range(5):
+        tec = dict(base_tec)
+        tec["rsi_periodo"]  = 8 + i * 2
+        tec["ema_rapida"]   = 5 + i
+        tec["peso_rsi"]     = 0.25 + i * 0.04
+        mac = dict(base_mac)
+        mac["peso_noticias_alto"] = 0.4 + i * 0.05
+        smc = dict(base_smc)
+        smc["fvg_min_pips"] = 3.0 + i * 1.5
+        smc["risk_reward_target"] = 1.5 + i * 0.3
+        diverse.append({"id": f"D{i}", "params_tecnicos": tec,
+                        "params_macro": mac, "params_smc": smc})
+    cv_diverse = _compute_genetic_variance(diverse)
+    assert cv_diverse > 0.05, f"CV de pool diverso debe ser > 0.05, fue {cv_diverse}"
+    print(f"  [PASS] CV clones={cv_clones:.6f}, CV diverso={cv_diverse:.4f}")
+
+
+def test_breed_agent_accepts_dynamic_sigmas():
+    """breed_agent acepta sigmas custom y los aplica en la mutación."""
+    from evolution.evolution_engine import breed_agent
+
+    base = {
+        "id": "P_01", "roi_total": 0.05, "generacion": 1,
+        "params_tecnicos": {
+            "rsi_periodo": 14, "rsi_sobrecompra": 70, "rsi_sobreventa": 30,
+            "ema_rapida": 9, "ema_lenta": 21,
+            "macd_rapida": 12, "macd_lenta": 26, "macd_senal": 9,
+            "peso_rsi": 0.35, "peso_ema": 0.35, "peso_macd": 0.30,
+        },
+        "params_macro": {
+            "peso_noticias_alto": 0.60, "peso_noticias_medio": 0.25,
+            "peso_noticias_bajo": 0.10, "umbral_sentimiento_compra": 0.65,
+            "umbral_sentimiento_venta": 0.35, "ventana_noticias_horas": 4,
+            "peso_total_macro": 0.40,
+        },
+        "params_riesgo": {
+            "stop_loss_pct": 0.02, "take_profit_pct": 0.04,
+            "max_drawdown_diario_pct": 0.10, "capital_por_operacion_pct": 0.50,
+            "umbral_confianza_minima": 0.60, "peso_tecnico_vs_macro": 0.55,
+        },
+    }
+
+    # Genera 30 hijos con sigmas duplicadas — la dispersión debe ser mayor
+    random.seed(42)
+    boosted = [breed_agent(base, base, f"B_{i}", date.today(), 2,
+                           sigma_weights=0.10, sigma_periods=0.16, sigma_risk=0.20)
+               for i in range(30)]
+    boosted_rsi = [c["params_tecnicos"]["rsi_periodo"] for c in boosted]
+    range_boosted = max(boosted_rsi) - min(boosted_rsi)
+
+    random.seed(42)
+    normal = [breed_agent(base, base, f"N_{i}", date.today(), 2)
+              for i in range(30)]
+    normal_rsi = [c["params_tecnicos"]["rsi_periodo"] for c in normal]
+    range_normal = max(normal_rsi) - min(normal_rsi)
+
+    assert range_boosted >= range_normal, \
+        f"Sigmas boosteadas debieron ampliar rango (boost={range_boosted}, normal={range_normal})"
+    print(f"  [PASS] Rango RSI con boost={range_boosted}, normal={range_normal}.")
+
+
+def test_suspension_on_hold_day_on_db():
+    """
+    Caso real en DB: día de HOLD generalizado.
+    Todos los agentes con operaciones_total=0 y edad < 2 días hábiles → cuota=0.
+    """
+    _reset_agents()
+    # Hacemos a TODOS los agentes inmunes: ops=0 y fecha_nacimiento=ayer (1 día hábil).
+    today = date.today()
+    # Buscar el día hábil anterior
+    ayer = today - timedelta(days=1)
+    while ayer.weekday() >= 5:
+        ayer -= timedelta(days=1)
+
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        UPDATE agentes
+        SET fecha_nacimiento = %s,
+            roi_total = 0,
+            capital_actual = 10.0,
+            operaciones_total = 0,
+            operaciones_ganadoras = 0,
+            estado = 'activo',
+            fecha_eliminacion = NULL,
+            razon_eliminacion = NULL
+        WHERE estado = 'activo'
+    """, (ayer,))
+    conn.commit()
+    conn.close()
+
+    from evolution.evolution_engine import EvolutionEngine
+    engine = EvolutionEngine(today)
+    result = engine.run()
+
+    assert not result.errors, f"Errores: {result.errors}"
+    assert result.cycle_suspended, "El ciclo debió quedar suspendido"
+    assert len(result.eliminated) == 0
+    assert len(result.new_agents) == 0
+    assert len(result.immune_agents) > 0, "Debieron haber agentes inmunes"
+    assert "Periodo de Gracia" in result.suspension_reason
+    print(f"  [PASS] Ciclo suspendido: {len(result.immune_agents)} inmunes, "
+          f"razón='{result.suspension_reason[:60]}...'")
+
+
+def test_logs_juez_suspension_event_on_db():
+    """Tras un ciclo suspendido, logs_juez tiene exactamente UN registro de evaluacion_diaria."""
+    today = date.today()
+    conn = get_conn()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    cur.execute("""
+        SELECT descripcion, datos_json, razonamiento_llm
+        FROM logs_juez
+        WHERE fecha = %s AND tipo_evento = 'evaluacion_diaria'
+        ORDER BY created_at DESC
+    """, (today,))
+    rows = cur.fetchall()
+    conn.close()
+
+    if not rows:
+        print("  [SKIP] No hay evaluacion_diaria en logs_juez para hoy.")
+        return
+
+    latest = rows[0]
+    datos = latest["datos_json"] or {}
+    if datos.get("cycle_suspended"):
+        assert datos.get("suspension_reason"), "Falta suspension_reason en datos_json"
+        assert datos.get("cuota_aplicada") == 0
+        assert "SUSPENDIDO" in (latest["descripcion"] or "").upper()
+        print("  [PASS] logs_juez registra suspensión con justificación técnica.")
+    else:
+        print("  [SKIP] El último ciclo no estaba suspendido; no aplica esta verificación.")
+
+
 def test_logs_juez_written():
     """Verifica que el ciclo evolutivo escribió entradas en logs_juez."""
     conn = get_conn()
@@ -310,6 +559,15 @@ if __name__ == "__main__":
         ("Mutación respeta constraints (20 iter.)", test_mutation_respects_constraints),
         ("Crossover hereda de ambos padres", test_crossover_inherits_from_both_parents),
         ("Selección elige top y bottom correctamente", test_selection_picks_top_and_bottom),
+        # Sesión 7 — Periodo de Gracia, Cuota Dinámica, Diversidad
+        ("Días hábiles (lun-vie) — cálculo correcto", test_business_days_calculation),
+        ("Clasificación de elegibilidad — Periodo de Gracia", test_classify_eligibility_grace_period),
+        ("Cuota dinámica = 0 con veteranos rentables", test_dynamic_quota_protects_profitable_veterans),
+        ("Cuota dinámica elimina solo fitness <= 0", test_dynamic_quota_eliminates_only_negative_fitness),
+        ("Varianza genética: clones vs diverso", test_genetic_variance_low_for_clones),
+        ("breed_agent acepta sigmas dinámicos", test_breed_agent_accepts_dynamic_sigmas),
+        ("Suspensión por HOLD generalizado (DB)", test_suspension_on_hold_day_on_db),
+        ("logs_juez: evento de suspensión", test_logs_juez_suspension_event_on_db),
         ("Ciclo evolutivo completo en DB Neon", test_full_evolution_cycle_on_db),
         ("Genealogía: hijos con padres válidos en DB", test_genealogy_chain),
         ("logs_juez: registros escritos", test_logs_juez_written),

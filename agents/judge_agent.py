@@ -65,7 +65,10 @@ class JudgeAgent(BaseAgent):
 
     def _build_analysis_prompt(self, result: EvolutionResult) -> str:
         # Pre-calcular fitness para mostrar en el prompt
-        all_ids = [a["id"] for a in result.survivors + result.eliminated]
+        all_ids = [
+            a["id"]
+            for a in result.survivors + result.eliminated + result.immune_agents
+        ]
         fitness_map = self._calcular_fitness_calmar(all_ids) if all_ids else {}
 
         def fmt_agent(a: dict) -> str:
@@ -107,14 +110,24 @@ class JudgeAgent(BaseAgent):
         survivors_str  = "\n".join(fmt_agent(a) for a in result.survivors)
         eliminated_str = "\n".join(fmt_agent(a) for a in result.eliminated)
         new_agents_str = "\n".join(fmt_new(a) for a in result.new_agents)
+        immune_str     = "\n".join(fmt_agent(a) for a in result.immune_agents)
+
+        boost_note = (
+            "\n  [Sigma boost ACTIVADO por baja diversidad genética: "
+            f"CV={result.genetic_variance_cv:.4f} · sigmas usadas={result.sigma_used}]"
+            if result.sigma_boost_applied else ""
+        )
 
         return (
             f"FECHA DE EVALUACIÓN: {result.fecha}\n\n"
             f"AGENTES SUPERVIVIENTES (Top {len(result.survivors)} por Calmar Ratio):\n"
             f"{survivors_str or '  (ninguno)'}\n\n"
-            f"AGENTES ELIMINADOS (Bottom {len(result.eliminated)} por fitness):\n"
+            f"AGENTES BAJO PERIODO DE GRACIA — INMUNES ({len(result.immune_agents)}):\n"
+            f"{immune_str or '  (ninguno)'}\n\n"
+            f"AGENTES ELIMINADOS (Cuota dinámica = {len(result.eliminated)}, "
+            f"solo fitness <= 0):\n"
             f"{eliminated_str or '  (ninguno)'}\n\n"
-            f"NUEVOS AGENTES CREADOS ({len(result.new_agents)} mutaciones):\n"
+            f"NUEVOS AGENTES CREADOS ({len(result.new_agents)} mutaciones){boost_note}:\n"
             f"{new_agents_str or '  (ninguno)'}\n\n"
             f"Emite tu veredicto en JSON. "
             f"IDs de eliminados: {[a['id'] for a in result.eliminated]}.\n"
@@ -170,30 +183,59 @@ class JudgeAgent(BaseAgent):
         }
 
         with get_conn() as conn:
-            # Log de evaluación diaria global
+            # Log de evaluación diaria global — único registro cuando hay suspensión.
+            if result.cycle_suspended:
+                descripcion = (
+                    f"Ciclo evolutivo {self.today} SUSPENDIDO — "
+                    f"Cuota dinámica = 0. "
+                    f"{len(result.immune_agents)} inmunes (Periodo de Gracia), "
+                    f"{len(result.eligible_veterans)} veteranos elegibles "
+                    f"rentables protegidos. Población intacta: "
+                    f"{len(result.survivors)} agentes."
+                )
+            else:
+                descripcion = (
+                    f"Ciclo evolutivo {self.today}: "
+                    f"{len(result.survivors)} supervivientes "
+                    f"({len(result.immune_agents)} inmunes), "
+                    f"{len(result.eliminated)} eliminados (cuota dinámica), "
+                    f"{len(result.new_agents)} nuevos agentes. "
+                    f"Pool redistribuido: ${result.capital_pool_total:.4f} / "
+                    f"{len(result.survivors) + len(result.new_agents)} agentes "
+                    f"= ${result.capital_por_agente:.4f} c/u."
+                )
+
             self._log(
                 conn,
                 tipo="evaluacion_diaria",
                 agente_id=None,
-                descripcion=(
-                    f"Ciclo evolutivo {self.today}: "
-                    f"{len(result.survivors)} supervivientes, "
-                    f"{len(result.eliminated)} eliminados, "
-                    f"{len(result.new_agents)} nuevos agentes. "
-                    f"Pool redistribuido: ${result.capital_pool_total:.4f} / "
-                    f"10 agentes = ${result.capital_por_agente:.4f} c/u."
-                ),
+                descripcion=descripcion,
                 datos={
                     "survivors":            [a["id"] for a in result.survivors],
                     "eliminated":           [a["id"] for a in result.eliminated],
                     "new_agents":           [a["id"] for a in result.new_agents],
+                    "immune_agents":        [a["id"] for a in result.immune_agents],
+                    "eligible_veterans":    [a["id"] for a in result.eligible_veterans],
+                    "cycle_suspended":      result.cycle_suspended,
+                    "suspension_reason":    result.suspension_reason,
+                    "cuota_aplicada":       len(result.eliminated),
+                    "genetic_variance_cv":  result.genetic_variance_cv,
+                    "sigma_boost_applied":  result.sigma_boost_applied,
+                    "sigma_used":           result.sigma_used,
                     "capital_pool_total":   result.capital_pool_total,
                     "capital_por_agente":   result.capital_por_agente,
                     "insight_mercado":      insight,
                     "recomendacion_parametros": rec_params,
                 },
-                razonamiento=veredicto_general,
+                razonamiento=(
+                    veredicto_general
+                    or (result.suspension_reason if result.cycle_suspended else "")
+                ),
             )
+
+            # En días suspendidos no hay eliminaciones ni nuevos agentes que registrar.
+            if result.cycle_suspended:
+                return
 
             # Log por cada eliminado — incluye fitness_score del ciclo
             fitness_map = self._calcular_fitness_calmar([a["id"] for a in result.eliminated])
@@ -267,13 +309,24 @@ class JudgeAgent(BaseAgent):
             return {"status": "error", "errors": result.errors, "fecha": str(self.today)}
 
         log.info(
-            "Supervivientes: %d | Eliminados: %d | Nuevos: %d",
-            len(result.survivors), len(result.eliminated), len(result.new_agents),
+            "Supervivientes: %d (inmunes: %d) | Eliminados: %d | Nuevos: %d | Suspendido: %s",
+            len(result.survivors), len(result.immune_agents),
+            len(result.eliminated), len(result.new_agents),
+            result.cycle_suspended,
         )
 
-        # 2. Obtener razonamiento de DeepSeek
+        # 2. Obtener razonamiento de DeepSeek.
+        # En días suspendidos (HOLD generalizado / Periodo de Gracia) NO se invoca
+        # al LLM: el día no tiene contenido cualitativo para analizar y se ahorra
+        # gasto de tokens. La justificación se registra localmente en logs_juez.
         llm_verdict: dict = {}
-        if result.eliminated or result.new_agents:
+        if result.cycle_suspended:
+            log.info(
+                "Ciclo suspendido — se omite invocación a DeepSeek. Razón: %s",
+                result.suspension_reason,
+            )
+            llm_verdict = self._suspension_verdict(result)
+        elif result.eliminated or result.new_agents:
             prompt = self._build_analysis_prompt(result)
             try:
                 raw = self.reason(prompt)
@@ -292,15 +345,22 @@ class JudgeAgent(BaseAgent):
 
         elapsed = (datetime.now(timezone.utc) - started_at).total_seconds()
         log.info(
-            "Capital redistribuido: pool=%.4f / 10 agentes = %.4f c/u",
+            "Capital redistribuido: pool=%.4f / agentes activos = %.4f c/u",
             result.capital_pool_total, result.capital_por_agente,
         )
         summary = {
             "status":               "success",
             "fecha":                str(self.today),
+            "cycle_suspended":      result.cycle_suspended,
+            "suspension_reason":    result.suspension_reason,
             "survivors":            [a["id"] for a in result.survivors],
+            "immune_agents":        [a["id"] for a in result.immune_agents],
+            "eligible_veterans":    [a["id"] for a in result.eligible_veterans],
             "eliminated":           [a["id"] for a in result.eliminated],
             "new_agents":           [a["id"] for a in result.new_agents],
+            "genetic_variance_cv":  result.genetic_variance_cv,
+            "sigma_boost_applied":  result.sigma_boost_applied,
+            "sigma_used":           result.sigma_used,
             "capital_pool_total":   result.capital_pool_total,
             "capital_por_agente":   result.capital_por_agente,
             "llm_verdict":          llm_verdict,
@@ -308,6 +368,35 @@ class JudgeAgent(BaseAgent):
         }
         log.info("Ciclo completado en %.2fs.", elapsed)
         return summary
+
+    # ── Justificación local para días suspendidos (ahorro de tokens) ──────────
+
+    def _suspension_verdict(self, result: EvolutionResult) -> dict:
+        """
+        Genera un veredicto local (sin invocar al LLM) para días en los que
+        el ciclo evolutivo queda suspendido por Periodo de Gracia o por
+        ausencia de candidatos con fitness <= 0.
+        """
+        return {
+            "veredicto_general": (
+                f"Ciclo {self.today} suspendido por Cuota Dinámica = 0. "
+                f"{len(result.immune_agents)} agentes bajo Periodo de Gracia y "
+                f"{len(result.eligible_veterans)} veteranos elegibles preservados. "
+                f"No se ejecutó eliminación, reproducción ni redistribución de capital."
+            ),
+            "eliminados":     [],
+            "nuevos_agentes": [],
+            "insight_mercado": (
+                "Día de HOLD generalizado o señales de cuarentena macro: "
+                "no hay actividad evaluable suficiente para extraer un insight "
+                "cualitativo de mercado."
+            ),
+            "recomendacion_parametros": (
+                "Mantener parámetros vigentes. La población joven necesita "
+                "acumular operaciones reales antes de la próxima evaluación."
+            ),
+            "suspension_reason": result.suspension_reason,
+        }
 
     # ── Fallback sin LLM ──────────────────────────────────────────────────────
 

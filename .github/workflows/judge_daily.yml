@@ -34,6 +34,13 @@ jobs:
       MUTATION_SIGMA_PERIODS:      "0.08"
       MUTATION_SIGMA_RISK:         "0.10"
       MIN_ROI_FOR_HALL_OF_FAME:    "0.05"
+      # ── Sesión 7: Periodo de Gracia + Cuota Dinámica + Diversidad ────────
+      # Días HÁBILES (lun-vie) de inmunidad para agentes recién nacidos sin operaciones.
+      GRACE_PERIOD_DAYS:           "2"
+      # Umbral de coeficiente de variación del ADN; por debajo de este valor
+      # las sigmas de mutación se multiplican por SIGMA_BOOST_FACTOR.
+      DIVERSITY_VARIANCE_THRESHOLD: "0.01"
+      SIGMA_BOOST_FACTOR:          "2.0"
       LOG_LEVEL:                   "INFO"
       ENVIRONMENT:                 "production"
 

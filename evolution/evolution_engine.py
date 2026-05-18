@@ -15,10 +15,12 @@ Cruce (crossover): cada parámetro se hereda de padre1 con p=0.6, padre2 con p=0
 from __future__ import annotations
 
 import json
+import math
 import os
 import random
+import statistics
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, timedelta
 
 from dotenv import load_dotenv
 
@@ -34,6 +36,19 @@ SIGMA_WEIGHTS = float(os.getenv("MUTATION_SIGMA_WEIGHTS", "0.05"))
 SIGMA_PERIODS = float(os.getenv("MUTATION_SIGMA_PERIODS", "0.08"))
 SIGMA_RISK = float(os.getenv("MUTATION_SIGMA_RISK", "0.10"))
 MIN_ROI_HALL_OF_FAME = float(os.getenv("MIN_ROI_FOR_HALL_OF_FAME", "0.05"))
+
+# ── Configuración evolutiva avanzada (Sesión 7) ──────────────────────────────
+# Periodo de Gracia Operativa: agentes sin operaciones y más jóvenes que este
+# umbral (en días HÁBILES, lun-vie) quedan inmunes a la eliminación.
+GRACE_PERIOD_DAYS = int(os.getenv("GRACE_PERIOD_DAYS", "2"))
+
+# Umbral de coeficiente de variación promedio del ADN de los supervivientes.
+# Si el CV cae por debajo de este valor, se considera que el pool es un clon
+# y el motor duplica la sigma de mutación para forzar exploración.
+DIVERSITY_VARIANCE_THRESHOLD = float(os.getenv("DIVERSITY_VARIANCE_THRESHOLD", "0.01"))
+
+# Multiplicador aplicado a las sigmas cuando se detecta baja diversidad genética.
+SIGMA_BOOST_FACTOR = float(os.getenv("SIGMA_BOOST_FACTOR", "2.0"))
 
 # ── Rangos de seguridad para clamping post-mutación ──────────────────────────
 _BOUNDS_TECNICOS_PERIODS = {
@@ -243,6 +258,88 @@ def crossover(parent1: dict, parent2: dict, p1_weight: float = 0.6) -> dict:
     return child
 
 
+# ── Cálculo de edad en días hábiles (Periodo de Gracia) ──────────────────────
+
+def _business_days_between(start: date, end: date) -> int:
+    """
+    Cuenta días hábiles (lunes a viernes, weekday 0-4) en [start, end).
+
+    El mercado Forex institucional no opera sábado ni domingo, por lo que
+    estos días no acumulan edad para el Periodo de Gracia Operativa.
+
+    Si end <= start retorna 0. El día de nacimiento se considera el día 0:
+    un agente que nace el lunes y se evalúa el martes tiene 1 día hábil.
+    """
+    if end <= start:
+        return 0
+    days = 0
+    cursor = start
+    while cursor < end:
+        if cursor.weekday() < 5:  # 0=lunes ... 4=viernes
+            days += 1
+        cursor += timedelta(days=1)
+    return days
+
+
+# ── Forzado de diversidad genética (Sesión 7) ────────────────────────────────
+
+# Claves numéricas representativas que se inspeccionan para medir el ADN.
+_DIVERSITY_KEYS_TEC = ("rsi_periodo", "ema_rapida", "ema_lenta",
+                       "peso_rsi", "peso_ema", "peso_macd")
+_DIVERSITY_KEYS_MAC = ("peso_noticias_alto", "umbral_sentimiento_compra",
+                       "ventana_noticias_horas", "peso_total_macro")
+_DIVERSITY_KEYS_SMC = ("fvg_min_pips", "risk_reward_target",
+                       "macro_quarantine_minutes", "peso_fvg", "peso_ob",
+                       "atr_factor")
+
+
+def _compute_genetic_variance(agents: list[dict]) -> float:
+    """
+    Coeficiente de variación promedio (std/|mean|) sobre las claves numéricas
+    representativas del ADN de los agentes.
+
+    Un valor cercano a 0 indica que los supervivientes son clones cercanos
+    (ADN estancado); valores >0.05 indican diversidad sana.
+
+    Retorna 0.0 si hay menos de 2 agentes (no se puede medir varianza).
+    """
+    if len(agents) < 2:
+        return 0.0
+
+    sources = (
+        ("params_tecnicos", _DIVERSITY_KEYS_TEC),
+        ("params_macro",    _DIVERSITY_KEYS_MAC),
+        ("params_smc",      _DIVERSITY_KEYS_SMC),
+    )
+
+    cvs: list[float] = []
+    for block_key, keys in sources:
+        for key in keys:
+            values: list[float] = []
+            for a in agents:
+                block = a.get(block_key) or {}
+                if key in block and block[key] is not None:
+                    try:
+                        values.append(float(block[key]))
+                    except (TypeError, ValueError):
+                        continue
+            if len(values) < 2:
+                continue
+            mean = statistics.fmean(values)
+            if mean == 0:
+                # std absoluto sobre mean cero → si todos son cero, CV=0
+                std = statistics.pstdev(values)
+                cvs.append(0.0 if std == 0 else float("inf"))
+            else:
+                std = statistics.pstdev(values)
+                cvs.append(std / abs(mean))
+
+    finite_cvs = [c for c in cvs if math.isfinite(c)]
+    if not finite_cvs:
+        return 0.0
+    return float(statistics.fmean(finite_cvs))
+
+
 # ── Generación de un agente hijo completo ────────────────────────────────────
 
 def breed_agent(
@@ -251,13 +348,24 @@ def breed_agent(
     child_id: str,
     birth_date: date,
     generation: int,
+    sigma_weights: float | None = None,
+    sigma_periods: float | None = None,
+    sigma_risk: float | None = None,
 ) -> dict:
     """
     Genera un nuevo agente a partir de dos padres.
     1. Crossover de cada bloque de parámetros.
     2. Mutación gaussiana.
     3. Normalización y constraints de seguridad.
+
+    Las sigmas son opcionales: si no se pasan, se usan los defaults globales
+    (lectura del .env). El motor evolutivo puede pasar valores boosteados
+    cuando detecta baja diversidad genética en el pool de supervivientes.
     """
+    sw = SIGMA_WEIGHTS if sigma_weights is None else sigma_weights
+    sp = SIGMA_PERIODS if sigma_periods is None else sigma_periods
+    sr = SIGMA_RISK    if sigma_risk    is None else sigma_risk
+
     # Crossover con sesgo hacia el padre de mejor ROI
     roi1 = float(parent1.get("roi_total", 0))
     roi2 = float(parent2.get("roi_total", 0))
@@ -272,12 +380,12 @@ def breed_agent(
         p1_weight,
     )
 
-    # Mutación gaussiana por bloque
-    tec_child  = _mutate_block(tec_child,  _BOUNDS_TECNICOS_PERIODS, SIGMA_PERIODS)
-    tec_child  = _mutate_block(tec_child,  _BOUNDS_TECNICOS_WEIGHTS, SIGMA_WEIGHTS)
-    mac_child  = _mutate_block(mac_child,  _BOUNDS_MACRO,            SIGMA_WEIGHTS)
-    risk_child = _mutate_block(risk_child, _BOUNDS_RIESGO,           SIGMA_RISK)
-    smc_child  = _mutate_block(smc_child,  _BOUNDS_SMC,              SIGMA_RISK)
+    # Mutación gaussiana por bloque (sigmas dinámicas)
+    tec_child  = _mutate_block(tec_child,  _BOUNDS_TECNICOS_PERIODS, sp)
+    tec_child  = _mutate_block(tec_child,  _BOUNDS_TECNICOS_WEIGHTS, sw)
+    mac_child  = _mutate_block(mac_child,  _BOUNDS_MACRO,            sw)
+    risk_child = _mutate_block(risk_child, _BOUNDS_RIESGO,           sr)
+    smc_child  = _mutate_block(smc_child,  _BOUNDS_SMC,              sr)
 
     # Normalizar pesos y aplicar constraints
     tec_child  = _normalize_weights(tec_child, ["peso_rsi", "peso_ema", "peso_macd"])
@@ -311,6 +419,24 @@ class EvolutionResult:
     errors: list[str] = field(default_factory=list)
     capital_pool_total: float = 0.0
     capital_por_agente: float = 0.0
+
+    # ── Periodo de Gracia / Cuota Dinámica (Sesión 7) ─────────────────────
+    # Agentes inmunes esta tarde por Periodo de Gracia Operativa.
+    immune_agents: list[dict] = field(default_factory=list)
+    # Veteranos remanentes evaluables tras filtrar inmunes.
+    eligible_veterans: list[dict] = field(default_factory=list)
+    # Indica si el ciclo de eliminación/reproducción quedó suspendido.
+    cycle_suspended: bool = False
+    # Justificación técnica de la suspensión (se persiste en logs_juez).
+    suspension_reason: str = ""
+
+    # ── Diversidad genética (Sesión 7) ────────────────────────────────────
+    # Coeficiente de variación promedio del ADN de los supervivientes.
+    genetic_variance_cv: float = 0.0
+    # True si las sigmas se duplicaron por baja diversidad.
+    sigma_boost_applied: bool = False
+    # Sigmas efectivamente utilizadas en este ciclo (para auditoría).
+    sigma_used: dict = field(default_factory=dict)
 
 
 class EvolutionEngine:
@@ -397,18 +523,87 @@ class EvolutionEngine:
             )
             return cur.fetchone()[0] + 1
 
-    # ── Selección natural ────────────────────────────────────────────────────
+    # ── Filtro de Elegibilidad: Periodo de Gracia Operativa ──────────────────
+
+    def _classify_eligibility(
+        self, agents: list[dict]
+    ) -> tuple[list[dict], list[dict]]:
+        """
+        Separa la población activa en:
+          - immune: agentes bajo Periodo de Gracia (NO ELEGIBLES para eliminación).
+          - eligible: agentes evaluables esta tarde.
+
+        Un agente es inmune si cumple ESTRICTAMENTE ambas condiciones:
+          1. operaciones_total == 0 (nunca ha cerrado una operación).
+          2. Edad en días HÁBILES (lun-vie) < GRACE_PERIOD_DAYS.
+
+        Los inmunes mantienen automáticamente su estado 'activo' y quedan
+        exentos del proceso de depuración esa tarde.
+        """
+        immune: list[dict] = []
+        eligible: list[dict] = []
+        for a in agents:
+            ops_total = int(a.get("operaciones_total", 0) or 0)
+            birth = a.get("fecha_nacimiento")
+            # Tolerancia a tipos: si llega como string, intentamos parsear ISO.
+            if isinstance(birth, str):
+                try:
+                    birth = date.fromisoformat(birth)
+                except ValueError:
+                    birth = None
+            age_business_days = (
+                _business_days_between(birth, self.today) if birth else 999
+            )
+            if ops_total == 0 and age_business_days < GRACE_PERIOD_DAYS:
+                immune.append(a)
+            else:
+                eligible.append(a)
+        return immune, eligible
+
+    # ── Selección natural con Cuota Dinámica ─────────────────────────────────
 
     def select_survivors_and_eliminated(
         self, agents: list[dict]
     ) -> tuple[list[dict], list[dict]]:
         """
-        Divide la población activa en supervivientes (top N) y eliminados (bottom N).
-        Si hay menos de 2*N agentes activos, sólo elimina la mitad inferior.
+        Selección con CUOTA DINÁMICA: nunca elimina agentes con Fitness > 0
+        solo para cumplir la cuota de N_ELIMINATE.
+
+        Espera `agents` ya filtrados (sin inmunes) y ordenados por fitness
+        DESC. La función ordena internamente por el criterio de eliminación:
+          fitness_score ASC, fecha_nacimiento ASC, id ASC
+        de modo que los primeros candidatos a salir son los veteranos
+        rezagados con peor fitness.
+
+        Solo se eliminan agentes cuyo fitness_score <= 0. Si todos los
+        elegibles tienen fitness > 0, retorna (todos como supervivientes, []).
         """
-        n = min(N_ELIMINATE, len(agents) // 2)
-        survivors = agents[:len(agents) - n]
-        eliminated = agents[len(agents) - n:]
+        if not agents:
+            return [], []
+
+        # Orden inverso para identificar a los peores: fitness ASC,
+        # veteranos primero (fecha_nacimiento ASC, id ASC).
+        ordered_for_elim = sorted(
+            agents,
+            key=lambda a: (
+                float(a.get("fitness_score", 0) or 0),
+                a.get("fecha_nacimiento") or date.min,
+                a.get("id", ""),
+            ),
+        )
+
+        # Solo son eliminables los que arrastran fitness <= 0 (negativo o cero).
+        # Esto protege a cualquier agente rentable y eficiente.
+        eliminable = [
+            a for a in ordered_for_elim
+            if float(a.get("fitness_score", 0) or 0) <= 0
+        ]
+
+        n = min(N_ELIMINATE, len(eliminable))
+        eliminated = eliminable[:n]
+
+        elim_ids = {a["id"] for a in eliminated}
+        survivors = [a for a in agents if a["id"] not in elim_ids]
         return survivors, eliminated
 
     # ── Escritura en DB ──────────────────────────────────────────────────────
@@ -608,8 +803,21 @@ class EvolutionEngine:
         """
         Ejecuta el ciclo evolutivo completo y retorna un EvolutionResult con
         el resumen de lo ocurrido para que el JudgeAgent lo registre en logs_juez.
+
+        Flujo (Sesión 7):
+          A. Identifica y protege a los agentes bajo Periodo de Gracia.
+          B. Evalúa veteranos remanentes con cuota dinámica.
+          C. Si la cuota cae a 0, suspende eliminación/reproducción/redistribución.
+          D. Si hay eliminación, aplica sigma boost cuando los supervivientes
+             son clones genéticos cercanos.
         """
         result = EvolutionResult(fecha=self.today)
+        # Sigmas por defecto (pueden ser sobrescritas por el boost de diversidad).
+        result.sigma_used = {
+            "weights": SIGMA_WEIGHTS,
+            "periods": SIGMA_PERIODS,
+            "risk":    SIGMA_RISK,
+        }
 
         try:
             agents = self._get_active_agents_ranked()
@@ -617,37 +825,114 @@ class EvolutionEngine:
                 result.errors.append("Menos de 2 agentes activos. Ciclo omitido.")
                 return result
 
-            survivors, eliminated = self.select_survivors_and_eliminated(agents)
-            result.survivors  = survivors
+            # ── PASO A: Periodo de Gracia Operativa ──────────────────────────
+            immune, eligible = self._classify_eligibility(agents)
+            result.immune_agents     = immune
+            result.eligible_veterans = eligible
+
+            # ── PASO B: Cuota dinámica sobre los elegibles ───────────────────
+            survivors_eligible, eliminated = self.select_survivors_and_eliminated(eligible)
+
+            # ── PASO C: ¿Se suspende el ciclo? ────────────────────────────────
+            # Si no hay nada que eliminar (todos los elegibles tienen fitness>0
+            # o el pool elegible está vacío porque todos están en gracia),
+            # suspendemos: no se elimina, no se reproduce, no se redistribuye.
+            if not eliminated:
+                result.cycle_suspended = True
+                if not eligible:
+                    result.suspension_reason = (
+                        f"Cuota = 0. Toda la población ({len(immune)} agentes) "
+                        f"está bajo Periodo de Gracia Operativa "
+                        f"(operaciones_total=0 y edad < {GRACE_PERIOD_DAYS} días hábiles). "
+                        f"Se preserva la generación recién creada para que acumule "
+                        f"datos reales en las próximas sesiones."
+                    )
+                else:
+                    result.suspension_reason = (
+                        f"Cuota = 0. Los {len(eligible)} veteranos elegibles "
+                        f"presentan Fitness > 0 (rentables y eficientes) y los "
+                        f"{len(immune)} agentes nuevos están bajo Periodo de Gracia. "
+                        f"Eliminar a un veterano rentable solo para cumplir la cuota "
+                        f"rígida canibalizaría capital sano; se suspende el ciclo."
+                    )
+
+                # Supervivientes = TODA la población activa (nadie sale).
+                result.survivors  = agents
+                result.eliminated = []
+                result.new_agents = []
+
+                # Snapshot de ranking para auditoría diaria (sin redistribuir capital).
+                evento_map = {a["id"]: "supervivencia_gracia" for a in agents}
+                with get_conn() as conn:
+                    self._snapshot_ranking(conn, agents, evento_map)
+                    # Pool informativo: suma del capital actual sin redistribuir.
+                    pool_total = round(
+                        sum(float(a.get("capital_actual", 10.0)) for a in agents), 4
+                    )
+                    n_active = len(agents) or 1
+                    result.capital_pool_total = pool_total
+                    result.capital_por_agente = round(pool_total / n_active, 4)
+
+                result.ranking_snapshot = [
+                    {"id": a["id"], "posicion": i + 1, "roi": a.get("roi_total", 0)}
+                    for i, a in enumerate(agents)
+                ]
+                return result
+
+            # ── PASO D: Ciclo activo — los supervivientes globales incluyen
+            # tanto a los veteranos que sobrevivieron como a los inmunes.
+            survivors_all = survivors_eligible + immune
+            result.survivors  = survivors_all
             result.eliminated = eliminated
+
+            # ── Forzado de diversidad genética ────────────────────────────────
+            # Se mide sobre los supervivientes elegibles (los que harán de padres);
+            # los inmunes recién nacidos podrían inflar artificialmente la varianza.
+            parent_pool = survivors_eligible if survivors_eligible else survivors_all
+            cv = _compute_genetic_variance(parent_pool)
+            result.genetic_variance_cv = round(cv, 6)
+            sw, sp, sr = SIGMA_WEIGHTS, SIGMA_PERIODS, SIGMA_RISK
+            if cv < DIVERSITY_VARIANCE_THRESHOLD:
+                sw = SIGMA_WEIGHTS * SIGMA_BOOST_FACTOR
+                sp = SIGMA_PERIODS * SIGMA_BOOST_FACTOR
+                sr = SIGMA_RISK    * SIGMA_BOOST_FACTOR
+                result.sigma_boost_applied = True
+            result.sigma_used = {
+                "weights": round(sw, 6),
+                "periods": round(sp, 6),
+                "risk":    round(sr, 6),
+            }
 
             # Generar nuevos agentes (un hijo por cada eliminado)
             next_idx = self._get_next_agent_index()
             new_agents: list[dict] = []
-            max_gen = max(int(a["generacion"]) for a in survivors)
+            max_gen = max(int(a["generacion"]) for a in survivors_all)
+
+            # Pool de padres: usa solo elegibles si los hay para evitar
+            # reproducir agentes que aún no han probado su rendimiento.
+            parent_candidates = parent_pool
 
             for i in range(len(eliminated)):
-                # Elige 2 padres aleatoriamente del pool de supervivientes,
-                # con probabilidad proporcional a su ROI (fitness-proportionate selection)
-                rois = [max(float(a["roi_total"]), 0.0001) for a in survivors]
+                # Selección por ROI (fitness-proportionate selection)
+                rois = [max(float(a["roi_total"]), 0.0001) for a in parent_candidates]
                 total_roi = sum(rois)
                 weights = [r / total_roi for r in rois]
-                p1, p2 = random.choices(survivors, weights=weights, k=2)
+                p1, p2 = random.choices(parent_candidates, weights=weights, k=2)
                 # Garantiza padres distintos si hay suficientes
-                if p1["id"] == p2["id"] and len(survivors) > 1:
-                    others = [a for a in survivors if a["id"] != p1["id"]]
+                if p1["id"] == p2["id"] and len(parent_candidates) > 1:
+                    others = [a for a in parent_candidates if a["id"] != p1["id"]]
                     p2 = random.choice(others)
 
                 child_id = f"{self.today.strftime('%Y-%m-%d')}_{next_idx + i:02d}"
-                child = breed_agent(p1, p2, child_id, self.today, max_gen + 1)
+                child = breed_agent(
+                    p1, p2, child_id, self.today, max_gen + 1,
+                    sigma_weights=sw, sigma_periods=sp, sigma_risk=sr,
+                )
                 new_agents.append(child)
 
             result.new_agents = new_agents
 
             # Pool real del día: suma de todos los agentes ANTES de eliminar/nacer ninguno.
-            # Se usa en _redistribute_capital para que las pérdidas/ganancias del día
-            # se reflejen correctamente (los nuevos nacen con $10 hardcoded, lo que
-            # inflaría el pool si se re-consultara la DB después de su inserción).
             pool_total_eod = round(
                 sum(float(a.get("capital_actual", 10.0)) for a in agents), 4
             )
@@ -658,22 +943,26 @@ class EvolutionEngine:
                 evento_map[a["id"]] = "eliminacion"
             for a in new_agents:
                 evento_map[a["id"]] = "nacimiento"
-            for a in survivors:
+            for a in survivors_eligible:
                 evento_map[a["id"]] = "supervivencia"
+            for a in immune:
+                evento_map[a["id"]] = "supervivencia_gracia"
 
             # Escribir todo en una única transacción
             with get_conn() as conn:
-                self._eliminate_agents(
-                    conn, eliminated,
-                    f"Selección natural {self.today}: bottom {len(eliminated)} "
-                    f"por ROI (desempate: agente más reciente sobrevive)",
+                razon_elim = (
+                    f"Selección natural {self.today}: cuota dinámica = "
+                    f"{len(eliminated)} (fitness <= 0). Desempate por veteranía "
+                    f"(fecha_nacimiento ASC, id ASC). Inmunes en gracia: "
+                    f"{len(immune)}."
                 )
+                self._eliminate_agents(conn, eliminated, razon_elim)
                 for child in new_agents:
                     self._insert_new_agent(conn, child)
-                self._save_hall_of_fame(conn, survivors)
+                self._save_hall_of_fame(conn, survivors_eligible)
 
                 # Snapshot de ranking: capital real del día ANTES de redistribuir
-                all_for_snapshot = survivors + new_agents
+                all_for_snapshot = survivors_all + new_agents
                 self._snapshot_ranking(conn, all_for_snapshot, evento_map)
                 self._snapshot_ranking(conn, eliminated, evento_map)
 
