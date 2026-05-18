@@ -862,7 +862,12 @@ class EvolutionEngine:
                 result.new_agents = []
 
                 # Snapshot de ranking para auditoría diaria (sin redistribuir capital).
-                evento_map = {a["id"]: "supervivencia_gracia" for a in agents}
+                # NOTA: el CHECK constraint de ranking_historico.evento solo acepta
+                # 'supervivencia', 'eliminacion', 'nacimiento', 'evaluacion'. La
+                # distincion entre supervivencia normal y supervivencia por gracia
+                # queda registrada en logs_juez.datos_json (immune_agents,
+                # cycle_suspended, suspension_reason).
+                evento_map = {a["id"]: "supervivencia" for a in agents}
                 with get_conn() as conn:
                     self._snapshot_ranking(conn, agents, evento_map)
                     # Pool informativo: suma del capital actual sin redistribuir.
@@ -946,7 +951,11 @@ class EvolutionEngine:
             for a in survivors_eligible:
                 evento_map[a["id"]] = "supervivencia"
             for a in immune:
-                evento_map[a["id"]] = "supervivencia_gracia"
+                # NOTA: usamos 'supervivencia' (no 'supervivencia_gracia') porque
+                # el CHECK constraint de ranking_historico.evento no acepta otros
+                # valores. La condicion de inmunidad queda registrada en
+                # logs_juez.datos_json.immune_agents.
+                evento_map[a["id"]] = "supervivencia"
 
             # Escribir todo en una única transacción
             with get_conn() as conn:
