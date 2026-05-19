@@ -43,8 +43,8 @@ Los agentes **no son configurados manualmente**: nacen con parámetros aleatorio
 | Herramienta | Rol |
 |---|---|
 | **Python 3.11** | Lenguaje principal de todos los agentes, monitor y motor evolutivo |
-| **PostgreSQL (Neon)** | Base de datos principal — estado de agentes, operaciones, logs del Juez |
-| **DeepSeek API** (`deepseek-chat`) | LLM para razonamiento táctico (señales ambiguas) y veredictos del Juez |
+| **PostgreSQL (Supabase)** | Base de datos principal — estado de agentes, operaciones, logs del Juez. Transaction Pooler (PgBouncer, puerto 6543) para compatibilidad IPv4 con GitHub Actions |
+| **DeepSeek API** (`deepseek-reasoner`) | LLM para razonamiento táctico (señales ambiguas) y veredictos del Juez. Modelo configurado en env var `DEEPSEEK_MODEL` |
 | **Yahoo Finance** | Precios OHLCV de EUR/USD en tiempo real — sin API key, sin límite |
 | **Finnhub API** | Noticias forex y calendario económico |
 | **Alpha Vantage** | Indicadores técnicos (legado, usado puntualmente) |
@@ -64,6 +64,7 @@ Los agentes **no son configurados manualmente**: nacen con parámetros aleatorio
 |---|---|
 | **GitHub Actions** | Ejecución automática del monitor (cada 15 min, 1:30 am–10:30 pm Bogotá) y del Juez (11:00 pm Bogotá L-V) |
 | **Streamlit Community Cloud** | Hosting del dashboard en `inversion-evolutiva.streamlit.app` |
+| **Vercel** | Hosting de la app móvil Next.js en `https://mobile-app-smoky-phi.vercel.app` |
 | **GitHub Secrets** | Almacenamiento seguro de todas las credenciales |
 
 ---
@@ -88,7 +89,7 @@ Los agentes **no son configurados manualmente**: nacen con parámetros aleatorio
             │                          │
             ▼                          ▼
 ┌───────────────────────────────────────────────────────────────┐
-│                    POSTGRESQL (Neon)                           │
+│                  POSTGRESQL (Supabase)                         │
 │   agentes | operaciones | logs_juez | ranking_historico |     │
 │   estrategias_exitosas                                        │
 └────────────────────────┬──────────────────────────────────────┘
@@ -314,15 +315,19 @@ El LLM **DeepSeek** (`deepseek-chat`) se consulta en tres momentos distintos del
 
 ```python
 # base_agent.py
+_MODEL  = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")   # default: deepseek-chat
+                                                          # en producción: deepseek-reasoner
 _client = OpenAI(
-    api_key=DEEPSEEK_API_KEY,
-    base_url="https://api.deepseek.com",   # protocolo compatible OpenAI
+    api_key=os.environ["DEEPSEEK_API_KEY"],
+    base_url=os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
 )
-model       = "deepseek-chat"
+model       = _MODEL
 temperature = 0.1     # respuestas muy deterministas
 max_tokens  = 512
 timeout     = 30 seg
 ```
+
+> **Modelo activo en producción:** `deepseek-reasoner` (configurado en `.env` y en GitHub Secrets como `DEEPSEEK_MODEL`). El API de DeepSeek puede servir este modelo bajo el alias `deepseek-v4-flash` en algunas respuestas — es el mismo endpoint.
 
 ---
 
@@ -645,7 +650,21 @@ Sus registros permanecen en la tabla `agentes` para trazabilidad histórica; sol
 
 ## 11. Base de datos — PostgreSQL
 
-Alojada en **Neon** (PostgreSQL serverless). 5 tablas principales:
+Alojada en **Supabase** (PostgreSQL gestionado, plan Free). La conexión usa el **Transaction Pooler de PgBouncer** (puerto 6543) para compatibilidad con GitHub Actions (IPv4). 5 tablas principales + 2 vistas + 1 trigger de auditoría:
+
+**Cadena de conexión activa:**
+```
+postgresql://postgres.<project-id>:<password>@aws-1-us-west-2.pooler.supabase.com:6543/postgres
+```
+
+**Índice de integridad para operaciones:**
+```sql
+-- Garantiza que un agente nunca tenga más de una posición BUY/SELL abierta simultáneamente.
+-- Previene race conditions TOCTOU cuando dos runs de GitHub Actions se solapan.
+CREATE UNIQUE INDEX idx_one_open_buysell_per_agent
+  ON operaciones(agente_id)
+  WHERE estado = 'abierta' AND accion IN ('BUY', 'SELL');
+```
 
 ### `agentes`
 
@@ -723,7 +742,7 @@ Audit trail completo del Agente Juez.
 | `insight_mercado` | string | Comentario del LLM (vacío en días suspendidos) |
 | `recomendacion_parametros` | string | Sugerencias del LLM para próximas generaciones |
 
-Estos campos permiten al Dashboard Streamlit (y a cualquier consulta SQL ad-hoc en Neon) reconstruir con total trazabilidad qué pasó cada día y por qué.
+Estos campos permiten al Dashboard Streamlit (y a cualquier consulta SQL ad-hoc en Supabase) reconstruir con total trazabilidad qué pasó cada día y por qué.
 
 ### `ranking_historico`
 
@@ -821,7 +840,7 @@ Pasos:
 En caso de fallo: crea un GitHub Issue con alerta (evita duplicados)
 ```
 
-**Secrets requeridos:** `DATABASE_URL`, `DEEPSEEK_API_KEY`, `FINNHUB_API_KEY`, `ALPHA_VANTAGE_API_KEY`, `GOOGLE_SHEET_ID`, `GOOGLE_CREDENTIALS_JSON`
+**Secrets requeridos:** `DATABASE_URL` (Supabase Transaction Pooler), `DEEPSEEK_API_KEY`, `DEEPSEEK_MODEL`, `FINNHUB_API_KEY`, `ALPHA_VANTAGE_API_KEY`, `GOOGLE_SHEET_ID`, `GOOGLE_CREDENTIALS_JSON`
 
 **Env vars de horario:** `TRADING_START_TIME_UTC=06:30`, `TRADING_CUTOFF_TIME_UTC=04:00` (la ventana cruza la medianoche UTC; el código lo gestiona explícitamente).
 
@@ -867,14 +886,14 @@ Todas las variables se definen en `.env` local (desarrollo) o en **GitHub Secret
 
 | Variable | Descripción |
 |---|---|
-| `DATABASE_URL` | Cadena de conexión a Neon PostgreSQL |
+| `DATABASE_URL` | Cadena de conexión a Supabase PostgreSQL (Transaction Pooler, puerto 6543) |
 | `DEEPSEEK_API_KEY` | API key de DeepSeek LLM |
+| `DEEPSEEK_MODEL` | Modelo DeepSeek a utilizar (producción: `deepseek-reasoner`) |
 | `FINNHUB_API_KEY` | API key de Finnhub (noticias y calendario económico) |
 | `ALPHA_VANTAGE_API_KEY` | API key de Alpha Vantage (legado) |
 | `GOOGLE_SHEET_ID` | ID del spreadsheet de Google Sheets |
 | `GOOGLE_CREDENTIALS_JSON` | JSON completo de la service account de Google (o ruta al archivo en local) |
 | `DEEPSEEK_BASE_URL` | Base URL del API (default: `https://api.deepseek.com`) |
-| `DEEPSEEK_MODEL` | Modelo a usar (default: `deepseek-chat`) |
 | `JUDGE_TIMEZONE` | Zona horaria del Juez (default: `America/Bogota`) |
 | `JUDGE_RUN_TIME` | Hora de ejecución del Juez en zona local (default: `23:00`) |
 | `TRADING_START_TIME_UTC` | Hora UTC desde la que se permite abrir posiciones, formato HH:MM (default: `06:30` = 1:30 am Bogotá) |
@@ -953,7 +972,7 @@ El usuario puede disparar manualmente cualquier workflow desde GitHub Actions:
 
 ---
 
-*Documento actualizado el 2026-05-18 (Sesión 7 — reestructuración nocturna). Refleja el estado del sistema con Periodo de Gracia Operativa, Cuota Dinámica de Eliminación y Forzado de Diversidad Genética activos en producción, además del nuevo horario de operación 1:30 am – 11:00 pm Bogotá con cierre EOD a las 10:45 pm y ciclo evolutivo del Juez a las 11:00 pm.*
+*Documento actualizado el 2026-05-19 (Sesión 8 — migración Neon → Supabase + fix race condition). Refleja la base de datos en Supabase, el modelo DeepSeek actualizado a `deepseek-reasoner`, el INSERT atómico para prevenir posiciones duplicadas y el índice único parcial en `operaciones`.*
 
 ## Historial de cambios mayores
 
@@ -971,4 +990,13 @@ El usuario puede disparar manualmente cualquier workflow desde GitHub Actions:
   - **Documentación de tabla `agentes` y `operaciones`** completada: ahora incluye `fecha_eliminacion`, `razon_eliminacion`, `pips_sl`, `pnl_porcentaje`, `created_at` y `updated_at`.
 - **2026-05-18 (Sesión 7 — hotfix vespertino):** Corregido bug introducido en el snapshot de `ranking_historico`: el motor escribía `evento = 'supervivencia_gracia'`, valor que violaba el CHECK constraint del schema (solo admite `'supervivencia', 'eliminacion', 'nacimiento', 'evaluacion'`). Se uniformó a `'supervivencia'` para todos los supervivientes (tanto los protegidos por fitness > 0 como los inmunes en Periodo de Gracia). La distinción entre supervivencia normal e inmunidad por gracia se conserva en `logs_juez.datos_json.immune_agents` y `cycle_suspended`, así que no se pierde trazabilidad.
 - **2026-05-18 (Sesión 7):** Implementación de Periodo de Gracia Operativa, Cuota Dinámica de Eliminación, Regla de Desempate Generalizado y Forzado de Diversidad Genética. Suspensión automática del ciclo en días de HOLD generalizado para preservar agentes jóvenes y veteranos rentables. Nuevas env vars: `GRACE_PERIOD_DAYS`, `DIVERSITY_VARIANCE_THRESHOLD`, `SIGMA_BOOST_FACTOR`. Logging extendido en `logs_juez.datos_json` con `cycle_suspended`, `immune_agents`, `eligible_veterans`, `cuota_aplicada`, `genetic_variance_cv`, `sigma_boost_applied`, `sigma_used`. Omisión de invocación al LLM en ciclos suspendidos.
+- **2026-05-19 (Sesión 8 — migración BD + fix race condition):**
+  - **Migración Neon → Supabase:** la BD fue migrada de Neon PostgreSQL (cuota gratuita agotada) a Supabase Free Tier. Se aplica el schema completo (5 tablas, 2 vistas, 1 trigger), se crea `scripts/seed_gen1.py` para sembrar la Generación 1 (`2026-05-19_01` a `_10`, $10 c/u, parámetros por defecto), y se actualiza `DATABASE_URL` en GitHub Actions, Vercel (app móvil: `https://mobile-app-smoky-phi.vercel.app`) y Streamlit Cloud.
+  - **Conexión via Transaction Pooler:** Supabase usa PgBouncer en modo transacción (puerto 6543, IPv4) para compatibilidad con runners de GitHub Actions. Variables de entorno ahora incluyen `PGHOST`, `PGUSER`, `PGPASSWORD`, `PGDATABASE` además de `DATABASE_URL`.
+  - **Fix NameError en `close_operation`** (commit `3092565`): `precio_entrada` ahora se asigna antes del bloque if/else en `agents/investor_agent.py`, eliminando el `NameError` que crasheaba el monitor cuando `precio_entrada` era NULL en la BD.
+  - **Fix race condition TOCTOU — posiciones duplicadas** (commit `4c15fe4`): `_persist_operation` reemplaza el `INSERT VALUES` simple por `INSERT ... SELECT ... WHERE NOT EXISTS (...)` para BUY/SELL. La comprobación de posición abierta y la inserción son ahora **atómicas** en la BD; si dos runs del workflow se solapan, el segundo obtiene `fetchone() = None` y aborta sin crear duplicado.
+  - **Índice único parcial:** `CREATE UNIQUE INDEX idx_one_open_buysell_per_agent ON operaciones(agente_id) WHERE estado='abierta' AND accion IN ('BUY','SELL')` — segunda línea de defensa a nivel de BD para garantizar la invariante.
+  - **Limpieza de duplicados:** 4 operaciones duplicadas (ids 8, 10, 12, 14) abiertas por la race condition en el primer run post-migración fueron marcadas como `cancelada`; se decrementó `operaciones_total` en los 4 agentes afectados.
+  - **Modelo LLM actualizado:** `DEEPSEEK_MODEL=deepseek-reasoner` en `.env` y GitHub Secrets. `base_agent.py` lee el modelo desde env var con fallback a `deepseek-chat`. Todas las conexiones verificadas: DB OK, LLM OK, Yahoo Finance OK (EUR/USD 1.16117), Google Sheets OK.
+
 - **2026-05-10:** Documento inicial. Refleja el estado del sistema en Generación 1 del nuevo run iniciado el 2026-05-11.
