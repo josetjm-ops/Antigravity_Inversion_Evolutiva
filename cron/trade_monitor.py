@@ -7,11 +7,21 @@ Dos responsabilidades en cada ciclo:
      desde Yahoo Finance y ejecuta el pipeline de inversión. Pueden operar múltiples
      veces al día, de forma secuencial (una posición abierta a la vez por agente).
 
-Horario de apertura de nuevas posiciones (configurable vía env):
-  TRADING_START_UTC  : hora UTC en que se permite abrir (default 7 = 2:00 am Bogotá)
-  TRADING_CUTOFF_UTC : hora UTC límite para abrir (default 20 = 3pm Bogotá)
-  → Las posiciones abiertas se siguen monitoreando fuera de ese horario.
-  → El EOD (force-close-all) corre a las 22:00 UTC (5pm Bogotá).
+Horario de apertura de nuevas posiciones (configurable vía env, formato HH:MM en UTC):
+  TRADING_START_TIME_UTC  : hora UTC desde la que se permite abrir
+                            (default 06:30 = 1:30 am Bogotá)
+  TRADING_CUTOFF_TIME_UTC : hora UTC límite para abrir
+                            (default 04:00 = 11:00 pm Bogotá — DÍA SIGUIENTE UTC)
+
+  La ventana cruza la medianoche UTC: 06:30 UTC del día N hasta 04:00 UTC
+  del día N+1. _within_trading_hours() maneja explícitamente este caso.
+
+  → En la práctica el último monitor en correr es el de las 03:30 UTC
+    (10:30 pm Bogotá), porque el cierre forzoso del Juez ocurre a las
+    03:45 UTC (10:45 pm Bogotá) y el ciclo evolutivo a las 04:00 UTC
+    (11:00 pm Bogotá).
+  → Las posiciones abiertas se siguen monitoreando fuera de ese horario
+    hasta el cierre forzoso.
 
 Capital mínimo para operar:
   MIN_CAPITAL_TO_TRADE: default $2.00 (20% del capital inicial de $10).
@@ -34,7 +44,7 @@ import logging
 import os
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, time as dtime, timezone
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -52,10 +62,27 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-_POLL_SECONDS        = int(os.getenv("TRADE_MONITOR_POLL_SECONDS", "60"))
-_MIN_CAPITAL         = float(os.getenv("MIN_CAPITAL_TO_TRADE", "2.0"))
-_TRADING_START_UTC   = int(os.getenv("TRADING_START_UTC",   "7"))    # 2:00 am Bogotá (sesión asiática/europea)
-_TRADING_CUTOFF_UTC  = int(os.getenv("TRADING_CUTOFF_UTC",  "20"))   # 3:00 pm Bogotá
+_POLL_SECONDS = int(os.getenv("TRADE_MONITOR_POLL_SECONDS", "60"))
+_MIN_CAPITAL  = float(os.getenv("MIN_CAPITAL_TO_TRADE", "2.0"))
+
+
+def _parse_hhmm(value: str, fallback: str) -> dtime:
+    """Parsea un string 'HH:MM' a datetime.time. Si falla, usa el fallback."""
+    raw = (value or fallback).strip()
+    try:
+        h, m = raw.split(":")
+        return dtime(int(h), int(m))
+    except (ValueError, AttributeError):
+        log.warning("[TradeMonitor] Hora '%s' inválida — usando fallback %s.", raw, fallback)
+        h, m = fallback.split(":")
+        return dtime(int(h), int(m))
+
+
+# Ventana de apertura de nuevas posiciones (en UTC).
+# Default: 06:30 UTC – 04:00 UTC (siguiente día UTC)
+#          = 1:30 am – 11:00 pm Bogotá. Cruza la medianoche UTC.
+_TRADING_START_TIME_UTC  = _parse_hhmm(os.getenv("TRADING_START_TIME_UTC"),  "06:30")
+_TRADING_CUTOFF_TIME_UTC = _parse_hhmm(os.getenv("TRADING_CUTOFF_TIME_UTC"), "04:00")
 
 
 # Eventos macro críticos que activan la ventana de cuarentena (silencio operacional)
@@ -69,9 +96,22 @@ _CRITICAL_KEYWORDS = [
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _within_trading_hours() -> bool:
-    """True si la hora UTC actual está dentro del horario permitido para abrir posiciones."""
-    now_utc = datetime.now(timezone.utc)
-    return _TRADING_START_UTC <= now_utc.hour < _TRADING_CUTOFF_UTC
+    """
+    True si la hora UTC actual está dentro del horario permitido para abrir
+    nuevas posiciones. Compara con precisión de minutos (HH:MM).
+
+    Soporta ventanas que CRUZAN la medianoche UTC. Por defecto la ventana es
+    06:30 UTC – 04:00 UTC del día siguiente (= 1:30 am – 11:00 pm Bogotá),
+    así que la rama "cruza medianoche" es la que se evalúa habitualmente.
+    """
+    now_utc_time = datetime.now(timezone.utc).time()
+    if _TRADING_START_TIME_UTC <= _TRADING_CUTOFF_TIME_UTC:
+        # Ventana convencional: start < cutoff dentro del mismo día UTC.
+        return _TRADING_START_TIME_UTC <= now_utc_time < _TRADING_CUTOFF_TIME_UTC
+    # Ventana que cruza la medianoche UTC:
+    #   activa si la hora actual >= start (tramo nocturno UTC) o
+    #   si la hora actual < cutoff (tramo de madrugada UTC del día siguiente).
+    return (now_utc_time >= _TRADING_START_TIME_UTC) or (now_utc_time < _TRADING_CUTOFF_TIME_UTC)
 
 
 def _is_critical_event(titulo: str) -> bool:
@@ -298,17 +338,20 @@ def _evaluate_new_positions() -> dict:
     Para cada agente activo que cumpla las condiciones, evalúa si abrir posición:
       - Sin posición BUY/SELL abierta (secuencial: una a la vez)
       - Capital >= MIN_CAPITAL_TO_TRADE
-      - Dentro del horario de trading (TRADING_START_UTC – TRADING_CUTOFF_UTC)
+      - Dentro del horario de trading (TRADING_START_TIME_UTC – TRADING_CUTOFF_TIME_UTC)
 
     Descarga 1 DataFrame OHLCV compartido; calcula indicadores individuales
     por agente en memoria usando sus propios parámetros genéticos.
     """
     if not _within_trading_hours():
-        now_h = datetime.now(timezone.utc).hour
+        now_hhmm = datetime.now(timezone.utc).strftime("%H:%M")
         log.info(
-            "[TradeMonitor] Fuera de horario de trading (%d UTC). "
-            "Horario: %d–%d UTC. No se evalúan nuevas posiciones.",
-            now_h, _TRADING_START_UTC, _TRADING_CUTOFF_UTC,
+            "[TradeMonitor] Fuera de horario de trading (%s UTC). "
+            "Horario: %s–%s UTC (1:30 am – 11:00 pm Bogotá). "
+            "No se evalúan nuevas posiciones.",
+            now_hhmm,
+            _TRADING_START_TIME_UTC.strftime("%H:%M"),
+            _TRADING_CUTOFF_TIME_UTC.strftime("%H:%M"),
         )
         return {"evaluated": 0, "opened": 0, "errors": 0}
 
@@ -429,7 +472,7 @@ def _evaluate_new_positions() -> dict:
 def force_close_all() -> dict:
     """
     Cierra TODAS las posiciones abiertas al precio actual de mercado.
-    Llamado por judge_daily.yml antes del ciclo evolutivo (5:00 pm Bogotá).
+    Llamado por judge_daily.yml antes del ciclo evolutivo (10:45 pm Bogotá).
     """
     from data.simulated_broker import get_current_price
     from agents.investor_agent import InvestorAgent

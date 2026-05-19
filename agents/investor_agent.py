@@ -146,6 +146,17 @@ class InvestorAgent:
         """Inserta la operación en `operaciones` y actualiza el contador del agente."""
         op_id = None
         ts_entrada = datetime.now(timezone.utc)
+
+        # Calcula pips_sl si la operación es BUY/SELL con SL válido y precio de entrada
+        pips_sl: float | None = None
+        if (
+            decision.accion_final in ("BUY", "SELL")
+            and decision.stop_loss is not None
+            and precio_entrada is not None
+            and precio_entrada > 0
+        ):
+            pips_sl = round(abs(float(precio_entrada) - float(decision.stop_loss)) * 10_000, 2)
+
         try:
             with get_conn() as conn:
                 cur = conn.cursor()
@@ -153,12 +164,12 @@ class InvestorAgent:
                     """
                     INSERT INTO operaciones (
                         agente_id, timestamp_entrada, par, accion,
-                        precio_entrada, capital_usado,
+                        precio_entrada, capital_usado, pips_sl,
                         senal_tecnico, senal_macro, decision_riesgo, estado,
                         sl_dinamico, precio_extremo_favorable
                     ) VALUES (
                         %s, %s, 'EUR/USD', %s,
-                        %s, %s, %s, %s, %s,
+                        %s, %s, %s, %s, %s, %s,
                         CASE WHEN %s = 'HOLD' THEN 'cancelada' ELSE 'abierta' END,
                         %s, %s
                     ) RETURNING id
@@ -169,6 +180,7 @@ class InvestorAgent:
                         decision.accion_final,
                         precio_entrada,
                         decision.capital_a_usar if decision.accion_final != "HOLD" else 0,
+                        pips_sl,
                         json.dumps(decision.senal_tecnico),
                         json.dumps(decision.senal_macro),
                         json.dumps({

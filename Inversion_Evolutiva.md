@@ -62,7 +62,7 @@ Los agentes **no son configurados manualmente**: nacen con parámetros aleatorio
 
 | Herramienta | Rol |
 |---|---|
-| **GitHub Actions** | Ejecución automática del monitor (cada 15 min) y del Juez (5pm Bogotá L-V) |
+| **GitHub Actions** | Ejecución automática del monitor (cada 15 min, 1:30 am–10:30 pm Bogotá) y del Juez (11:00 pm Bogotá L-V) |
 | **Streamlit Community Cloud** | Hosting del dashboard en `inversion-evolutiva.streamlit.app` |
 | **GitHub Secrets** | Almacenamiento seguro de todas las credenciales |
 
@@ -75,8 +75,8 @@ Los agentes **no son configurados manualmente**: nacen con parámetros aleatorio
 │                     GITHUB ACTIONS                              │
 │                                                                 │
 │  trade_monitor.yml          judge_daily.yml                     │
-│  Cada 15 min, L-V           5pm Bogotá (22:00 UTC), L-V        │
-│  2am–4pm Bogotá             ┌──────────────────────┐            │
+│  Cada 15 min, L-V           11:00 pm Bogotá (04:00 UTC), L-V    │
+│  1:30 am–10:30 pm Bogotá    ┌──────────────────────┐            │
 │  ┌──────────────────┐       │  Agente Juez         │            │
 │  │  TradeMonitor    │       │  - Evalúa fitness    │            │
 │  │  - Verifica SL/TP│       │  - Elimina bottom 5  │            │
@@ -329,7 +329,7 @@ timeout     = 30 seg
 ## 7. Monitor de trades — SL/TP y trailing stop
 
 **Archivo:** `cron/trade_monitor.py`
-**Ejecución:** Cada 15 minutos, lunes a viernes, de 7:00am a 9:00pm UTC (2:00am – 4:00pm Bogotá).
+**Ejecución:** Cada 15 minutos, lunes a viernes. El primer ciclo corre a las 1:30 am Bogotá (06:30 UTC) y el último a las 10:30 pm Bogotá (03:30 UTC del día siguiente UTC). La ventana de apertura de nuevas posiciones cubre todo ese rango (1:30 am – 11:00 pm Bogotá nominal). El monitor sigue vigilando SL/TP de posiciones abiertas durante todo el horario y se apaga 15 minutos antes del cierre forzoso del Juez.
 
 ### Ciclo de cada ejecución
 
@@ -348,7 +348,7 @@ Para cada agente:
   │                     - Actualizar Google Sheets
   │
   └── NO → Evaluar si abrir nueva posición:
-            1. ¿Estamos en horario de trading? (2am–3pm Bogotá)
+            1. ¿Estamos en horario de trading? (1:30 am – 11:00 pm Bogotá)
             2. ¿Cuarentena macro? (eventos críticos próximos)
             3. Ejecutar pipeline A → B → C
             4. Si decisión = BUY/SELL → INSERT en operaciones
@@ -365,14 +365,14 @@ El trailing stop protege ganancias sin limitar el potencial alcista:
 
 ### Cierre al final del día (EOD)
 
-El workflow `judge_daily.yml` ejecuta `trade_monitor --force-close-all` antes de que el Juez evalúe. Esto cierra todas las posiciones abiertas al precio de mercado actual para que el Juez evalúe con P&L definitivo del día.
+El workflow `judge_daily.yml` ejecuta `trade_monitor --force-close-all` a las **10:45 pm Bogotá (03:45 UTC)**, exactamente 15 minutos antes del Juez. Esto cierra todas las posiciones abiertas al precio de mercado actual para que el Juez evalúe con P&L definitivo del día. El gap de 15 minutos es un buffer de seguridad por si el cierre se reintenta o tarda.
 
 ---
 
 ## 8. Agente Juez — ciclo evolutivo diario
 
 **Archivo:** `agents/judge_agent.py` + `evolution/evolution_engine.py`
-**Ejecución:** 5:00pm hora Bogotá (22:00 UTC), lunes a viernes.
+**Ejecución:** 11:00 pm hora Bogotá (04:00 UTC del día siguiente), lunes a viernes. El cierre forzoso de posiciones se ejecuta a las 10:45 pm Bogotá (03:45 UTC) dentro del mismo workflow `judge_daily.yml`.
 
 ### Secuencia del ciclo evolutivo
 
@@ -382,47 +382,82 @@ El workflow `judge_daily.yml` ejecuta `trade_monitor --force-close-all` antes de
    fitness = ROI_total / (max_drawdown + 1)
    Penalidad: -0.5 si avg_ops_dia > 3 Y win_rate < 50%
 
-2. RANKING
-   ────────
+2. RANKING + FILTRO DE ELEGIBILIDAD (Periodo de Gracia Operativa)
+   ─────────────────────────────────────────────────────────────
    Ordenar 10 agentes por fitness DESC.
-   Desempate: fecha_nacimiento DESC, id DESC
-   (agentes más jóvenes sobreviven ante empate de fitness)
+   Desempate por juventud: fecha_nacimiento DESC, id DESC.
 
-3. ELIMINACIÓN
-   ────────────
-   Los 5 agentes con menor fitness → estado = 'eliminado'
+   Filtrar agentes INMUNES (no elegibles para eliminación esa tarde):
+     - operaciones_total == 0   (nunca ha cerrado una operación)
+     - AND edad < GRACE_PERIOD_DAYS días HÁBILES (lun-vie)
+   Los inmunes mantienen estado 'activo' automáticamente.
 
-4. REPRODUCCIÓN (5 nuevos agentes)
-   ─────────────────────────────────
+3. CUOTA DINÁMICA DE ELIMINACIÓN
+   ──────────────────────────────
+   Sobre los agentes ELEGIBLES (no inmunes):
+     - Se ordenan por (fitness ASC, fecha_nacimiento ASC, id ASC)
+       → los primeros candidatos son veteranos rezagados.
+     - Solo se eliminan agentes con fitness_score <= 0 (negativo o cero).
+     - n_eliminate = min(N_ELIMINATE=5, len(eliminables))
+
+   La cuota deja de ser rígida: NUNCA se elimina a un agente veterano con
+   fitness > 0 solo para cumplir con la cifra de 5 eliminaciones.
+
+4. ¿CICLO SUSPENDIDO?
+   ───────────────────
+   Si la cuota dinámica resulta = 0 (todos los elegibles son rentables o
+   todos los activos están en Periodo de Gracia):
+     - NO se elimina ningún agente
+     - NO se crean nuevos agentes
+     - NO se redistribuye capital (la población queda intacta)
+     - Se registra UN único log 'evaluacion_diaria' con
+       cycle_suspended=true y suspension_reason explícito
+     - NO se invoca al LLM (se ahorra gasto de tokens en días HOLD)
+     - El día siguiente la población joven puede acumular más datos
+
+   Si la cuota > 0, continúa con los pasos 5–9.
+
+5. FORZADO DE DIVERSIDAD GENÉTICA
+   ───────────────────────────────
+   Se calcula el coeficiente de variación (CV) promedio del ADN de los
+   supervivientes elegibles sobre claves técnicas, macro y SMC.
+   Si CV < DIVERSITY_VARIANCE_THRESHOLD (default 0.01 = 1%):
+     - sigma_weights, sigma_periods, sigma_risk se multiplican por
+       SIGMA_BOOST_FACTOR (default 2.0)
+     - Esto fuerza exploración agresiva y evita el estancamiento por clones.
+
+6. REPRODUCCIÓN (un hijo por cada eliminado)
+   ──────────────────────────────────────────
    Para cada cupo vacante:
-     a. Seleccionar 2 padres del pool de supervivientes
+     a. Seleccionar 2 padres del pool de supervivientes ELEGIBLES
         (probabilidad proporcional al ROI de cada padre)
      b. Crossover de los 4 bloques de genes
-     c. Mutación gaussiana sobre cada gen
+     c. Mutación gaussiana sobre cada gen (sigmas posiblemente boosteadas)
      d. Normalizar pesos y aplicar constraints
      e. INSERT en agentes (generacion = max_generacion_activa + 1)
 
-5. RAZONAMIENTO LLM
-   ──────────────────
+7. RAZONAMIENTO LLM (solo si el ciclo NO está suspendido)
+   ──────────────────────────────────────────────────────
    DeepSeek analiza los resultados y produce:
    - Por qué fallaron los eliminados (parámetros problemáticos)
    - Qué se espera de los nuevos agentes (herencia + mutación)
    - Insight sobre condiciones de mercado del día
    - Recomendaciones de parámetros para próximas generaciones
 
-6. PERSISTENCIA EN LOGS
+8. PERSISTENCIA EN LOGS
    ──────────────────────
-   logs_juez ← evaluacion_diaria (veredicto global)
+   logs_juez ← evaluacion_diaria (veredicto global con métricas nuevas)
    logs_juez ← eliminacion (uno por agente eliminado)
    logs_juez ← seleccion_padres (uno por agente nuevo)
    logs_juez ← nuevo_agente (uno por agente nuevo)
 
-7. REDISTRIBUCIÓN DE CAPITAL
+9. REDISTRIBUCIÓN DE CAPITAL
    ──────────────────────────
-   pool_total = SUM(capital_actual) de todos los activos
-   capital_por_agente = pool_total / 10
+   pool_total = SUM(capital_actual) de todos los activos antes del ciclo
+   capital_por_agente = pool_total / n_agentes_activos
    UPDATE agentes SET capital_actual = capital_por_agente WHERE estado = 'activo'
    → Todos arrancan el día siguiente con el mismo capital
+   (En ciclos suspendidos este paso se omite: el capital se preserva tal cual.)
 ```
 
 ### Cálculo del Calmar Ratio Proxy
@@ -438,6 +473,35 @@ drawdown = (peak - capital_acumulado) / peak
 -- Penalidad por overtrading sin resultados:
 IF avg_ops_dia > 3 AND win_rate < 50% THEN penalidad = 0.5
 ```
+
+### Periodo de Gracia Operativa (inmunidad)
+
+El Periodo de Gracia evita el "infanticidio algorítmico": en días con HOLD
+generalizado (cuarentena macro o condiciones de mercado adversas) los agentes
+recién nacidos pueden no operar y arrancar con fitness = 0. Sin protección,
+serían eliminados antes de tener oportunidad de demostrar su ADN.
+
+Un agente es **inmune** a la eliminación esa tarde si cumple ambas condiciones:
+1. `operaciones_total == 0` (no ha cerrado ninguna operación).
+2. Edad en **días hábiles** (lunes a viernes) < `GRACE_PERIOD_DAYS` (default 2).
+
+Como el mercado Forex institucional no opera sábado ni domingo, esos días no
+acumulan edad: un agente nacido un viernes evaluado el lunes tiene 1 día
+hábil de edad, no 3.
+
+### Suspensión del ciclo (cuota = 0)
+
+El sistema reconoce dos escenarios en los que la mejor decisión es **no hacer
+nada** esa tarde:
+
+- **Día de HOLD generalizado:** toda la población está bajo Periodo de Gracia
+  (no hay veteranos elegibles porque todos son novatos sin operaciones).
+- **Veteranos rentables protegidos:** los elegibles tienen todos fitness > 0,
+  no hay candidatos sanos a eliminar.
+
+En ambos casos el ciclo queda explícitamente registrado como suspendido en
+`logs_juez` con `cycle_suspended=true`, `cuota_aplicada=0` y un campo
+`suspension_reason` que documenta la causa para auditoría posterior.
 
 ---
 
@@ -488,6 +552,31 @@ Tras la mutación se aplican dos reglas de negocio:
 
 Los tres pesos del sub-agente A (`peso_rsi`, `peso_ema`, `peso_macd`) se normalizan para que sumen exactamente 1.0 tras la mutación.
 
+### Forzado de diversidad genética (sigma boost)
+
+Para evitar que la población converja a un clon único y el algoritmo se estanque, antes de generar los hijos el motor mide la diversidad del pool de padres.
+
+**Métrica:** coeficiente de variación (CV = desviación estándar / |media|) promediado sobre las claves numéricas representativas del ADN:
+
+- **Técnicas:** `rsi_periodo`, `ema_rapida`, `ema_lenta`, `peso_rsi`, `peso_ema`, `peso_macd`.
+- **Macro:** `peso_noticias_alto`, `umbral_sentimiento_compra`, `ventana_noticias_horas`, `peso_total_macro`.
+- **SMC:** `fvg_min_pips`, `risk_reward_target`, `macro_quarantine_minutes`, `peso_fvg`, `peso_ob`, `atr_factor`.
+
+**Comportamiento:**
+
+```
+cv = _compute_genetic_variance(supervivientes_elegibles)
+si cv < DIVERSITY_VARIANCE_THRESHOLD (default 0.01 = 1%):
+    sigma_weights *= SIGMA_BOOST_FACTOR (default 2.0)
+    sigma_periods *= SIGMA_BOOST_FACTOR
+    sigma_risk    *= SIGMA_BOOST_FACTOR
+    result.sigma_boost_applied = True
+```
+
+Esto significa que en ciclos donde la población se parece demasiado, los hijos nacen con mutaciones del orden del 10% en pesos y 16% en períodos (en vez del 5% y 8% habitual), forzando una exploración agresiva de nuevas fronteras estratégicas.
+
+El valor de `genetic_variance_cv` y el flag `sigma_boost_applied` quedan registrados en `logs_juez.datos_json` para cada ciclo, junto con las sigmas efectivamente utilizadas (`sigma_used`).
+
 ---
 
 ## 10. Creación y eliminación de agentes
@@ -520,19 +609,37 @@ INSERT INTO agentes (
 )
 ```
 
-### Eliminación
+### Eliminación con cuota dinámica
 
-Los 5 agentes con menor Calmar Ratio Proxy son eliminados cada tarde:
+La cuota de eliminación deja de ser rígida (5 agentes fijos por día). Cada tarde el motor calcula cuántos agentes salen, **con un máximo de N_ELIMINATE (default 5) y un mínimo de 0**, aplicando dos salvaguardas:
+
+**Salvaguarda 1 — Periodo de Gracia Operativa:** los agentes con `operaciones_total == 0` y edad < `GRACE_PERIOD_DAYS` días hábiles quedan inmunes esa tarde.
+
+**Salvaguarda 2 — Protección de fitness positivo:** solo son eliminables los agentes elegibles con `fitness_score <= 0` (negativo o cero). Un veterano rentable nunca se elimina solo para cumplir la cuota.
+
+**Orden de eliminación (desempate generalizado):** los candidatos elegibles se ordenan por `(fitness_score ASC, fecha_nacimiento ASC, id ASC)`. Eso significa que ante empate de fitness, los **veteranos rezagados** salen primero y los **agentes jóvenes** se preservan — un complemento simétrico al desempate del ranking de supervivencia.
+
+**Tres escenarios posibles cada tarde:**
+
+| Escenario | Eliminados | Nacimientos | Razón |
+|---|---|---|---|
+| Día normal con veteranos negativos | 1 a 5 | igual número | Bottom por fitness, hasta el tope dinámico |
+| Día de HOLD generalizado | 0 | 0 | Todos los activos están en Periodo de Gracia |
+| Veteranos rentables protegidos | 0 | 0 | Todos los elegibles tienen fitness > 0 |
+
+**SQL de la eliminación:**
 
 ```sql
 UPDATE agentes SET
     estado             = 'eliminado',
     fecha_eliminacion  = fecha_del_ciclo,
-    razon_eliminacion  = 'Selección natural: bottom 5 por fitness'
+    razon_eliminacion  = 'Selección natural YYYY-MM-DD: cuota dinámica = N
+                          (fitness <= 0). Desempate por veteranía
+                          (fecha_nacimiento ASC, id ASC). Inmunes en gracia: M.'
 WHERE id = ANY(eliminados)
 ```
 
-Sus registros permanecen en la tabla `agentes` para trazabilidad histórica; solo cambia `estado`.
+Sus registros permanecen en la tabla `agentes` para trazabilidad histórica; solo cambia `estado`. Cuando el ciclo queda suspendido (cuota = 0) no se ejecuta este UPDATE: la población completa continúa intacta al día siguiente.
 
 ---
 
@@ -547,16 +654,20 @@ Registro central de cada agente. Campos clave:
 | Campo | Tipo | Descripción |
 |---|---|---|
 | `id` | VARCHAR(20) PK | Identificador único YYYY-MM-DD_NN |
+| `fecha_nacimiento` | DATE | Fecha de creación del agente |
 | `generacion` | INTEGER | Número de generación evolutiva |
 | `padre_1_id` / `padre_2_id` | VARCHAR(20) FK | Árbol genealógico (NULL en Gen 1) |
 | `estado` | VARCHAR | `activo` / `eliminado` / `retirado` |
 | `params_tecnicos` | JSONB | Genes del sub-agente A |
 | `params_macro` | JSONB | Genes del sub-agente B |
 | `params_riesgo` | JSONB | Genes del sub-agente C |
-| `params_smc` | JSONB | Genes SMC + ATR |
+| `params_smc` | JSONB | Genes SMC + ATR (incluye `atr_period` desde migración 006) |
 | `capital_inicial` / `capital_actual` | DECIMAL | Capital en dólares |
 | `roi_total` | DECIMAL | ROI acumulado en porcentaje |
 | `operaciones_total` / `operaciones_ganadoras` | INTEGER | Estadísticas |
+| `fecha_eliminacion` | DATE | Fecha en que el Juez eliminó al agente (NULL si activo) |
+| `razon_eliminacion` | TEXT | Justificación de la eliminación (incluye fitness/cuota dinámica) |
+| `created_at` / `updated_at` | TIMESTAMPTZ | Auditoría temporal |
 
 ### `operaciones`
 
@@ -566,15 +677,20 @@ Log de cada señal BUY/SELL/HOLD. Una fila por ciclo de decisión.
 |---|---|---|
 | `id` | SERIAL PK | Identificador numérico auto-incremental |
 | `agente_id` | FK → agentes | Agente que generó la señal |
+| `timestamp_entrada` / `timestamp_salida` | TIMESTAMPTZ | Marcas de tiempo de apertura y cierre |
 | `accion` | VARCHAR | `BUY` / `SELL` / `HOLD` |
 | `precio_entrada` / `precio_salida` | DECIMAL | Precios reales de mercado |
+| `capital_usado` | DECIMAL | Capital virtual asignado a la operación (USD) |
+| `pips_sl` | DECIMAL(8,2) | Distancia del SL al precio de entrada en pips (poblada en INSERT desde Sesión 7) |
 | `pnl` | DECIMAL | Ganancia/pérdida en USD |
+| `pnl_porcentaje` | DECIMAL | Rendimiento porcentual respecto al capital_usado |
 | `estado` | VARCHAR | `abierta` / `cerrada` / `cancelada` |
 | `senal_tecnico` | JSONB | Output completo del sub-agente A |
 | `senal_macro` | JSONB | Output completo del sub-agente B |
 | `decision_riesgo` | JSONB | Output completo del sub-agente C (SL, TP, razonamiento) |
 | `sl_dinamico` | DECIMAL | SL actual (actualizado por trailing stop) |
 | `precio_extremo_favorable` | DECIMAL | Precio más favorable alcanzado (para trailing) |
+| `created_at` | TIMESTAMPTZ | Marca de creación del registro |
 
 ### `logs_juez`
 
@@ -582,10 +698,32 @@ Audit trail completo del Agente Juez.
 
 | Tipo de evento | Descripción |
 |---|---|
-| `evaluacion_diaria` | Veredicto global del ciclo: supervivientes, eliminados, capital |
+| `evaluacion_diaria` | Veredicto global del ciclo: supervivientes, eliminados, inmunes, suspensión, sigmas usadas, capital |
 | `eliminacion` | Un registro por agente eliminado con fitness y razonamiento LLM |
 | `seleccion_padres` | Qué padres se eligieron para cada nuevo agente |
 | `nuevo_agente` | Genes del nuevo agente y expectativas del LLM |
+
+**Campos del `datos_json` en `evaluacion_diaria`** (estructura JSONB):
+
+| Campo | Tipo | Descripción |
+|---|---|---|
+| `survivors` | array | IDs de agentes que sobrevivieron (incluye inmunes y supervivientes elegibles) |
+| `eliminated` | array | IDs eliminados esta tarde (vacío si el ciclo está suspendido) |
+| `new_agents` | array | IDs de los hijos creados (vacío si el ciclo está suspendido) |
+| `immune_agents` | array | IDs protegidos por Periodo de Gracia |
+| `eligible_veterans` | array | IDs evaluables esta tarde (no inmunes) |
+| `cycle_suspended` | bool | `true` cuando la cuota dinámica = 0 |
+| `suspension_reason` | string | Justificación técnica si está suspendido |
+| `cuota_aplicada` | int | Número final de eliminados (0 si suspendido) |
+| `genetic_variance_cv` | float | Coeficiente de variación del ADN de los supervivientes |
+| `sigma_boost_applied` | bool | `true` si se duplicaron las sigmas por baja diversidad |
+| `sigma_used` | object | `{weights, periods, risk}` efectivamente aplicadas |
+| `capital_pool_total` | float | Pool total en USD |
+| `capital_por_agente` | float | Cuota individual tras redistribución |
+| `insight_mercado` | string | Comentario del LLM (vacío en días suspendidos) |
+| `recomendacion_parametros` | string | Sugerencias del LLM para próximas generaciones |
+
+Estos campos permiten al Dashboard Streamlit (y a cualquier consulta SQL ad-hoc en Neon) reconstruir con total trazabilidad qué pasó cada día y por qué.
 
 ### `ranking_historico`
 
@@ -662,8 +800,17 @@ El dashboard es **solo lectura**: no tiene capacidad de enviar órdenes ni modif
 ### `trade_monitor.yml` — Monitor intraday
 
 ```
-Schedule: */15 7-21 * * 1-5
-          Cada 15 minutos, L-V, 7am–9pm UTC (2am–4pm Bogotá)
+Schedule (cuatro entradas combinadas; cron en UTC, días L-V Bogotá):
+  - "30,45 6 * * 1-5"       → 1:30 am y 1:45 am Bogotá (06:30, 06:45 UTC)
+  - "*/15 7-23 * * 1-5"     → 2:00 am – 6:45 pm Bogotá (07:00 – 23:45 UTC)
+  - "*/15 0-2 * * 2-6"      → 7:00 pm – 9:45 pm Bogotá del día anterior
+                              (00:00 – 02:45 UTC del día siguiente)
+  - "0,15,30 3 * * 2-6"     → 10:00 pm, 10:15 pm, 10:30 pm Bogotá (último ciclo)
+                              (03:00, 03:15, 03:30 UTC del día siguiente)
+
+Cobertura efectiva: cada 15 minutos de lunes a viernes Bogotá, desde 1:30 am
+hasta 10:30 pm Bogotá. El último monitor cierra a las 03:30 UTC para no
+chocar con el cierre forzoso del Juez (03:45 UTC).
 
 Pasos:
   1. Checkout del repo
@@ -676,26 +823,34 @@ En caso de fallo: crea un GitHub Issue con alerta (evita duplicados)
 
 **Secrets requeridos:** `DATABASE_URL`, `DEEPSEEK_API_KEY`, `FINNHUB_API_KEY`, `ALPHA_VANTAGE_API_KEY`, `GOOGLE_SHEET_ID`, `GOOGLE_CREDENTIALS_JSON`
 
+**Env vars de horario:** `TRADING_START_TIME_UTC=06:30`, `TRADING_CUTOFF_TIME_UTC=04:00` (la ventana cruza la medianoche UTC; el código lo gestiona explícitamente).
+
 ### `judge_daily.yml` — Ciclo evolutivo diario
 
 ```
-Schedule: 0 22 * * 1-5
-          5:00pm Bogotá (22:00 UTC), lunes a viernes
+Schedule: "45 3 * * 2-6"
+          10:45 pm Bogotá L-V (03:45 UTC del día siguiente).
 
-Pasos:
+Pasos (todos en un solo job):
   1. Checkout + Python 3.11
-  2. Health check de la DB
-  3. Cierre EOD: python -m cron.trade_monitor --force-close-all
-  4. Ciclo evolutivo: python -m cron.judge_scheduler --run-now
+  2. Cierre EOD a las 10:45 pm Bogotá:
+        python -m cron.trade_monitor --force-close-all
+  3. sleep 900 (15 minutos) hasta las 11:00 pm Bogotá.
+  4. Health check de la DB
+  5. Ciclo evolutivo a las 11:00 pm Bogotá:
+        python -m cron.judge_scheduler --run-now
 
 Disparo manual: workflow_dispatch con opción dry_run=true (solo health check)
 
 Parámetros de evolución (env vars):
-  AGENTS_ELIMINATE_PER_CYCLE = 5
-  MUTATION_SIGMA_WEIGHTS     = 0.05
-  MUTATION_SIGMA_PERIODS     = 0.08
-  MUTATION_SIGMA_RISK        = 0.10
-  MIN_ROI_FOR_HALL_OF_FAME   = 0.05
+  AGENTS_ELIMINATE_PER_CYCLE   = 5
+  MUTATION_SIGMA_WEIGHTS       = 0.05
+  MUTATION_SIGMA_PERIODS       = 0.08
+  MUTATION_SIGMA_RISK          = 0.10
+  MIN_ROI_FOR_HALL_OF_FAME     = 0.05
+  GRACE_PERIOD_DAYS            = 2       # Inmunidad en días HÁBILES
+  DIVERSITY_VARIANCE_THRESHOLD = 0.01    # CV mínimo del ADN antes del boost
+  SIGMA_BOOST_FACTOR           = 2.0     # Multiplicador de σ en baja diversidad
 
 En caso de fallo: crea GitHub Issue con alerta
 ```
@@ -721,12 +876,17 @@ Todas las variables se definen en `.env` local (desarrollo) o en **GitHub Secret
 | `DEEPSEEK_BASE_URL` | Base URL del API (default: `https://api.deepseek.com`) |
 | `DEEPSEEK_MODEL` | Modelo a usar (default: `deepseek-chat`) |
 | `JUDGE_TIMEZONE` | Zona horaria del Juez (default: `America/Bogota`) |
-| `JUDGE_RUN_TIME` | Hora de ejecución del Juez (default: `17:00`) |
+| `JUDGE_RUN_TIME` | Hora de ejecución del Juez en zona local (default: `23:00`) |
+| `TRADING_START_TIME_UTC` | Hora UTC desde la que se permite abrir posiciones, formato HH:MM (default: `06:30` = 1:30 am Bogotá) |
+| `TRADING_CUTOFF_TIME_UTC` | Hora UTC límite para abrir posiciones, formato HH:MM (default: `04:00` = 11:00 pm Bogotá; ventana cruza la medianoche UTC) |
 | `AGENTS_ELIMINATE_PER_CYCLE` | Agentes eliminados por ciclo (default: `5`) |
 | `MUTATION_SIGMA_WEIGHTS` | Sigma de mutación para pesos (default: `0.05`) |
 | `MUTATION_SIGMA_PERIODS` | Sigma de mutación para períodos (default: `0.08`) |
 | `MUTATION_SIGMA_RISK` | Sigma de mutación para riesgo/SMC (default: `0.10`) |
 | `MIN_ROI_FOR_HALL_OF_FAME` | ROI mínimo para entrar al Hall of Fame (default: `0.05`) |
+| `GRACE_PERIOD_DAYS` | Días HÁBILES (lun-vie) de inmunidad para agentes recién nacidos sin operaciones (default: `2`) |
+| `DIVERSITY_VARIANCE_THRESHOLD` | Coeficiente de variación mínimo del ADN antes de activar el sigma boost. Subir a `0.05` para criterio más estricto (default: `0.01`) |
+| `SIGMA_BOOST_FACTOR` | Multiplicador aplicado a las sigmas cuando la diversidad cae bajo el umbral (default: `2.0`) |
 | `LOG_LEVEL` | Nivel de logs (default: `INFO`) |
 | `ENVIRONMENT` | Ambiente (`production` / `development`) |
 
@@ -737,27 +897,48 @@ Todas las variables se definen en `.env` local (desarrollo) o en **GitHub Secret
 ### Lunes a viernes — horario Bogotá
 
 ```
-2:00am  ─── GitHub Actions despierta trade_monitor
-            ├── Verifica SL/TP de posiciones abiertas
-            └── Evalúa nuevos trades para agentes libres
+1:30am   ─── GitHub Actions despierta trade_monitor (primer ciclo del día)
+             ├── Verifica SL/TP de posiciones abiertas
+             └── Evalúa nuevos trades para agentes libres
 
-Cada 15 min hasta las 3:00pm:
-            ├── Ciclo SL/TP + trailing stop por agente
-            ├── Si agente libre → pipeline A→B→C → posible nuevo trade
-            └── Registro en DB y Google Sheets
+Cada 15 min de 1:30am a 10:30pm:
+             ├── Ciclo SL/TP + trailing stop por agente
+             ├── Si agente libre y dentro de la ventana de apertura
+             │   (1:30am – 11:00pm) → pipeline A→B→C → posible nuevo trade
+             └── Registro en DB y Google Sheets
 
-4:55pm  ─── Último monitor antes del cierre
+10:30pm  ─── Último monitor antes del cierre
 
-5:00pm  ─── GitHub Actions despierta judge_daily:
-            1. Cierre forzado de todas las posiciones abiertas (EOD)
-            2. Evaluación de fitness: Calmar Ratio Proxy para 10 agentes
-            3. Eliminación de los 5 con menor fitness
-            4. Reproducción: 5 nuevos agentes (crossover + mutación)
-            5. Razonamiento LLM: veredicto y expectativas
-            6. Registro en logs_juez
-            7. Redistribución de capital: pool ÷ 10
+10:45pm  ─── GitHub Actions despierta judge_daily (paso 1):
+             Cierre forzado de TODAS las posiciones abiertas al precio de
+             mercado (force-close-all). Buffer de 15 min hasta el Juez.
 
-5:10pm  ─── Sistema queda en reposo hasta el día siguiente
+11:00pm  ─── judge_daily continúa (paso 2):
+             1. Evaluación de fitness: Calmar Ratio Proxy para 10 agentes
+             2. Filtro de Periodo de Gracia: separar inmunes de elegibles
+             3. Cuota dinámica: identificar elegibles con fitness <= 0
+
+             ╔══════════════════════════════════════════════════════╗
+             ║  ¿Cuota = 0?                                         ║
+             ╠══════════════════════════════════════════════════════╣
+             ║  SÍ → CICLO SUSPENDIDO                               ║
+             ║      - No se elimina, no se reproduce, no se         ║
+             ║        redistribuye capital.                         ║
+             ║      - Log único 'evaluacion_diaria' con             ║
+             ║        cycle_suspended=true.                         ║
+             ║      - No se invoca al LLM (ahorro de tokens).       ║
+             ║                                                      ║
+             ║  NO → CICLO ACTIVO                                   ║
+             ║      4. Forzado de diversidad: si CV bajo,           ║
+             ║         duplica las sigmas de mutación.              ║
+             ║      5. Eliminar N agentes (1 a 5, fitness<=0).      ║
+             ║      6. Reproducir N hijos (crossover + mutación).   ║
+             ║      7. Razonamiento LLM: veredicto y expectativas.  ║
+             ║      8. Registro detallado en logs_juez.             ║
+             ║      9. Redistribución de capital: pool ÷ activos.   ║
+             ╚══════════════════════════════════════════════════════╝
+
+11:05pm  ─── Sistema queda en reposo hasta el día siguiente (1:30am)
 ```
 
 ### Fines de semana
@@ -772,4 +953,22 @@ El usuario puede disparar manualmente cualquier workflow desde GitHub Actions:
 
 ---
 
-*Documento generado el 2026-05-10. Refleja el estado del sistema en Generación 1 del nuevo run iniciado el 2026-05-11.*
+*Documento actualizado el 2026-05-18 (Sesión 7 — reestructuración nocturna). Refleja el estado del sistema con Periodo de Gracia Operativa, Cuota Dinámica de Eliminación y Forzado de Diversidad Genética activos en producción, además del nuevo horario de operación 1:30 am – 11:00 pm Bogotá con cierre EOD a las 10:45 pm y ciclo evolutivo del Juez a las 11:00 pm.*
+
+## Historial de cambios mayores
+
+- **2026-05-18 (Sesión 7 — reestructuración nocturna):**
+  - **Horarios reasignados:**
+    - Ventana de apertura de nuevas posiciones: 1:30 am – 11:00 pm Bogotá (06:30 UTC – 04:00 UTC del día siguiente). La ventana ahora cruza la medianoche UTC; `_within_trading_hours()` lo maneja explícitamente.
+    - Monitor SL/TP / trailing: cada 15 minutos de 1:30 am a 10:30 pm Bogotá (último ciclo). `trade_monitor.yml` ahora declara 4 entradas de cron coordinadas para cubrir el rango sin choques con el Juez.
+    - Cierre forzoso EOD: 10:45 pm Bogotá (03:45 UTC).
+    - Ciclo evolutivo del Juez: 11:00 pm Bogotá (04:00 UTC del día siguiente).
+    - `judge_daily.yml` se dispara a las 03:45 UTC y ejecuta `force-close-all` → `sleep 900` → ciclo evolutivo en un único job para garantizar la separación de 15 minutos.
+  - **Nuevas env vars de horario:** `TRADING_START_TIME_UTC` y `TRADING_CUTOFF_TIME_UTC` reemplazan a las antiguas `TRADING_START_UTC` / `TRADING_CUTOFF_UTC` (que solo aceptaban horas enteras). Formato HH:MM. Defaults: `06:30` y `04:00`.
+  - **Limpieza de OANDA:** la migración `002_oanda_integration.sql` queda deprecada (no-op) y la nueva migración `005_cleanup_oanda_columns.sql` elimina las columnas `oanda_trade_id`, `oanda_units`, `oanda_realized_pl` y su índice. El aplicativo nunca usó esa integración: el broker siempre fue simulado.
+  - **`atr_period` retroactivo:** la migración `006_atr_period_backfill.sql` aplica `atr_period: 14` a TODOS los agentes existentes que no lo tenían en `params_smc`. La migración `003_smc_schema.sql` también incluye `atr_period: 14` en el default JSONB para nuevas instancias limpias.
+  - **`pips_sl` poblado:** `agents/investor_agent._persist_operation` ahora calcula e inserta `pips_sl = abs(precio_entrada - stop_loss) * 10_000` para operaciones BUY/SELL. Las HOLD lo dejan NULL.
+  - **Documentación de tabla `agentes` y `operaciones`** completada: ahora incluye `fecha_eliminacion`, `razon_eliminacion`, `pips_sl`, `pnl_porcentaje`, `created_at` y `updated_at`.
+- **2026-05-18 (Sesión 7 — hotfix vespertino):** Corregido bug introducido en el snapshot de `ranking_historico`: el motor escribía `evento = 'supervivencia_gracia'`, valor que violaba el CHECK constraint del schema (solo admite `'supervivencia', 'eliminacion', 'nacimiento', 'evaluacion'`). Se uniformó a `'supervivencia'` para todos los supervivientes (tanto los protegidos por fitness > 0 como los inmunes en Periodo de Gracia). La distinción entre supervivencia normal e inmunidad por gracia se conserva en `logs_juez.datos_json.immune_agents` y `cycle_suspended`, así que no se pierde trazabilidad.
+- **2026-05-18 (Sesión 7):** Implementación de Periodo de Gracia Operativa, Cuota Dinámica de Eliminación, Regla de Desempate Generalizado y Forzado de Diversidad Genética. Suspensión automática del ciclo en días de HOLD generalizado para preservar agentes jóvenes y veteranos rentables. Nuevas env vars: `GRACE_PERIOD_DAYS`, `DIVERSITY_VARIANCE_THRESHOLD`, `SIGMA_BOOST_FACTOR`. Logging extendido en `logs_juez.datos_json` con `cycle_suspended`, `immune_agents`, `eligible_veterans`, `cuota_aplicada`, `genetic_variance_cv`, `sigma_boost_applied`, `sigma_used`. Omisión de invocación al LLM en ciclos suspendidos.
+- **2026-05-10:** Documento inicial. Refleja el estado del sistema en Generación 1 del nuevo run iniciado el 2026-05-11.

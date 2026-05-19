@@ -1,8 +1,35 @@
 name: "Monitor de Trades (SL/TP + Nuevas Posiciones)"
 
+# ─────────────────────────────────────────────────────────────────────────
+# Horarios (Bogotá UTC-5 / cron en UTC):
+#   - Apertura de nuevas posiciones: 1:30 am – 11:00 pm Bogotá
+#                                     (06:30 UTC – 04:00 UTC siguiente día)
+#   - Vigilancia de SL/TP / trailing: cada 15 min desde 1:30 am hasta 10:30 pm
+#     Bogotá (último monitor antes del cierre forzoso del Juez a las 10:45 pm).
+#   - En la práctica el último monitor con poder de abrir corre a las 10:30 pm
+#     Bogotá; entre 10:30 pm y 11:00 pm el monitor no se vuelve a disparar y
+#     a las 10:45 pm el cierre forzoso del Juez liquida todo lo abierto.
+#
+# El cron en UTC necesita cubrir un rango que cruza la medianoche UTC:
+#   Día Bogotá: Lun  1:30am – Lun 10:30pm
+#   Día UTC:    Lun  06:30  – Mar 03:30   (siguiente día UTC)
+#
+# Por eso se usan cuatro entradas de cron coordinadas (Mon-Fri Bogotá):
+#   06:30 y 06:45 UTC  → 1:30 am y 1:45 am Bogotá (mismo día)
+#   07:00 – 23:45 UTC  → 2:00 am – 6:45 pm Bogotá (mismo día)
+#   00:00 – 02:45 UTC  → 7:00 pm – 9:45 pm Bogotá (día anterior)
+#   03:00, 03:15, 03:30 UTC → 10:00 pm, 10:15 pm, 10:30 pm Bogotá (día anterior)
+#
+# El último monitor cierra a las 03:30 UTC para no chocar con el cierre
+# forzoso del Juez programado a las 03:45 UTC (judge_daily.yml).
+# ─────────────────────────────────────────────────────────────────────────
+
 "on":
   schedule:
-    - cron: "*/15 7-21 * * 1-5"   # cada 15 min, lunes-viernes, 7am-9pm UTC (2am-4pm Bogotá)
+    - cron: "30,45 6 * * 1-5"      # 1:30 am y 1:45 am Bogotá (Mon-Fri Bogotá)
+    - cron: "*/15 7-23 * * 1-5"    # 2:00 am – 6:45 pm Bogotá (Mon-Fri Bogotá)
+    - cron: "*/15 0-2 * * 2-6"     # 7:00 pm – 9:45 pm Bogotá (Mon-Fri Bogotá)
+    - cron: "0,15,30 3 * * 2-6"    # 10:00 pm, 10:15 pm, 10:30 pm Bogotá (Mon-Fri Bogotá)
   workflow_dispatch: {}             # disparo manual para pruebas
 
 jobs:
@@ -20,6 +47,11 @@ jobs:
       ALPHA_VANTAGE_API_KEY:    ${{ secrets.ALPHA_VANTAGE_API_KEY }}
       GOOGLE_SHEET_ID:          ${{ secrets.GOOGLE_SHEET_ID }}
       GOOGLE_CREDENTIALS_JSON:  ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
+      # Horario de apertura (UTC, formato HH:MM)
+      # 06:30 UTC – 04:00 UTC (siguiente día UTC) = 1:30 am – 11:00 pm Bogotá.
+      # La ventana cruza la medianoche UTC; _within_trading_hours() lo maneja.
+      TRADING_START_TIME_UTC:   "06:30"
+      TRADING_CUTOFF_TIME_UTC:  "04:00"
       LOG_LEVEL:                "INFO"
       ENVIRONMENT:              "production"
 

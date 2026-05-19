@@ -1,8 +1,22 @@
 name: "Agente Juez - Ciclo Evolutivo Diario"
 
+# ─────────────────────────────────────────────────────────────────────────
+# Horario (Bogotá UTC-5 / cron en UTC):
+#   - Cierre forzoso EOD (force-close-all): 10:45 pm Bogotá = 03:45 UTC
+#   - Ciclo evolutivo del Juez:             11:00 pm Bogotá = 04:00 UTC
+#
+# El workflow se dispara a las 03:45 UTC (10:45 pm Bogotá). Primero ejecuta
+# el cierre forzoso, luego espera 15 minutos para que el Juez arranque
+# exactamente a las 04:00 UTC (11:00 pm Bogotá) — esto deja un buffer de
+# seguridad por si el cierre forzoso tarda o se reintenta.
+#
+# El día UTC corresponde al día siguiente de Bogotá: el cron 03:45 UTC
+# Martes-Sábado equivale a 10:45 pm Lunes-Viernes Bogotá.
+# ─────────────────────────────────────────────────────────────────────────
+
 "on":
   schedule:
-    - cron: "0 22 * * 1-5"
+    - cron: "45 3 * * 2-6"   # 10:45 pm Bogotá (Mon-Fri Bogotá → Tue-Sat UTC)
   workflow_dispatch:
     inputs:
       dry_run:
@@ -16,7 +30,7 @@ jobs:
   ciclo-evolutivo:
     name: "Ejecutar ciclo evolutivo"
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 25
     permissions:
       issues: write
 
@@ -28,7 +42,7 @@ jobs:
       GOOGLE_SHEET_ID:             ${{ secrets.GOOGLE_SHEET_ID }}
       GOOGLE_CREDENTIALS_JSON:     ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
       JUDGE_TIMEZONE:              "America/Bogota"
-      JUDGE_RUN_TIME:              "17:00"
+      JUDGE_RUN_TIME:              "23:00"
       AGENTS_ELIMINATE_PER_CYCLE:  "5"
       MUTATION_SIGMA_WEIGHTS:      "0.05"
       MUTATION_SIGMA_PERIODS:      "0.08"
@@ -57,6 +71,19 @@ jobs:
       - name: "Instalar dependencias"
         run: pip install -r requirements.txt
 
+      - name: "Cierre intraday EOD - cerrar todas las posiciones abiertas (10:45 pm Bogotá)"
+        if: ${{ github.event.inputs.dry_run != 'true' }}
+        run: |
+          echo "[$(date -u +'%H:%M UTC')] Cerrando posiciones abiertas antes de la evaluacion del Juez..."
+          python -m cron.trade_monitor --force-close-all
+
+      - name: "Espera 15 minutos hasta las 11:00 pm Bogotá"
+        if: ${{ github.event.inputs.dry_run != 'true' }}
+        run: |
+          echo "[$(date -u +'%H:%M UTC')] Esperando 15 minutos para que el Juez arranque a las 04:00 UTC (11:00 pm Bogotá)..."
+          sleep 900
+          echo "[$(date -u +'%H:%M UTC')] Espera completada."
+
       - name: "Health check de la base de datos"
         run: |
           python -c "
@@ -65,12 +92,6 @@ jobs:
           print('DB health check:', 'PASS' if ok else 'FAIL')
           exit(0 if ok else 1)
           "
-
-      - name: "Cierre intraday EOD - cerrar todas las posiciones abiertas"
-        if: ${{ github.event.inputs.dry_run != 'true' }}
-        run: |
-          echo "Cerrando posiciones abiertas antes de la evaluacion del Juez..."
-          python -m cron.trade_monitor --force-close-all
 
       - name: "Ejecutar ciclo evolutivo (Agente Juez)"
         if: ${{ github.event.inputs.dry_run != 'true' }}

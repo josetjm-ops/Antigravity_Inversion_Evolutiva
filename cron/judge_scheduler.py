@@ -3,9 +3,15 @@ Scheduler del Agente Juez.
 
 Modos de operación:
   1. Demonio (--daemon): Corre indefinidamente con APScheduler.
-     Dispara el ciclo evolutivo diariamente a las 17:00 (America/Bogota = UTC-5).
+     Dispara el ciclo evolutivo diariamente a las 23:00 (America/Bogota = UTC-5).
+     Esto equivale a las 04:00 UTC del día siguiente.
   2. One-shot (--run-now): Ejecuta el ciclo inmediatamente y termina.
      Usado por GitHub Actions y pruebas manuales.
+
+Nota sobre EOD:
+  El cierre forzoso de posiciones (force-close-all) se ejecuta a las
+  22:45 Bogotá (03:45 UTC), 15 minutos antes del Juez, para garantizar
+  que el ciclo evalúe con P&L definitivo del día.
 
 Uso:
   python -m cron.judge_scheduler --run-now
@@ -67,7 +73,7 @@ def run_judge_cycle() -> dict:
 def start_daemon() -> None:
     """
     Inicia el scheduler APScheduler en modo bloqueante.
-    Dispara run_judge_cycle() todos los días a las 17:00 America/Bogota.
+    Dispara run_judge_cycle() todos los días a las 23:00 America/Bogota.
     """
     try:
         from apscheduler.schedulers.blocking import BlockingScheduler
@@ -77,7 +83,7 @@ def start_daemon() -> None:
         sys.exit(1)
 
     tz = os.getenv("JUDGE_TIMEZONE", "America/Bogota")
-    run_time = os.getenv("JUDGE_RUN_TIME", "17:00")
+    run_time = os.getenv("JUDGE_RUN_TIME", "23:00")
     hour, minute = run_time.split(":")
 
     scheduler = BlockingScheduler(timezone=tz)
@@ -118,7 +124,7 @@ def main() -> None:
     group.add_argument(
         "--daemon",
         action="store_true",
-        help="Corre como demonio con APScheduler (17:00 Bogotá diario).",
+        help="Corre como demonio con APScheduler (23:00 Bogotá diario).",
     )
     group.add_argument(
         "--next-run",
@@ -139,7 +145,7 @@ def main() -> None:
 
     elif args.next_run:
         tz = os.getenv("JUDGE_TIMEZONE", "America/Bogota")
-        run_time = os.getenv("JUDGE_RUN_TIME", "17:00")
+        run_time = os.getenv("JUDGE_RUN_TIME", "23:00")
         print(f"Próxima ejecución: {run_time} {tz} (diario)")
         sys.exit(0)
 

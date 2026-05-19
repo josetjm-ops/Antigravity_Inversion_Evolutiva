@@ -1,27 +1,23 @@
 -- ============================================================
--- INVERSIÓN EVOLUTIVA — Migración 002
--- Integración OANDA: columnas de ejecución en tabla operaciones
+-- INVERSIÓN EVOLUTIVA — Migración 002 (DEPRECADA)
+-- ============================================================
+--
+-- ⚠️  Esta migración ha sido DEPRECADA y reemplazada por
+--     005_cleanup_oanda_columns.sql.
+--
+-- Originalmente añadía columnas para integración con OANDA, pero
+-- el aplicativo nunca usó esa integración: el broker es simulado
+-- (Yahoo Finance) y todas las operaciones son virtuales.
+--
+-- Si una base de datos existente ya tiene las columnas creadas
+-- por esta migración, la migración 005 las elimina de forma
+-- idempotente.
+--
+-- Este archivo se mantiene solo como marcador de número de
+-- migración para no romper el conteo cronológico.
 -- ============================================================
 
 BEGIN;
-
-ALTER TABLE operaciones
-    ADD COLUMN IF NOT EXISTS oanda_trade_id    VARCHAR(50),
-    ADD COLUMN IF NOT EXISTS oanda_units       INTEGER,
-    ADD COLUMN IF NOT EXISTS oanda_realized_pl DECIMAL(10, 4);
-
--- Índice para que el monitor localice rápido las ops abiertas con trade OANDA
-CREATE INDEX IF NOT EXISTS idx_operaciones_oanda_trade
-    ON operaciones (oanda_trade_id)
-    WHERE oanda_trade_id IS NOT NULL;
-
-COMMENT ON COLUMN operaciones.oanda_trade_id
-    IS 'ID del trade en OANDA. NULL si la acción fue HOLD o la orden falló.';
-
-COMMENT ON COLUMN operaciones.oanda_units
-    IS 'Unidades EUR negociadas en OANDA (positivo=BUY, negativo=SELL).';
-
-COMMENT ON COLUMN operaciones.oanda_realized_pl
-    IS 'P&L realizado en USD según OANDA al cierre del trade.';
-
+-- No-op: ver 005_cleanup_oanda_columns.sql para la limpieza efectiva.
+SELECT 1;
 COMMIT;

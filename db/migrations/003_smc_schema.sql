@@ -22,7 +22,8 @@ ADD COLUMN IF NOT EXISTS params_smc JSONB NOT NULL DEFAULT '{
     "macro_quarantine_minutes": 60,
     "risk_pct_per_trade": 0.015,
     "peso_fvg": 0.15,
-    "peso_ob": 0.15
+    "peso_ob": 0.15,
+    "atr_period": 14
 }';
 
 -- ------------------------------------------------------------

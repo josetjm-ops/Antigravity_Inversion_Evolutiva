@@ -562,7 +562,7 @@ def _tab_judge(df_logs: pd.DataFrame) -> None:
           <b style="color:{AMBER};">Sin registros del Agente Juez</b><br><br>
           El ciclo evolutivo aún no ha sido ejecutado. Actívalo con:<br>
           <code style="font-size:12px;">python -m cron.judge_scheduler --run-now</code><br><br>
-          En producción, GitHub Actions lo ejecuta automáticamente cada día a las 17:00 Bogotá.
+          En producción, GitHub Actions lo ejecuta automáticamente cada día a las 23:00 Bogotá.
         </div>
         """, unsafe_allow_html=True)
         return
@@ -644,7 +644,7 @@ def _tab_operations(df_ops: pd.DataFrame) -> None:
           <b style="color:{AMBER};">Sin operaciones registradas aun</b><br><br>
           Las APIs estan configuradas correctamente. Las operaciones apareceran
           aqui automaticamente cuando el Agente Juez ejecute el primer ciclo
-          completo de trading (proximo dia habil a las 17:00 Bogota).
+          completo de trading (proximo dia habil a las 23:00 Bogota).
         </div>
         """, unsafe_allow_html=True)
         return
@@ -1038,7 +1038,7 @@ def _tab_instructions() -> None:
           El sistema arrancó con <b>$100 USD virtuales</b> divididos en partes iguales:
           <b>$10 por agente</b>. A partir del primer día, ese pool fluctúa únicamente por
           las ganancias y pérdidas reales de trading — no se inyecta ni retira capital externo.<br><br>
-          Al cierre de cada jornada (<b>5:00 pm Bogotá, lunes a viernes</b>), tras el ciclo
+          Al cierre de cada jornada (<b>11:00 pm Bogotá, lunes a viernes</b>), tras el ciclo
           evolutivo, el sistema suma el <code>capital_actual</code> de los 10 agentes activos
           resultantes y lo divide en partes iguales. <b>Todos los agentes inician el día
           siguiente con exactamente el mismo capital</b>, independientemente de si ganaron,
@@ -1055,7 +1055,7 @@ def _tab_instructions() -> None:
       <div class="ins-title">2 · Cómo toma decisiones un agente — Pipeline A → B → C</div>
       <div class="ins-card ins-card-left-emerald">
         <div class="ins-body" style="margin-bottom:14px;">
-          Dentro del horario de trading (<b>2:00 am – 3:00 pm Bogotá</b>), cada agente
+          Dentro del horario de trading (<b>1:30 am – 11:00 pm Bogotá</b>), cada agente
           sin posición abierta ejecuta el pipeline de tres sub-agentes en serie.
           Los indicadores técnicos (RSI, EMA, MACD) se calculan <b>en el momento exacto
           de cada evaluación</b> con los precios más recientes de Yahoo Finance —
@@ -1135,8 +1135,8 @@ def _tab_instructions() -> None:
       <div class="ins-title">4 · Monitor cada 15 minutos — SL/TP + Nuevas posiciones intraday</div>
       <div class="ins-card ins-card-left-dim">
         <div class="ins-body">
-          El <b>Trade Monitor</b> corre cada 15 minutos dentro del horario 2:00 am–3:00 pm
-          Bogotá y realiza <b>dos tareas en cada ciclo</b>:<br><br>
+          El <b>Trade Monitor</b> corre cada 15 minutos dentro del horario 1:30 am–10:30 pm
+          Bogotá (último ciclo) y realiza <b>dos tareas en cada ciclo</b>:<br><br>
           <b>① Trailing Stop + Verificación SL/TP</b><br>
           Obtiene el precio actual de EUR/USD (Yahoo Finance) y primero actualiza el
           <b>trailing stop</b> de cada posición abierta: si el profit supera el gen
@@ -1146,7 +1146,7 @@ def _tab_instructions() -> None:
           tocó el Stop Loss o Take Profit:<br>
           &nbsp;• <b style="color:{EMERALD};">✓ Take Profit alcanzado</b> — se cierra con ganancia al precio exacto del TP.<br>
           &nbsp;• <b style="color:{RED};">✗ Stop Loss alcanzado</b> — se cierra con pérdida controlada al precio del SL (puede ser el SL dinámico movido por trailing).<br>
-          &nbsp;• <b style="color:{DIM};">◎ Cierre EOD (5:00 pm Bogotá)</b> — posiciones aún abiertas se cierran obligatoriamente al precio de mercado antes de la evaluación del Juez.<br><br>
+          &nbsp;• <b style="color:{DIM};">◎ Cierre EOD (10:45 pm Bogotá)</b> — posiciones aún abiertas se cierran obligatoriamente al precio de mercado 15 minutos antes de la evaluación del Juez.<br><br>
           <b>② Evaluación de nuevas posiciones</b><br>
           Para cada agente que quedó libre (sin posición abierta y con capital suficiente),
           el monitor descarga <b>velas OHLCV actualizadas</b> de Yahoo Finance, recalcula
@@ -1164,7 +1164,7 @@ def _tab_instructions() -> None:
 
     <!-- ══ 5. AGENTE JUEZ ══ -->
     <div class="ins-section">
-      <div class="ins-title">5 · El Agente Juez — Evaluación diaria a las 5:00 pm Bogotá</div>
+      <div class="ins-title">5 · El Agente Juez — Evaluación diaria a las 11:00 pm Bogotá</div>
       <div class="ins-card ins-card-left-red">
         <div class="ins-body">
           Al cierre del mercado, el <b>Agente Juez</b> ejecuta el ciclo evolutivo:<br><br>
@@ -1268,7 +1268,7 @@ def _tab_instructions() -> None:
       <div class="ins-card ins-card-left-dim">
         <div class="ins-timeline">
           <div class="ins-timeline-item">
-            <div class="ins-time">2:00 am – 3:00 pm · cada 15 minutos</div>
+            <div class="ins-time">1:30 am – 10:30 pm · cada 15 minutos</div>
             <div class="ins-timeline-text">
               <b style="color:{TEXT};">Monitor intraday (doble función)</b><br>
               <span style="color:{DIM};">① SL/TP:</span> verifica si alguna posición abierta tocó
@@ -1280,14 +1280,14 @@ def _tab_instructions() -> None:
             </div>
           </div>
           <div class="ins-timeline-item">
-            <div class="ins-time">5:00 pm · lunes a viernes</div>
+            <div class="ins-time">10:45 pm – 11:00 pm · lunes a viernes</div>
             <div class="ins-timeline-text">
               <b style="color:{TEXT};">Cierre EOD + Ciclo Evolutivo + Redistribución</b><br>
-              <span style="color:{DIM};">① Cierre forzado:</span> todas las posiciones abiertas
+              <span style="color:{DIM};">① 10:45 pm — Cierre forzado:</span> todas las posiciones abiertas
               se cierran al precio de mercado del momento.<br>
-              <span style="color:{DIM};">② Selección natural:</span> el Agente Juez clasifica
-              los 10 agentes por Calmar Ratio (fitness), elimina los 5 peores y crea 5 nuevos
-              con parámetros mutados de los supervivientes.<br>
+              <span style="color:{DIM};">② 11:00 pm — Selección natural:</span> el Agente Juez clasifica
+              los 10 agentes por Calmar Ratio (fitness), elimina hasta 5 (cuota dinámica, solo
+              fitness ≤ 0) y crea el mismo número de hijos por mutación de los supervivientes.<br>
               <span style="color:{DIM};">③ Redistribución de capital:</span> se suma el capital
               de los 10 agentes activos resultantes y se divide en partes iguales.
               Todos inician el día siguiente con el mismo capital.

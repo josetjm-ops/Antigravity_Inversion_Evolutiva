@@ -1,8 +1,18 @@
 name: "Ciclo de Trading Diario"
 
+# ─────────────────────────────────────────────────────────────────────────
+# Workflow legado: dispara un ciclo único de trading_runner al inicio de la
+# ventana operativa. El trabajo real lo hace trade_monitor.yml (cada 15 min).
+# Se mantiene como punto de entrada manual o como ciclo de "calentamiento"
+# al abrir el horario.
+#
+# Cron: 07:00 UTC = 2:00 am Bogotá (justo después del inicio de apertura
+# de posiciones a las 1:30 am Bogotá).
+# ─────────────────────────────────────────────────────────────────────────
+
 "on":
   schedule:
-    - cron: "50 13 * * 1-5"  # 08:50 Bogota (UTC-5) lunes a viernes — 10 min antes del trade_monitor
+    - cron: "0 7 * * 1-5"  # 2:00 am Bogotá (UTC-5), lunes a viernes
   workflow_dispatch:
     inputs:
       dry_run:

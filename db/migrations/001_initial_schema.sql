@@ -153,7 +153,7 @@ CREATE INDEX idx_estrategias_params ON estrategias_exitosas USING gin(params_tec
 
 -- ------------------------------------------------------------
 -- TABLA 4: ranking_historico
--- Snapshot diario del ranking al cierre de mercado (17:00 UTC-5).
+-- Snapshot diario del ranking al cierre de mercado (23:00 Bogotá / 04:00 UTC).
 -- Alimenta el heatmap y la gráfica de supervivencia del dashboard.
 -- ------------------------------------------------------------
 CREATE TABLE ranking_historico (
