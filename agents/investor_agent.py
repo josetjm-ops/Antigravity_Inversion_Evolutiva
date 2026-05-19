@@ -263,12 +263,15 @@ class InvestorAgent:
         capital_usado      = float(row["capital_usado"])
         accion             = row["accion"]
 
+        # Asignar precio_entrada antes del if/else para que siempre esté definida
+        # (incluso en la rama None) y no provoque NameError en el log posterior.
+        precio_entrada = float(precio_entrada_raw) if precio_entrada_raw is not None else 0.0
+
         if precio_entrada_raw is None:
             # Sin precio de entrada registrado — cerrar con pnl=0 (breakeven)
             log.warning("[InvestorAgent] Op %d sin precio_entrada — cerrando con pnl=0.", op_id)
             pnl = 0.0
         else:
-            precio_entrada = float(precio_entrada_raw)
             if accion == "BUY":
                 pnl = round((precio_salida - precio_entrada) / precio_entrada * capital_usado, 4)
             elif accion == "SELL":
