@@ -160,48 +160,108 @@ class InvestorAgent:
         try:
             with get_conn() as conn:
                 cur = conn.cursor()
-                cur.execute(
-                    """
-                    INSERT INTO operaciones (
-                        agente_id, timestamp_entrada, par, accion,
-                        precio_entrada, capital_usado, pips_sl,
-                        senal_tecnico, senal_macro, decision_riesgo, estado,
-                        sl_dinamico, precio_extremo_favorable
-                    ) VALUES (
-                        %s, %s, 'EUR/USD', %s,
-                        %s, %s, %s, %s, %s, %s,
-                        CASE WHEN %s = 'HOLD' THEN 'cancelada' ELSE 'abierta' END,
-                        %s, %s
-                    ) RETURNING id
-                    """,
-                    (
-                        decision.agente_id,
-                        ts_entrada,
-                        decision.accion_final,
-                        precio_entrada,
-                        decision.capital_a_usar if decision.accion_final != "HOLD" else 0,
-                        pips_sl,
-                        json.dumps(decision.senal_tecnico),
-                        json.dumps(decision.senal_macro),
-                        json.dumps({
-                            "accion_final":             decision.accion_final,
-                            "confianza_final":          decision.confianza_final,
-                            "confianza_tecnica":        decision.confianza_tecnica,
-                            "confianza_macro":          decision.confianza_macro,
-                            "stop_loss":                decision.stop_loss,
-                            "take_profit":              decision.take_profit,
-                            "razonamiento":             decision.razonamiento,
-                            "sl_fuente":                decision.sl_fuente,
-                            "atr_valor":                decision.atr_valor,
-                            "trailing_activation_pips": decision.trailing_activation_pips,
-                            "trailing_distance_pips":   decision.trailing_distance_pips,
-                        }),
-                        decision.accion_final,
-                        decision.stop_loss if decision.accion_final != "HOLD" else None,
-                        precio_entrada if decision.accion_final != "HOLD" else None,
-                    ),
-                )
-                op_id = cur.fetchone()[0]
+                is_trade = decision.accion_final in ("BUY", "SELL")
+                if is_trade:
+                    # Atomic conditional INSERT: only if no open BUY/SELL exists for this agent.
+                    # Prevents TOCTOU race conditions when two workflow runs overlap.
+                    cur.execute(
+                        """
+                        INSERT INTO operaciones (
+                            agente_id, timestamp_entrada, par, accion,
+                            precio_entrada, capital_usado, pips_sl,
+                            senal_tecnico, senal_macro, decision_riesgo, estado,
+                            sl_dinamico, precio_extremo_favorable
+                        )
+                        SELECT %s, %s, 'EUR/USD', %s,
+                               %s, %s, %s, %s, %s, %s,
+                               'abierta',
+                               %s, %s
+                        WHERE NOT EXISTS (
+                            SELECT 1 FROM operaciones
+                            WHERE agente_id = %s
+                              AND estado = 'abierta'
+                              AND accion IN ('BUY', 'SELL')
+                        )
+                        RETURNING id
+                        """,
+                        (
+                            decision.agente_id,
+                            ts_entrada,
+                            decision.accion_final,
+                            precio_entrada,
+                            decision.capital_a_usar,
+                            pips_sl,
+                            json.dumps(decision.senal_tecnico),
+                            json.dumps(decision.senal_macro),
+                            json.dumps({
+                                "accion_final":             decision.accion_final,
+                                "confianza_final":          decision.confianza_final,
+                                "confianza_tecnica":        decision.confianza_tecnica,
+                                "confianza_macro":          decision.confianza_macro,
+                                "stop_loss":                decision.stop_loss,
+                                "take_profit":              decision.take_profit,
+                                "razonamiento":             decision.razonamiento,
+                                "sl_fuente":                decision.sl_fuente,
+                                "atr_valor":                decision.atr_valor,
+                                "trailing_activation_pips": decision.trailing_activation_pips,
+                                "trailing_distance_pips":   decision.trailing_distance_pips,
+                            }),
+                            decision.stop_loss,
+                            precio_entrada,
+                            decision.agente_id,
+                        ),
+                    )
+                    row = cur.fetchone()
+                    if row is None:
+                        log.warning(
+                            "[InvestorAgent] %s ya tiene posición abierta — INSERT bloqueado atómicamente.",
+                            self.agent_id,
+                        )
+                        return None
+                    op_id = row[0]
+                else:
+                    # HOLD: insert as 'cancelada' unconditionally
+                    cur.execute(
+                        """
+                        INSERT INTO operaciones (
+                            agente_id, timestamp_entrada, par, accion,
+                            precio_entrada, capital_usado, pips_sl,
+                            senal_tecnico, senal_macro, decision_riesgo, estado,
+                            sl_dinamico, precio_extremo_favorable
+                        ) VALUES (
+                            %s, %s, 'EUR/USD', %s,
+                            %s, %s, %s, %s, %s, %s,
+                            'cancelada',
+                            %s, %s
+                        ) RETURNING id
+                        """,
+                        (
+                            decision.agente_id,
+                            ts_entrada,
+                            decision.accion_final,
+                            precio_entrada,
+                            0,
+                            pips_sl,
+                            json.dumps(decision.senal_tecnico),
+                            json.dumps(decision.senal_macro),
+                            json.dumps({
+                                "accion_final":             decision.accion_final,
+                                "confianza_final":          decision.confianza_final,
+                                "confianza_tecnica":        decision.confianza_tecnica,
+                                "confianza_macro":          decision.confianza_macro,
+                                "stop_loss":                decision.stop_loss,
+                                "take_profit":              decision.take_profit,
+                                "razonamiento":             decision.razonamiento,
+                                "sl_fuente":                decision.sl_fuente,
+                                "atr_valor":                decision.atr_valor,
+                                "trailing_activation_pips": decision.trailing_activation_pips,
+                                "trailing_distance_pips":   decision.trailing_distance_pips,
+                            }),
+                            None,
+                            None,
+                        ),
+                    )
+                    op_id = cur.fetchone()[0]
 
                 if decision.accion_final != "HOLD":
                     cur.execute(
