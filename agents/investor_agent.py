@@ -292,6 +292,20 @@ class InvestorAgent:
                 log.error("[InvestorAgent] Error registrando operación %s en Sheets: %s", op_id, e)
             return op_id
         except Exception as exc:
+            # Captura explícita de violación de unicidad (dos workers simultáneos):
+            # el índice parcial idx_unique_open_position_per_agent garantiza que
+            # solo uno de los dos INSERTs concurrentes tenga éxito.
+            try:
+                import psycopg2.errors
+                if isinstance(exc, psycopg2.errors.UniqueViolation):
+                    log.warning(
+                        "[InvestorAgent] %s — posición abierta detectada por índice único "
+                        "(concurrencia). INSERT ignorado.",
+                        self.agent_id,
+                    )
+                    return None
+            except ImportError:
+                pass
             log.error("[InvestorAgent] Error persistiendo operación: %s", exc)
             return None
 

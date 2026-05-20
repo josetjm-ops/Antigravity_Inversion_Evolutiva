@@ -189,14 +189,65 @@ def _apply_trailing_stop(op: dict, current_price: float) -> tuple[float, float]:
     return nuevo_sl, nuevo_extremo
 
 
-# ── 1. Monitoreo SL/TP ───────────────────────────────────────────────────────
+# ── 1. Guardia EOD (red de seguridad ante retrasos del judge_daily) ───────────
+
+def _eod_guard() -> None:
+    """
+    Red de seguridad EOD: detecta posiciones del día anterior que no fueron
+    cerradas por judge_daily.yml (GitHub Actions puede retrasarse horas) y
+    las cierra al precio actual antes del ciclo normal de SL/TP.
+
+    Lógica: si hay posiciones con timestamp_entrada ANTERIOR al inicio del
+    día de trading UTC de hoy (_TRADING_START_TIME_UTC), significa que el
+    force-close-all programado a las 03:45 UTC no corrió a tiempo.
+    """
+    from db.connection import get_conn, get_dict_cursor
+
+    now_utc = datetime.now(timezone.utc)
+    today_trading_start = now_utc.replace(
+        hour=_TRADING_START_TIME_UTC.hour,
+        minute=_TRADING_START_TIME_UTC.minute,
+        second=0,
+        microsecond=0,
+    )
+
+    with get_conn() as conn:
+        cur = get_dict_cursor(conn)
+        cur.execute(
+            """
+            SELECT COUNT(*) AS n FROM operaciones
+            WHERE estado = 'abierta'
+              AND accion IN ('BUY', 'SELL')
+              AND timestamp_entrada < %s
+            """,
+            (today_trading_start,),
+        )
+        n_stale = int((cur.fetchone() or {}).get("n") or 0)
+
+    if n_stale > 0:
+        log.warning(
+            "[TradeMonitor] EOD GUARD: %d posicion(es) del dia anterior sin cerrar "
+            "(judge_daily demorado). Ejecutando cierre forzoso de emergencia...",
+            n_stale,
+        )
+        force_close_all()
+    else:
+        log.debug("[TradeMonitor] EOD GUARD: sin posiciones huerfanas. OK.")
+
+
+# ── 2. Monitoreo SL/TP ───────────────────────────────────────────────────────
 
 def sync_once() -> dict:
     """
     Ciclo completo de 15 minutos:
-      a) Verifica SL/TP de posiciones abiertas y las cierra si corresponde.
-      b) Para agentes sin posición, evalúa si abrir una nueva (si es horario de trading).
+      a) Guardia EOD: cierra posiciones del día anterior si judge_daily se retrasó.
+      b) Verifica SL/TP de posiciones abiertas y las cierra si corresponde.
+      c) Para agentes sin posición, evalúa si abrir una nueva (si es horario de trading).
     """
+    # Red de seguridad: cierra posiciones huérfanas del día anterior si el
+    # force-close-all del juez no corrió a tiempo (falla común en GH Actions).
+    _eod_guard()
+
     from data.simulated_broker import get_current_price, check_sl_tp, exit_price_for
     from agents.investor_agent import InvestorAgent
     from db.connection import get_conn, get_dict_cursor
@@ -331,7 +382,7 @@ def sync_once() -> dict:
     }
 
 
-# ── 2. Nuevas posiciones (trading intraday) ───────────────────────────────────
+# ── 3. Nuevas posiciones (trading intraday) ───────────────────────────────────
 
 def _evaluate_new_positions() -> dict:
     """
@@ -467,7 +518,7 @@ def _evaluate_new_positions() -> dict:
     return {"evaluated": evaluated, "opened": opened, "errors": errors}
 
 
-# ── 3. Cierre forzado EOD ─────────────────────────────────────────────────────
+# ── 4. Cierre forzado EOD ─────────────────────────────────────────────────────
 
 def force_close_all() -> dict:
     """
@@ -552,7 +603,7 @@ def force_close_all() -> dict:
     return {"closed": closed, "errors": errors}
 
 
-# ── 4. Modo demonio ───────────────────────────────────────────────────────────
+# ── 5. Modo demonio ───────────────────────────────────────────────────────────
 
 def run_daemon() -> None:
     log.info("[TradeMonitor] Modo demonio — polling cada %ds.", _POLL_SECONDS)

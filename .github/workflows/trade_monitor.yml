@@ -20,8 +20,12 @@ name: "Monitor de Trades (SL/TP + Nuevas Posiciones)"
 #   00:00 – 02:45 UTC  → 7:00 pm – 9:45 pm Bogotá (día anterior)
 #   03:00, 03:15, 03:30 UTC → 10:00 pm, 10:15 pm, 10:30 pm Bogotá (día anterior)
 #
-# El último monitor cierra a las 03:30 UTC para no chocar con el cierre
-# forzoso del Juez programado a las 03:45 UTC (judge_daily.yml).
+# El último monitor programado cierra a las 03:30 UTC para no chocar con
+# el cierre forzoso del Juez a las 03:45 UTC (judge_daily.yml).
+#
+# VENTANA CIEGA cubierta con "*/15 4-6 * * 2-6" (11:00 pm – 1:45 am Bogotá):
+# si judge_daily se retrasa, la guardia EOD en trade_monitor.py cierra
+# posiciones del día anterior en el primer ciclo que detecte.
 # ─────────────────────────────────────────────────────────────────────────
 
 "on":
@@ -30,6 +34,7 @@ name: "Monitor de Trades (SL/TP + Nuevas Posiciones)"
     - cron: "*/15 7-23 * * 1-5"    # 2:00 am – 6:45 pm Bogotá (Mon-Fri Bogotá)
     - cron: "*/15 0-2 * * 2-6"     # 7:00 pm – 9:45 pm Bogotá (Mon-Fri Bogotá)
     - cron: "0,15,30 3 * * 2-6"    # 10:00 pm, 10:15 pm, 10:30 pm Bogotá (Mon-Fri Bogotá)
+    - cron: "*/15 4-6 * * 2-6"     # ventana ciega EOD: 11:00 pm – 1:45 am Bogotá
   workflow_dispatch: {}             # disparo manual para pruebas
 
 jobs:
