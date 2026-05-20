@@ -53,3 +53,6 @@ desktop.ini
 
 google_credentials.json
 *credentials*.json
+
+# ── Claude Code (sesiones locales, worktrees, plans) ─────────────────────────
+.claude/

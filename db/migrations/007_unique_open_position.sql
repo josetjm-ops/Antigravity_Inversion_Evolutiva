@@ -1,14 +1,17 @@
 -- ============================================================
--- INVERSIÓN EVOLUTIVA — Migración 007
--- Constraint: un agente solo puede tener 1 posición abierta
+-- INVERSIÓN EVOLUTIVA — Migración 007 (NO-OP)
 -- ============================================================
--- El INSERT ... WHERE NOT EXISTS en investor_agent.py no es
--- completamente atómico bajo concurrencia READ COMMITTED.
--- Este índice parcial único garantiza a nivel de BD que dos
--- workers simultáneos no puedan crear 2 posiciones abiertas
--- para el mismo agente.
+-- Esta migración era para crear un índice parcial único que
+-- garantiza una sola posición abierta por agente.
+-- Sin embargo, ese índice ya existía desde la Sesión 8 con el
+-- nombre `idx_one_open_buysell_per_agent`. Se conserva éste y
+-- esta migración se deja como NO-OP documentado para mantener
+-- continuidad en el numerado de migraciones.
+-- ============================================================
+-- Para verificar el índice existente:
+--   SELECT indexdef FROM pg_indexes
+--   WHERE indexname = 'idx_one_open_buysell_per_agent';
 -- ============================================================
 
-CREATE UNIQUE INDEX IF NOT EXISTS idx_unique_open_position_per_agent
-    ON operaciones(agente_id)
-    WHERE estado = 'abierta' AND accion IN ('BUY', 'SELL');
+-- (Sin operaciones SQL)
+SELECT 1;

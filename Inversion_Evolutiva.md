@@ -18,6 +18,8 @@
 14. [Automatización — GitHub Actions](#14-automatización--github-actions)
 15. [Variables de configuración](#15-variables-de-configuración)
 16. [Flujo completo día a día](#16-flujo-completo-día-a-día)
+17. [Scripts utilitarios](#17-scripts-utilitarios-scripts)
+18. [Estructura del repositorio](#18-estructura-del-repositorio)
 
 ---
 
@@ -371,6 +373,24 @@ El trailing stop protege ganancias sin limitar el potencial alcista:
 ### Cierre al final del día (EOD)
 
 El workflow `judge_daily.yml` ejecuta `trade_monitor --force-close-all` a las **10:45 pm Bogotá (03:45 UTC)**, exactamente 15 minutos antes del Juez. Esto cierra todas las posiciones abiertas al precio de mercado actual para que el Juez evalúe con P&L definitivo del día. El gap de 15 minutos es un buffer de seguridad por si el cierre se reintenta o tarda.
+
+### Guardia EOD defensiva (red de seguridad ante retrasos de GitHub Actions)
+
+Los crons programados de GitHub Actions **no garantizan disparo puntual**: pueden retrasarse horas durante picos de carga del runner. Para que un retraso del `judge_daily.yml` no deje posiciones abiertas durante toda la noche, `trade_monitor.py` incluye una función `_eod_guard()` que corre al inicio de **cada** ciclo de 15 minutos:
+
+```
+Para cada ciclo del monitor:
+  1. _eod_guard():
+       - Calcula el inicio del día de trading UTC actual (TRADING_START_TIME_UTC).
+       - Si existen posiciones BUY/SELL abiertas con
+         timestamp_entrada < ese inicio → son del día anterior.
+       - Llama internamente a force_close_all() para cerrarlas.
+  2. (continúa el ciclo normal: SL/TP, trailing, nuevas posiciones)
+```
+
+**Consecuencia:** aunque `judge_daily.yml` se retrase X horas, el primer monitor que despierte después del cierre del día anterior cierra las posiciones huérfanas automáticamente. La ventana máxima de exposición se reduce a 15 minutos (el intervalo entre monitores).
+
+Para que esto funcione en la "ventana ciega" de 03:30 – 06:30 UTC (11pm – 1:30am Bogotá, antes sin monitor), `trade_monitor.yml` incluye un cron adicional `*/15 4-6 * * 2-6` que despierta el monitor cada 15 minutos en ese rango.
 
 ---
 
@@ -819,17 +839,21 @@ El dashboard es **solo lectura**: no tiene capacidad de enviar órdenes ni modif
 ### `trade_monitor.yml` — Monitor intraday
 
 ```
-Schedule (cuatro entradas combinadas; cron en UTC, días L-V Bogotá):
+Schedule (cinco entradas combinadas; cron en UTC, días L-V Bogotá):
   - "30,45 6 * * 1-5"       → 1:30 am y 1:45 am Bogotá (06:30, 06:45 UTC)
   - "*/15 7-23 * * 1-5"     → 2:00 am – 6:45 pm Bogotá (07:00 – 23:45 UTC)
   - "*/15 0-2 * * 2-6"      → 7:00 pm – 9:45 pm Bogotá del día anterior
                               (00:00 – 02:45 UTC del día siguiente)
   - "0,15,30 3 * * 2-6"     → 10:00 pm, 10:15 pm, 10:30 pm Bogotá (último ciclo)
                               (03:00, 03:15, 03:30 UTC del día siguiente)
+  - "*/15 4-6 * * 2-6"      → 11:00 pm – 1:45 am Bogotá (cubre ventana ciega
+                              EOD; activa la guardia _eod_guard si el
+                              judge_daily se retrasó)
 
-Cobertura efectiva: cada 15 minutos de lunes a viernes Bogotá, desde 1:30 am
-hasta 10:30 pm Bogotá. El último monitor cierra a las 03:30 UTC para no
-chocar con el cierre forzoso del Juez (03:45 UTC).
+Cobertura efectiva: cada 15 minutos de lunes a viernes Bogotá, las 24 horas
+del día de trading. El monitor de las 11:00 pm – 1:45 am es exclusivamente
+defensivo: detecta posiciones huérfanas del día anterior y las cierra
+automáticamente vía _eod_guard().
 
 Pasos:
   1. Checkout del repo
@@ -972,9 +996,88 @@ El usuario puede disparar manualmente cualquier workflow desde GitHub Actions:
 
 ---
 
-*Documento actualizado el 2026-05-19 (Sesión 8 — migración Neon → Supabase + fix race condition). Refleja la base de datos en Supabase, el modelo DeepSeek actualizado a `deepseek-reasoner`, el INSERT atómico para prevenir posiciones duplicadas y el índice único parcial en `operaciones`.*
+## 17. Scripts utilitarios (`scripts/`)
+
+Carpeta con utilidades que se ejecutan de forma puntual (no automática). No se invocan desde GitHub Actions; el usuario las corre manualmente cuando se necesita una operación específica sobre la BD.
+
+| Script | Propósito | Cuándo usarlo |
+|---|---|---|
+| `seed_gen1.py` | Crea 10 agentes Generación 1 con parámetros por defecto y $10 c/u (pool inicial $100). | Una sola vez al migrar a una nueva BD vacía. Editar la constante `HOY` antes de ejecutar. |
+| `diversify_gen1.py` | Aplica mutación gaussiana individualizada a los 10 agentes activos para darles ADN propio (σ elevada). | Cuando los 10 agentes tienen params idénticos (típicamente justo después de un seed) y el motor evolutivo queda bloqueado por falta de fitness diferencial. |
+
+Comando para ejecutar:
+```bash
+python scripts/seed_gen1.py        # nueva BD vacía → 10 agentes Gen1
+python scripts/diversify_gen1.py   # diversifica ADN de los 10 activos
+```
+
+Ambos requieren `.env` cargado con `DATABASE_URL` válido (Supabase Transaction Pooler).
+
+---
+
+## 18. Estructura del repositorio
+
+```
+Antigravity_Inversion_Evolutiva/
+├── agents/                      Pipeline de sub-agentes + Inversor + Juez
+│   ├── base_agent.py
+│   ├── investor_agent.py
+│   ├── judge_agent.py
+│   ├── sub_agent_technical.py
+│   ├── sub_agent_macro.py
+│   └── sub_agent_risk.py
+├── cron/                        Entry points para GitHub Actions
+│   ├── trade_monitor.py         (cada 15 min: SL/TP + nuevas + guardia EOD)
+│   ├── trading_runner.py        (legacy: ciclo único de calentamiento 2 am)
+│   └── judge_scheduler.py       (lanza el ciclo evolutivo del Juez)
+├── data/                        Fuentes de mercado y indicadores
+│   ├── indicators.py            (OHLCV + RSI/EMA/MACD/FVG/OB/ATR)
+│   ├── macro_scraper.py         (Finnhub: noticias + calendario)
+│   ├── simulated_broker.py      (Yahoo Finance: precio actual + SL/TP)
+│   └── alpha_vantage_client.py  (legado: dataclass TechnicalSignals)
+├── db/
+│   ├── connection.py            (psycopg2 + Supabase pooler)
+│   ├── apply_migrations.py
+│   ├── migrations/              (001 – 007)
+│   └── seeds/
+├── evolution/
+│   └── evolution_engine.py      (fitness, crossover, mutación, redistribución)
+├── dashboard/                   Streamlit (inversion-evolutiva.streamlit.app)
+│   ├── app.py
+│   ├── charts.py
+│   ├── data.py
+│   └── logo.png
+├── mobile-app/                  Next.js (app complementaria, Vercel)
+├── scripts/                     Utilidades manuales (seed_gen1, diversify_gen1)
+├── tests/                       pytest (pipeline + evolution)
+├── utils/
+│   └── sheets_logger.py         (gspread: trazabilidad en Google Sheets)
+├── .github/workflows/
+│   ├── trade_monitor.yml
+│   ├── judge_daily.yml
+│   ├── trading_cycle.yml
+│   └── health_check.yml
+├── streamlit_app.py             (entrypoint Streamlit Cloud)
+├── Procfile                     (Streamlit Cloud config)
+├── runtime.txt                  (Python 3.11)
+├── requirements.txt
+└── Inversion_Evolutiva.md       (este documento)
+```
+
+---
+
+*Documento actualizado el 2026-05-20 (Sesión 9 — auditoría operativa: guardia EOD, ventana ciega y diversidad genética). Refleja la corrección del cierre EOD ante retrasos de GitHub Actions, el nuevo cron `*/15 4-6 * * 2-6` y la diversificación gaussiana de los 10 agentes Gen1.*
 
 ## Historial de cambios mayores
+
+- **2026-05-20 (Sesión 9 — auditoría operativa post-migración):**
+  - **Detección del problema:** las 10 operaciones SELL del 19-may se cerraron a las 02:02 am Bogotá del 20-may (no a las 10:45 pm del 19-may) al precio de mercado, no por SL/TP. Causa raíz: el cron `judge_daily.yml` se disparó con ~3.5 h de retraso (limitación conocida de GitHub Actions Cron). La auditoría también reveló que los 10 agentes Gen1 fueron sembrados con ADN idéntico (sin mutación) y que existía una ventana ciega operativa de 3 h sin monitoreo.
+  - **Guardia EOD defensiva** (`cron/trade_monitor.py`): nueva función `_eod_guard()` que se ejecuta al inicio de cada `sync_once()`. Si detecta posiciones BUY/SELL con `timestamp_entrada < inicio_trading_utc_hoy`, llama a `force_close_all()` automáticamente. Elimina la dependencia exclusiva del scheduler de GitHub Actions para el cierre EOD.
+  - **Ventana ciega cerrada** (`.github/workflows/trade_monitor.yml`): añadida quinta entrada de cron `*/15 4-6 * * 2-6` que cubre 11pm – 1:45am Bogotá (antes sin ningún monitor). Combinada con `_eod_guard`, la ventana máxima de exposición de posiciones huérfanas se reduce a 15 minutos.
+  - **Manejo explícito de `UniqueViolation`** (`agents/investor_agent.py`): captura específica del error de violación de índice único parcial; en caso de concurrencia entre dos workflows, el segundo INSERT se ignora silenciosamente con log informativo (en vez de propagar como error genérico).
+  - **Diversidad genética restaurada:** los 10 agentes Gen1 (`2026-05-19_01..10`) sembrados con `scripts/seed_gen1.py` tenían params idénticos, lo que impedía la evolución (todos con fitness ≥ 0, ninguno eliminable). Se aplicó mutación gaussiana con sigmas elevadas (σ_w=0.08, σ_p=0.12, σ_r=0.15) vía `scripts/diversify_gen1.py`. Diversidad confirmada: `atr_factor` 1.11–2.09, `risk_reward` 1.50–2.61, EMAs y RSI distintos por agente.
+  - **Migración 007 (no-op):** el índice único parcial documentado como tal (Sesión 8: `idx_one_open_buysell_per_agent`) ya existía. La migración 007 se conserva como NO-OP para mantener continuidad en el numerado.
+  - **Limpieza del repositorio:** eliminados archivos one-off ya cumplidos su propósito — `scratch/` (debug scripts), `*.bat` (despliegues manuales puntuales), `utils/diagnose_backfill.py`, `api/` (carpeta vacía) y `CALCULO_VARIABLES_Y_MOTOR_DECISION.md` (contenido consolidado en este documento).
 
 - **2026-05-18 (Sesión 7 — reestructuración nocturna):**
   - **Horarios reasignados:**
