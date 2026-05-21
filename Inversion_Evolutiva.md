@@ -213,8 +213,8 @@ Yahoo Finance
               Combina A + B con pesos genéticos
               Calcula SL (OB → FVG → ATR → % fallback)
               Calcula TP (SL × R:R target)
-              Position sizing dinámico
-              → RiskDecision {accion_final, stop_loss, take_profit, capital_a_usar}
+              Position sizing dinámico → nocional en USD
+              → RiskDecision {accion_final, stop_loss, take_profit, nocional_usd}
                     │
                     ▼
               PostgreSQL → INSERT operaciones
@@ -260,12 +260,20 @@ La señal ponderada emite BUY si `score_buy > score_sell` y `score_buy > 0.45`. 
 
 **Take Profit:** siempre `TP = distancia_SL × risk_reward_target`.
 
-**Position sizing dinámico:**
+**Position sizing dinámico — nocional en USD:**
 ```
-capital_uso = (equity × risk_pct_per_trade) / (sl_pips × $0.10/pip)
-capital_uso = min(capital_uso, equity × 20%)   # hard cap 20%
-risk_pct forzado al rango [1%, 2%]             # límites inmutables
+lotes        = (equity × risk_pct_per_trade) / (sl_pips × $0.10/pip)
+nocional_usd = lotes × 1000 × precio_entrada
+nocional_usd = min(nocional_usd, equity × 50)   # techo de apalancamiento 50:1
+risk_pct forzado al rango [1%, 2%]               # límites inmutables
+
+Ejemplo: equity=$10, risk=2%, SL=36 pips, precio=1.16225
+  lotes        = (10 × 0.02) / (36 × 0.10) = 0.0556
+  nocional_usd = 0.0556 × 1000 × 1.16225 = $64.60
+  Si SL tocado: pérdida = $64.60 × (36 pips × 0.0001 / 1.16225) ≈ $0.20 = 2% equity ✓
 ```
+
+El campo `capital_usado` en la BD almacena el **nocional en USD** (no lotes). El P&L se calcula como `(precio_salida - precio_entrada) / precio_entrada × nocional_usd`, lo que produce dólares reales proporcionales al movimiento del par. El LLM no puede sobrescribir este valor; el sizer lo calcula siempre por heurística.
 
 ---
 
@@ -297,9 +305,9 @@ El LLM **DeepSeek** (`deepseek-chat`) se consulta en tres momentos distintos del
 
 **Cuándo:** Cuando la decisión preliminar es BUY o SELL (no para HOLD).
 
-**Qué se envía:** Señales de A y B completas, precio actual, SL/TP calculados, capital disponible y la acción preliminar con su confianza.
+**Qué se envía:** Señales de A y B completas, precio actual, SL/TP calculados, nocional USD pre-calculado y la acción preliminar con su confianza.
 
-**Qué se espera:** JSON con la decisión final, que puede confirmar o ajustar los niveles de SL/TP y el capital a usar.
+**Qué se espera:** JSON con `{accion_final, confianza_final, stop_loss, take_profit, razonamiento}`. El LLM puede confirmar o ajustar la acción, confianza y niveles de SL/TP, pero **no el tamaño de posición** (el sizer ya lo calculó correctamente y el LLM no lo incluye en su respuesta).
 
 **Fallback:** Se usa la decisión heurística calculada localmente.
 
@@ -719,10 +727,10 @@ Log de cada señal BUY/SELL/HOLD. Una fila por ciclo de decisión.
 | `timestamp_entrada` / `timestamp_salida` | TIMESTAMPTZ | Marcas de tiempo de apertura y cierre |
 | `accion` | VARCHAR | `BUY` / `SELL` / `HOLD` |
 | `precio_entrada` / `precio_salida` | DECIMAL | Precios reales de mercado |
-| `capital_usado` | DECIMAL | Capital virtual asignado a la operación (USD) |
+| `capital_usado` | DECIMAL | **Nocional en USD** de la posición (exposición total, no capital "gastado"). Ejemplo: $51 significa que el agente controla $51 de EUR/USD. Con equity=$10 eso es ~5:1 de apalancamiento real, topado en 50:1. |
 | `pips_sl` | DECIMAL(8,2) | Distancia del SL al precio de entrada en pips (poblada en INSERT desde Sesión 7) |
-| `pnl` | DECIMAL | Ganancia/pérdida en USD |
-| `pnl_porcentaje` | DECIMAL | Rendimiento porcentual respecto al capital_usado |
+| `pnl` | DECIMAL | Ganancia/pérdida en USD. Fórmula: `(precio_salida - precio_entrada) / precio_entrada × capital_usado`. Positivo = ganancia, negativo = pérdida. |
+| `pnl_porcentaje` | DECIMAL | ROI del trade sobre el **capital del agente** (`pnl / capital_disponible × 100`), no sobre el nocional. Indica cuánto movió la cuenta ese trade. |
 | `estado` | VARCHAR | `abierta` / `cerrada` / `cancelada` |
 | `senal_tecnico` | JSONB | Output completo del sub-agente A |
 | `senal_macro` | JSONB | Output completo del sub-agente B |
@@ -1004,6 +1012,7 @@ Carpeta con utilidades que se ejecutan de forma puntual (no automática). No se 
 |---|---|---|
 | `seed_gen1.py` | Crea 10 agentes Generación 1 con parámetros por defecto y $10 c/u (pool inicial $100). | Una sola vez al migrar a una nueva BD vacía. Editar la constante `HOY` antes de ejecutar. |
 | `diversify_gen1.py` | Aplica mutación gaussiana individualizada a los 10 agentes activos para darles ADN propio (σ elevada). | Cuando los 10 agentes tienen params idénticos (típicamente justo después de un seed) y el motor evolutivo queda bloqueado por falta de fitness diferencial. |
+| `recompute_pnl.py` | Recalcula `pnl`, `capital_usado` (nocional USD) y `pnl_porcentaje` para todas las ops cerradas que tenían `capital_usado` en lotes (convención anterior al commit `6572c11`). Reconstruye `capital_actual` y `roi_total` de los agentes. | **Ya ejecutado** el 2026-05-20. Solo necesario si se detectan operaciones históricas con `capital_usado` < 1.0 (indicativo de lotes en vez de USD). |
 
 Comando para ejecutar:
 ```bash
@@ -1066,9 +1075,17 @@ Antigravity_Inversion_Evolutiva/
 
 ---
 
-*Documento actualizado el 2026-05-20 (Sesión 9 — auditoría operativa: guardia EOD, ventana ciega y diversidad genética). Refleja la corrección del cierre EOD ante retrasos de GitHub Actions, el nuevo cron `*/15 4-6 * * 2-6` y la diversificación gaussiana de los 10 agentes Gen1.*
+*Documento actualizado el 2026-05-20 (Sesión 10 — corrección modelo P&L: nocional USD, apalancamiento 50:1, ROI sobre cuenta). Refleja la corrección del modelo de posicionamiento y cálculo de P&L implementada en el commit `6572c11`.*
 
 ## Historial de cambios mayores
+
+- **2026-05-20 (Sesión 10 — corrección modelo P&L y position sizing):**
+  - **Problema raíz identificado:** el sizer (`sub_agent_risk._dynamic_position_size`) calculaba internamente lotes (~0.044) pero los almacenaba en `capital_usado` y `close_operation` los trataba como dólares de nocional. Resultado: P&L comprimido ~1162× (se mostraba $0.0000 en trades con ganancia real de ~$0.02). Esto impedía que el motor evolutivo diferenciara el fitness entre agentes.
+  - **Fix de position sizing** (`agents/sub_agent_risk.py`): `_dynamic_position_size` ahora recibe `precio` y devuelve el **nocional en USD** = `lotes × 1000 × precio`. El techo de apalancamiento pasa de `equity × 20%` (dimensionalmente incorrecto, comparaba lotes con dólares) a `equity × 50` (50:1 de apalancamiento máximo, estándar forex minorista). Nuevas constantes: `_MAX_LEVERAGE = 50.0`, `_UNITS_PER_LOT = 1000.0`.
+  - **Fix de pnl_porcentaje** (`agents/investor_agent.py`): `pnl_porcentaje` pasa a ser el ROI sobre el capital del agente (`pnl / capital_disponible × 100`) en lugar del retorno sobre el nocional. Indica de forma intuitiva cuánto movió la cuenta ese trade.
+  - **Eliminación del override LLM de capital** (`agents/sub_agent_risk.py`): el LLM ya no puede sobrescribir `capital_a_usar`; el sizer siempre calcula el nocional heurísticamente. El system prompt del sub-agente C se actualiza para eliminar `capital_a_usar` del JSON esperado.
+  - **Migración one-off del historial** (`scripts/recompute_pnl.py`): script ejecutado en producción que reconvirtió las 18 operaciones cerradas de Gen1 — actualizó `capital_usado` (ahora en USD: ~$33–$295), `pnl` (ahora real en USD: ej. op 373 BUY +5.5pips = +$0.0243) y `pnl_porcentaje` — y reconstruyó `capital_actual` y `roi_total` de los 10 agentes.
+  - **Estado post-corrección:** todos los agentes muestran ROI ~+2% real. La próxima noche el juez evolutivo tendrá por primera vez señal clara de P&L en dólares para diferenciar fitness y tomar decisiones de selección/reproducción.
 
 - **2026-05-20 (Sesión 9 — auditoría operativa post-migración):**
   - **Detección del problema:** las 10 operaciones SELL del 19-may se cerraron a las 02:02 am Bogotá del 20-may (no a las 10:45 pm del 19-may) al precio de mercado, no por SL/TP. Causa raíz: el cron `judge_daily.yml` se disparó con ~3.5 h de retraso (limitación conocida de GitHub Actions Cron). La auditoría también reveló que los 10 agentes Gen1 fueron sembrados con ADN idéntico (sin mutación) y que existía una ventana ciega operativa de 3 h sin monitoreo.
