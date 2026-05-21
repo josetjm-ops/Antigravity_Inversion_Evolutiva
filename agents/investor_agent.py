@@ -353,9 +353,10 @@ class InvestorAgent:
             else:
                 pnl = 0.0
 
-        pnl_pct       = round(pnl / capital_usado * 100, 4) if capital_usado > 0 else 0.0
+        # pnl_pct = retorno sobre el capital del agente (cuánto movió la cuenta este trade)
+        pnl_pct       = round(pnl / capital_disponible * 100, 4) if capital_disponible > 0 else 0.0
         nuevo_capital = round(capital_disponible + pnl, 4)
-        roi_delta     = round(pnl / capital_disponible * 100, 4) if capital_disponible > 0 else 0.0
+        roi_delta     = pnl_pct
 
         with get_conn() as conn:
             cur = conn.cursor()

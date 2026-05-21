@@ -15,9 +15,11 @@ from agents.base_agent import BaseAgent
 log = logging.getLogger(__name__)
 
 # Hard limits inmutables — nunca se mutan genéticamente
-_RISK_PCT_MIN = 0.01   # mínimo 1% del equity en riesgo por operación
-_RISK_PCT_MAX = 0.02   # máximo 2% del equity en riesgo por operación
-_MIN_SL_PIPS  = 5.0    # distancia mínima para considerar SL estructural válido
+_RISK_PCT_MIN  = 0.01    # mínimo 1% del equity en riesgo por operación
+_RISK_PCT_MAX  = 0.02    # máximo 2% del equity en riesgo por operación
+_MIN_SL_PIPS   = 5.0     # distancia mínima para considerar SL estructural válido
+_MAX_LEVERAGE  = 50.0    # techo de apalancamiento (nocional ≤ equity × 50)
+_UNITS_PER_LOT = 1000.0  # unidades EUR por lote micro (referencia pip_value)
 
 _SYSTEM_PROMPT = """Eres el Sub-agente de Riesgo y Decisión Final de un sistema de trading evolutivo EUR/USD.
 Recibes señales de dos analistas (Técnico y Macro) y debes tomar la decisión óptima de trading.
@@ -29,10 +31,10 @@ Reglas de respuesta:
    "confianza_final": 0.0-1.0,
    "stop_loss": precio_float,
    "take_profit": precio_float,
-   "capital_a_usar": monto_float,
    "razonamiento": "string explicando la decisión"}
 - Si las señales están en conflicto (una BUY, otra SELL), emite HOLD salvo que una tenga confianza > 0.75.
-- Siempre respeta los umbrales de riesgo máximo (1-2% del capital por operación)."""
+- Siempre respeta los umbrales de riesgo máximo (1-2% del capital por operación).
+- El tamaño de posición (nocional en USD) es calculado automáticamente por el sistema; no lo incluyas."""
 
 
 @dataclass
@@ -65,18 +67,26 @@ class SubAgentRisk(BaseAgent):
     # ── Position sizing ───────────────────────────────────────────────────────
 
     def _dynamic_position_size(
-        self, equity: float, sl_pips: float, risk_pct: float
+        self, equity: float, sl_pips: float, risk_pct: float, precio: float
     ) -> float:
         """
-        Position sizing dinámico: cuánto capital usar dados equity, pips de SL y % de riesgo.
-        risk_pct se fuerza al rango [1%, 2%] (hard limits inmutables).
-        pip_value_usd = $0.10 por pip para 1000 unidades EUR (referencia estándar).
+        Position sizing dinámico. Retorna el NOCIONAL EN USD de la posición.
+
+        Lógica:
+          1. Calcula número de lotes (×1000 EUR) para que la pérdida máxima al SL
+             sea exactamente equity × risk_pct (1–2% inmutable).
+          2. Convierte a nocional USD = lotes × 1000 × precio.
+          3. Aplica techo de apalancamiento: nocional ≤ equity × _MAX_LEVERAGE (50×).
+
+        El nocional USD se almacena en capital_usado y es lo que multiplica el P&L
+        porcentual en close_operation, produciendo dólares correctos.
         """
         risk_pct      = max(_RISK_PCT_MIN, min(_RISK_PCT_MAX, risk_pct))
-        pip_value_usd = 0.0001 * 1000   # $0.10 por pip · base 1000 EUR
-        capital_uso   = (equity * risk_pct) / (sl_pips * pip_value_usd)
-        capital_uso   = min(capital_uso, equity * 0.20)   # hard cap 20% equity
-        return round(capital_uso, 4)
+        pip_value_usd = 0.0001 * _UNITS_PER_LOT          # $0.10 por pip por lote
+        lotes         = (equity * risk_pct) / (sl_pips * pip_value_usd)
+        nocional_usd  = lotes * _UNITS_PER_LOT * precio   # exposición en USD
+        nocional_usd  = min(nocional_usd, equity * _MAX_LEVERAGE)
+        return round(nocional_usd, 4)
 
     # ── Niveles SL/TP ─────────────────────────────────────────────────────────
 
@@ -176,10 +186,10 @@ class SubAgentRisk(BaseAgent):
             self.params_smc.get("risk_pct_per_trade",
             self.params.get("risk_pct_per_trade", 0.015))
         )
-        capital_uso = self._dynamic_position_size(capital, sl_pips, risk_pct)
+        capital_uso = self._dynamic_position_size(capital, sl_pips, risk_pct, precio)
 
         log.debug(
-            "[SubAgentRisk] SL=%s (fuente=%s, %.1fpips) TP=%s R:R=%.1f capital=%.4f",
+            "[SubAgentRisk] SL=%s (fuente=%s, %.1fpips) TP=%s R:R=%.1f nocional=$%.2f",
             round(sl_precio, 5), sl_fuente, sl_pips,
             round(take_profit, 5), risk_reward, capital_uso,
         )
@@ -297,7 +307,7 @@ class SubAgentRisk(BaseAgent):
                 f"Precio EUR/USD: {precio_actual}\n"
                 f"Capital disponible: ${capital_disponible:.2f}\n"
                 f"SL ({sl_fuente}): {stop_loss} ({sl_pips:.1f} pips) | "
-                f"TP: {take_profit} | Capital: ${capital_uso:.4f}\n\n"
+                f"TP: {take_profit} | Nocional USD: ${capital_uso:.2f}\n\n"
                 f"Señal combinada: {accion_prelim} (conf={conf_prelim:.2f}). "
                 f"Confirma o ajusta. Responde solo JSON."
             )
@@ -311,8 +321,7 @@ class SubAgentRisk(BaseAgent):
                     stop_loss = float(parsed["stop_loss"])
                 if parsed.get("take_profit"):
                     take_profit = float(parsed["take_profit"])
-                if parsed.get("capital_a_usar"):
-                    capital_uso = float(parsed["capital_a_usar"])
+                # capital_uso no se overridea con el LLM: el sizer ya lo calculó correctamente
             except Exception as e:
                 log.warning("[SubAgentRisk] LLM no disponible: %s — usando heuristica.", e)
 
