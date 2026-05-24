@@ -223,6 +223,7 @@ class SheetsLogger:
         timestamp_entrada: datetime,
         capital_usado: float,
         pips_sl: float | None = None,
+        generacion: str = "",
     ) -> None:
         """Registra una nueva operación (BUY/SELL/HOLD) en la pestaña Operaciones."""
         if not self.client or self.ws_ops is None:
@@ -263,7 +264,7 @@ class SheetsLogger:
             row = [
                 op_id,
                 decision.get("agente_id", ""),
-                "",                                 # Generación (backfill lo llena)
+                generacion,
                 ts_str,
                 accion,
                 precio_entrada,
@@ -433,6 +434,42 @@ class SheetsLogger:
             log.warning("[SheetsLogger] Agente %s no encontrado en Sheets.", agent_id)
         except Exception as exc:
             log.error("[SheetsLogger] Error actualizando agente %s: %s", agent_id, exc)
+
+
+    def update_agent_live(
+        self,
+        agent_id: str,
+        capital: float,
+        roi: float,
+        ops: int,
+        ops_ganadoras: int,
+    ) -> None:
+        """
+        Actualiza Capital Final, ROI, Ops y Win Rate de un agente activo en Sheets.
+        Llamado tras cada cierre de operación y tras redistribución de capital.
+        No modifica Estado, Fecha Eliminación ni Razón Eliminación.
+        """
+        if not self.client or self.ws_agents is None:
+            return
+        try:
+            cell = _api_call(self.ws_agents.find, str(agent_id), in_column=_COL_AGT["ID"])
+            if not cell:
+                log.warning("[SheetsLogger] update_agent_live: agente %s no encontrado.", agent_id)
+                return
+            r = cell.row
+            wr = round(ops_ganadoras / ops * 100, 2) if ops > 0 else 0.0
+            updates = [
+                {"range": f"{_col_letter(_COL_AGT['ROI Total (%)'])}{r}",   "values": [[round(float(roi), 4)]]},
+                {"range": f"{_col_letter(_COL_AGT['Ops Total'])}{r}",        "values": [[ops]]},
+                {"range": f"{_col_letter(_COL_AGT['Win Rate (%)'])}{r}",     "values": [[wr]]},
+                {"range": f"{_col_letter(_COL_AGT['Capital Final ($)'])}{r}", "values": [[round(float(capital), 4)]]},
+            ]
+            _api_call(self.ws_agents.batch_update, updates)
+            log.debug("[SheetsLogger] Agente %s — capital/ROI actualizados en Sheets.", agent_id)
+        except gspread.exceptions.CellNotFound:
+            log.warning("[SheetsLogger] update_agent_live: agente %s no encontrado.", agent_id)
+        except Exception as exc:
+            log.error("[SheetsLogger] Error en update_agent_live para %s: %s", agent_id, exc)
 
 
 # ── Helper interno ─────────────────────────────────────────────────────────────

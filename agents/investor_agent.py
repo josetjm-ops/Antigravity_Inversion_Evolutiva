@@ -38,8 +38,9 @@ class InvestorAgent:
     """
 
     def __init__(self, agent_id: str, params: dict):
-        self.agent_id = agent_id
-        self.params   = params
+        self.agent_id   = agent_id
+        self.params     = params
+        self.generacion = str(params.get("generacion", ""))
         self.sub_technical = SubAgentTechnical(
             agent_id,
             params.get("params_tecnicos", {}),
@@ -59,7 +60,7 @@ class InvestorAgent:
             cur = get_dict_cursor(conn)
             cur.execute(
                 """
-                SELECT params_tecnicos, params_macro, params_riesgo, capital_actual
+                SELECT params_tecnicos, params_macro, params_riesgo, capital_actual, generacion
                 FROM agentes
                 WHERE id = %s AND estado = 'activo'
                 """,
@@ -73,6 +74,7 @@ class InvestorAgent:
             "params_macro":    row["params_macro"],
             "params_riesgo":   row["params_riesgo"],
             "capital_actual":  float(row["capital_actual"]),
+            "generacion":      str(row["generacion"]),
         })
 
     # ── Verificación de posición abierta ─────────────────────────────────────
@@ -287,6 +289,7 @@ class InvestorAgent:
                     precio_entrada=precio_entrada,
                     timestamp_entrada=ts_entrada,
                     capital_usado=decision.capital_a_usar if decision.accion_final != "HOLD" else 0,
+                    generacion=self.generacion,
                 )
             except Exception as e:
                 log.error("[InvestorAgent] Error registrando operación %s en Sheets: %s", op_id, e)
@@ -390,7 +393,27 @@ class InvestorAgent:
                 timestamp_salida=datetime.now(timezone.utc),
             )
         except Exception as e:
-            log.error(f"[InvestorAgent] Error updating sheets: {e}")
+            log.error(f"[InvestorAgent] Error updating sheets (operation): {e}")
+
+        # Actualizar capital y ROI del agente en la pestaña Agentes
+        try:
+            with get_conn() as conn:
+                cur = get_dict_cursor(conn)
+                cur.execute(
+                    "SELECT roi_total, operaciones_total, operaciones_ganadoras FROM agentes WHERE id = %s",
+                    (self.agent_id,),
+                )
+                ag = cur.fetchone()
+            if ag:
+                SheetsLogger().update_agent_live(
+                    agent_id=self.agent_id,
+                    capital=nuevo_capital,
+                    roi=float(ag["roi_total"]),
+                    ops=int(ag["operaciones_total"]),
+                    ops_ganadoras=int(ag["operaciones_ganadoras"]),
+                )
+        except Exception as e:
+            log.error("[InvestorAgent] Error updating agent live stats in sheets: %s", e)
 
         log.info(
             "[InvestorAgent] Op %d cerrada: accion=%s entrada=%.5f salida=%.5f pnl=%.4f",

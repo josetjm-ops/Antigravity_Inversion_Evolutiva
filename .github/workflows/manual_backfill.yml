@@ -1,6 +1,8 @@
 name: "Backfill Manual de Google Sheets"
 
 "on":
+  schedule:
+    - cron: "0 6 * * 0"   # Domingos 06:00 UTC = 1:00 am Bogotá (safety-net semanal)
   workflow_dispatch:
     inputs:
       motivo:

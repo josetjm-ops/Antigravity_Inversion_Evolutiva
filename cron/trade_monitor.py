@@ -417,6 +417,7 @@ def _evaluate_new_positions() -> dict:
         cur.execute(
             """
             SELECT a.id,
+                   a.generacion,
                    a.params_tecnicos,
                    a.params_macro,
                    a.params_riesgo,
@@ -488,6 +489,7 @@ def _evaluate_new_positions() -> dict:
                 "params_riesgo":   agent_data["params_riesgo"],
                 "params_smc":      smc_params or None,
                 "capital_actual":  agent_data["capital_actual"],
+                "generacion":      str(agent_data.get("generacion", "")),
             }
             agent  = InvestorAgent(agent_id, params)
             result = agent.run_cycle(

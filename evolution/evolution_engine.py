@@ -795,6 +795,31 @@ class EvolutionEngine:
             "[EvolutionEngine] Capital redistribuido: pool=%.4f / %d agentes = %.4f c/u",
             pool_total, n_agentes, capital_por_agente,
         )
+
+        # Reflejar nuevo capital de cada agente en Google Sheets
+        try:
+            cur.execute(
+                """
+                SELECT id, roi_total, operaciones_total, operaciones_ganadoras
+                FROM agentes WHERE estado = 'activo'
+                """
+            )
+            agents_for_sheets = cur.fetchall()
+            sl = SheetsLogger()
+            for ag in agents_for_sheets:
+                try:
+                    sl.update_agent_live(
+                        agent_id=ag[0],
+                        capital=capital_por_agente,
+                        roi=float(ag[1] or 0),
+                        ops=int(ag[2] or 0),
+                        ops_ganadoras=int(ag[3] or 0),
+                    )
+                except Exception as e_ag:
+                    log_r.error("[EvolutionEngine] Error actualizando Sheets agente %s: %s", ag[0], e_ag)
+        except Exception as e_sheets:
+            log_r.error("[EvolutionEngine] Error actualizando Sheets tras redistribución: %s", e_sheets)
+
         return pool_total, capital_por_agente
 
     # ── Ciclo evolutivo completo ──────────────────────────────────────────────
