@@ -817,7 +817,20 @@ Hall of Fame: parámetros de agentes que superaron el umbral `MIN_ROI_FOR_HALL_O
 | RSI / FVG / OB / Range Spike | Indicadores en el momento del trade |
 | Razonamiento LLM | Texto de DeepSeek explicando la decisión |
 
-El logger (`utils/sheets_logger.py`) escribe de forma asíncrona: si Sheets no está disponible, el trading no se interrumpe.
+### Eventos que actualizan Sheets automáticamente
+
+| Evento | Método llamado | Trigger | Pestaña afectada |
+|---|---|---|---|
+| Operación abre (BUY/SELL/HOLD) | `log_operation()` | `investor_agent._persist_operation` | Operaciones — nueva fila con generación |
+| Operación cierra (SL/TP/EOD) | `update_operation()` + `update_agent_live()` | `investor_agent.close_operation` | Operaciones (precio/P&G) + Agentes (capital, ROI, Ops, Win Rate) |
+| Nuevo agente (evolución) | `log_agent()` | `evolution_engine._insert_new_agent` | Agentes — nueva fila |
+| Agente eliminado | `update_agent_status()` | `evolution_engine._eliminate_agents` | Agentes (Estado, ROI final, capital final) |
+| Redistribución de capital | `update_agent_live()` × N | `evolution_engine._redistribute_capital` | Agentes — capital nuevo de todos los activos |
+| Backfill semanal | `sheets_backfill.run_backfill` | `manual_backfill.yml` (cron domingo 06:00 UTC) | Ambas pestañas reescritas desde DB |
+
+**Diseño asíncrono:** el logger (`utils/sheets_logger.py`) está envuelto en `try/except`. Si Sheets no está disponible o la API rate-limitea, el trading no se interrumpe. El backfill semanal corrige cualquier desincronización acumulada.
+
+**`update_agent_live()`** (lightweight): actualiza solo Capital Final, ROI Total, Ops Total y Win Rate. No toca Estado, Fecha Eliminación ni Razón Eliminación (esas las maneja `update_agent_status` cuando ocurre eliminación). Usa `batch_update` con 4 celdas para minimizar API calls.
 
 ---
 
@@ -906,9 +919,27 @@ Parámetros de evolución (env vars):
 En caso de fallo: crea GitHub Issue con alerta
 ```
 
-### `health_check.yml` y `trading_cycle.yml`
+### `health_check.yml` — Verificación diaria de dependencias
 
-Workflows adicionales para verificación de estado y ciclos de trading manual ad-hoc.
+```
+Schedule: "0 13 * * 1-5"     → 08:00 Bogotá L-V (50 min antes del trading)
+
+Verifica que DB, DeepSeek API, Finnhub API, Yahoo Finance y todos los secrets
+estén disponibles. Si algún check falla, crea un GitHub Issue de alerta.
+```
+
+### `manual_backfill.yml` — Sincronización Sheets ↔ DB
+
+```
+Schedule: "0 6 * * 0"        → Domingos 01:00 Bogotá (safety-net semanal)
+workflow_dispatch:           → Disparo manual desde GitHub UI
+
+Pasos:
+  1. python utils/diagnose_backfill.py  (verifica DB + creds Sheets)
+  2. python -m utils.sheets_backfill    (limpia y reescribe Agentes + Operaciones)
+
+Corrige cualquier desincronización acumulada durante la semana.
+```
 
 ---
 
@@ -1037,7 +1068,6 @@ Antigravity_Inversion_Evolutiva/
 │   └── sub_agent_risk.py
 ├── cron/                        Entry points para GitHub Actions
 │   ├── trade_monitor.py         (cada 15 min: SL/TP + nuevas + guardia EOD)
-│   ├── trading_runner.py        (legacy: ciclo único de calentamiento 2 am)
 │   └── judge_scheduler.py       (lanza el ciclo evolutivo del Juez)
 ├── data/                        Fuentes de mercado y indicadores
 │   ├── indicators.py            (OHLCV + RSI/EMA/MACD/FVG/OB/ATR)
@@ -1060,12 +1090,14 @@ Antigravity_Inversion_Evolutiva/
 ├── scripts/                     Utilidades manuales (seed_gen1, diversify_gen1)
 ├── tests/                       pytest (pipeline + evolution)
 ├── utils/
-│   └── sheets_logger.py         (gspread: trazabilidad en Google Sheets)
+│   ├── sheets_logger.py         (gspread: trazabilidad en Google Sheets)
+│   ├── sheets_backfill.py       (sincronización completa DB → Sheets)
+│   └── diagnose_backfill.py     (verificación previa al backfill)
 ├── .github/workflows/
-│   ├── trade_monitor.yml
-│   ├── judge_daily.yml
-│   ├── trading_cycle.yml
-│   └── health_check.yml
+│   ├── trade_monitor.yml        (cada 15 min L-V)
+│   ├── judge_daily.yml          (10:45 pm Bogotá L-V)
+│   ├── manual_backfill.yml      (domingo + dispatch manual)
+│   └── health_check.yml         (08:00 am Bogotá L-V)
 ├── streamlit_app.py             (entrypoint Streamlit Cloud)
 ├── Procfile                     (Streamlit Cloud config)
 ├── runtime.txt                  (Python 3.11)
@@ -1075,9 +1107,21 @@ Antigravity_Inversion_Evolutiva/
 
 ---
 
-*Documento actualizado el 2026-05-20 (Sesión 10 — corrección modelo P&L: nocional USD, apalancamiento 50:1, ROI sobre cuenta). Refleja la corrección del modelo de posicionamiento y cálculo de P&L implementada en el commit `6572c11`.*
+*Documento actualizado el 2026-05-24 (Sesión 11 — auditoría sistemática, eliminación de código legacy y cierre de huecos de sincronización Sheets). Refleja el estado del sistema con primer agente Gen2 ya en producción y sincronización Sheets completamente automatizada.*
 
 ## Historial de cambios mayores
+
+- **2026-05-24 (Sesión 11 — auditoría sistemática + sincronización Sheets completa + limpieza legacy):**
+  - **Auditoría profunda del aplicativo:** verificación independiente de los 4 workflows, motor evolutivo, motor de riesgo, agente Juez y monitor de trades. Resultado: sistema conforme a los parámetros establecidos. Primer agente de Generación 2 (`2026-05-23_01`) creado correctamente el 23-may con padres `2026-05-19_05 × 2026-05-19_02` (crossover fitness-proporcional). El agente eliminado (`2026-05-19_08`, fitness=-0.20) fue el único candidato elegible bajo la regla de cuota dinámica; durante 3 días seguidos (20, 21, 22-may) el ciclo se suspendió correctamente porque todos los Gen1 tenían fitness > 0.
+  - **Eliminación de código legacy** (commit `d3115de`): `cron/trading_runner.py` y `.github/workflows/trading_cycle.yml` removidos. `trading_runner` era un ciclo único de "calentamiento" a las 2 am Bogotá sin EOD guard, sin trailing stop, sin cuarentena macro y sin verificación de horario. Su funcionalidad (abrir nuevas posiciones) ya está cubierta con creces por `trade_monitor.yml` (cada 15 min desde 1:30 am). Eliminar redundancia previene doble ejecución y consolida un único punto de mantenimiento para el trading.
+  - **Reparación de workflow Sheets backfill** (commit `c3b9c6b`): el `manual_backfill.yml` referenciaba `utils/diagnose_backfill.py` pero el archivo nunca había sido creado, causando exit code 2 en el paso "Diagnostico previo". Creado el script que verifica conexión a DB (cuenta agentes activos, totales, ops, max_gen) y validez de credenciales Sheets (`GOOGLE_SHEET_ID` + `GOOGLE_CREDENTIALS_JSON` con `client_email` extraído del JSON).
+  - **Sincronización Sheets completamente automática** (commit `f86ad75`): cerrados 4 huecos críticos en las actualizaciones en tiempo real.
+    - **Generación en operaciones:** `log_operation()` ahora recibe el parámetro `generacion` (antes hardcodeado a `""`). `InvestorAgent` almacena `self.generacion` en `__init__`, lo recibe vía `params["generacion"]` desde `trade_monitor._evaluate_new_positions` (cuya query ahora incluye `a.generacion`) y desde `from_db` (cuya SELECT también lo incluye).
+    - **Capital/ROI del agente tras cierre de operación:** `close_operation()` consulta `roi_total`, `operaciones_total` y `operaciones_ganadoras` actualizados en DB y llama al nuevo método `update_agent_live()` para reflejar el capital, ROI y win rate en la pestaña Agentes inmediatamente al cierre de cada SL/TP/EOD. Antes esto solo se actualizaba en eliminación.
+    - **Redistribución de capital en Sheets:** `evolution_engine._redistribute_capital()` ahora itera sobre todos los agentes activos tras la UPDATE en DB y llama a `update_agent_live()` para cada uno. El nuevo capital igualado por el ciclo evolutivo aparece en Sheets al instante, sin esperar al próximo backfill.
+    - **Safety-net semanal:** `manual_backfill.yml` añade `schedule: 0 6 * * 0` (domingos 06:00 UTC = 1:00 am Bogotá) que reescribe ambas pestañas desde la BD para corregir cualquier desincronización acumulada durante la semana.
+  - **Nuevo método `SheetsLogger.update_agent_live()`:** actualización lightweight de Capital Final, ROI Total, Ops Total y Win Rate (4 celdas vía `batch_update`). No modifica Estado, Fecha Eliminación ni Razón Eliminación (esas las maneja `update_agent_status` cuando ocurre eliminación). Wrap en `try/except` con warning en `CellNotFound` y error log para excepciones generales — no interrumpe el trading si Sheets falla.
+  - **Estado post-Sesión 11:** Pool $103.18 / 10 agentes = $10.32 c/u (pool +3.18% en 4 días de trading). Win rate promedio 62% (94 ops positivas vs 57 negativas, excluyendo 41 ops con P&G exacto $0 por precios entrada=salida en condiciones planas). 9 estrategias en Hall of Fame. Primer Gen2 en periodo de gracia (inmune por 2 días hábiles).
 
 - **2026-05-20 (Sesión 10 — corrección modelo P&L y position sizing):**
   - **Problema raíz identificado:** el sizer (`sub_agent_risk._dynamic_position_size`) calculaba internamente lotes (~0.044) pero los almacenaba en `capital_usado` y `close_operation` los trataba como dólares de nocional. Resultado: P&L comprimido ~1162× (se mostraba $0.0000 en trades con ganancia real de ~$0.02). Esto impedía que el motor evolutivo diferenciara el fitness entre agentes.
