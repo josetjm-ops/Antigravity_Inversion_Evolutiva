@@ -15,8 +15,18 @@ name: "Agente Juez - Ciclo Evolutivo Diario"
 # ─────────────────────────────────────────────────────────────────────────
 
 "on":
-  schedule:
-    - cron: "45 3 * * 2-6"   # 10:45 pm Bogotá (Mon-Fri Bogotá → Tue-Sat UTC)
+  # ─────────────────────────────────────────────────────────────────────────
+  # Schedule MIGRADO a cron-job.org (2026-05-26) — el cron interno de GH
+  # Actions retrasó este workflow ~8h el 2026-05-25, ejecutando force-close
+  # durante trading hours. Cronjob equivalente: "45 22 * * 1-5" en
+  # America/Bogota.
+  # Para rollback: descomentar el bloque schedule y deshabilitar el job
+  # "GH Action - Judge Daily" en cron-job.org.
+  # La guardia de ventana segura abajo queda como defensa adicional si
+  # algún día se reactiva el schedule de GitHub.
+  # ─────────────────────────────────────────────────────────────────────────
+  # schedule:
+  #   - cron: "45 3 * * 2-6"   # 10:45 pm Bogotá (Mon-Fri Bogotá → Tue-Sat UTC)
   workflow_dispatch:
     inputs:
       dry_run:

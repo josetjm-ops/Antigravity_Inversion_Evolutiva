@@ -29,13 +29,20 @@ name: "Monitor de Trades (SL/TP + Nuevas Posiciones)"
 # ─────────────────────────────────────────────────────────────────────────
 
 "on":
-  schedule:
-    - cron: "30,45 6 * * 1-5"      # 1:30 am y 1:45 am Bogotá (Mon-Fri Bogotá)
-    - cron: "*/15 7-23 * * 1-5"    # 2:00 am – 6:45 pm Bogotá (Mon-Fri Bogotá)
-    - cron: "*/15 0-2 * * 2-6"     # 7:00 pm – 9:45 pm Bogotá (Mon-Fri Bogotá)
-    - cron: "0,15,30 3 * * 2-6"    # 10:00 pm, 10:15 pm, 10:30 pm Bogotá (Mon-Fri Bogotá)
-    - cron: "*/15 4-6 * * 2-6"     # ventana ciega EOD: 11:00 pm – 1:45 am Bogotá
-  workflow_dispatch: {}             # disparo manual para pruebas
+  # ─────────────────────────────────────────────────────────────────────────
+  # Schedule MIGRADO a cron-job.org (2026-05-26) — disparador externo
+  # confiable porque GitHub Actions cron puede retrasarse horas.
+  # Cronjob equivalente: "*/15 * * * 1-5" en zona America/Bogota.
+  # Para rollback: descomentar el bloque schedule de abajo y deshabilitar
+  # el job "GH Action - Trade Monitor" en cron-job.org.
+  # ─────────────────────────────────────────────────────────────────────────
+  # schedule:
+  #   - cron: "30,45 6 * * 1-5"      # 1:30 am y 1:45 am Bogotá (Mon-Fri Bogotá)
+  #   - cron: "*/15 7-23 * * 1-5"    # 2:00 am – 6:45 pm Bogotá (Mon-Fri Bogotá)
+  #   - cron: "*/15 0-2 * * 2-6"     # 7:00 pm – 9:45 pm Bogotá (Mon-Fri Bogotá)
+  #   - cron: "0,15,30 3 * * 2-6"    # 10:00 pm, 10:15 pm, 10:30 pm Bogotá (Mon-Fri Bogotá)
+  #   - cron: "*/15 4-6 * * 2-6"     # ventana ciega EOD: 11:00 pm – 1:45 am Bogotá
+  workflow_dispatch: {}             # disparo desde cron-job.org y manual
 
 jobs:
   monitor:

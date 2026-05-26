@@ -1,8 +1,14 @@
 name: "Backfill Manual de Google Sheets"
 
 "on":
-  schedule:
-    - cron: "0 6 * * 0"   # Domingos 06:00 UTC = 1:00 am Bogotá (safety-net semanal)
+  # ─────────────────────────────────────────────────────────────────────────
+  # Schedule MIGRADO a cron-job.org (2026-05-26).
+  # Cronjob equivalente: "0 1 * * 0" en zona America/Bogota (domingos 1 AM).
+  # Para rollback: descomentar el bloque schedule y deshabilitar el job
+  # "GH Action - Backfill Weekly" en cron-job.org.
+  # ─────────────────────────────────────────────────────────────────────────
+  # schedule:
+  #   - cron: "0 6 * * 0"   # Domingos 06:00 UTC = 1:00 am Bogotá (safety-net semanal)
   workflow_dispatch:
     inputs:
       motivo:

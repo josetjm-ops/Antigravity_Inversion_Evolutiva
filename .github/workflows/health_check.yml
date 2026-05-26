@@ -1,8 +1,14 @@
 name: "Health Check Diario"
 
 "on":
-  schedule:
-    - cron: "0 13 * * 1-5"   # 08:00 Bogotá (UTC-5), 50 min antes del trading
+  # ─────────────────────────────────────────────────────────────────────────
+  # Schedule MIGRADO a cron-job.org (2026-05-26).
+  # Cronjob equivalente: "0 8 * * 1-5" en zona America/Bogota.
+  # Para rollback: descomentar el bloque schedule y deshabilitar el job
+  # "GH Action - Health Check" en cron-job.org.
+  # ─────────────────────────────────────────────────────────────────────────
+  # schedule:
+  #   - cron: "0 13 * * 1-5"   # 08:00 Bogotá (UTC-5)
   workflow_dispatch: {}
 
 jobs:
