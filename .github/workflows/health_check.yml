@@ -146,7 +146,7 @@ jobs:
         run: |
           echo "============================================"
           echo "✅ TODOS LOS CHECKS PASARON"
-          echo "El ciclo de trading correrá a las 08:50 Bogotá"
+          echo "Trading activo desde las 01:30 am Bogotá (06:30 UTC)"
           echo "============================================"
 
       - name: "🚨 Crear Issue de alerta si algún check falló"

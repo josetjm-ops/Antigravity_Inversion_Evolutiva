@@ -59,6 +59,36 @@ jobs:
       ENVIRONMENT:                 "production"
 
     steps:
+      - name: "Verificar ventana de ejecución segura (solo runs programados)"
+        # Si GitHub Actions retrasa el cron horas, este guard aborta antes de que
+        # el force-close-all se ejecute durante el horario activo de trading.
+        # Ventana segura: 02:00–06:00 UTC = 09:00 pm–01:00 am Bogotá.
+        # El trading abre a las 06:30 UTC; cualquier ejecución >= 06:00 UTC
+        # podría interferir con posiciones activas.
+        # workflow_dispatch omite esta guardia para permitir recuperación manual.
+        if: ${{ github.event_name == 'schedule' && github.event.inputs.dry_run != 'true' }}
+        run: |
+          HOUR=$(date -u +'%-H')
+          MINUTE=$(date -u +'%-M')
+          CURRENT_MIN=$(( HOUR * 60 + MINUTE ))
+          WINDOW_START_MIN=$(( 2 * 60 ))   # 02:00 UTC = 120 min
+          WINDOW_END_MIN=$(( 6 * 60 ))     # 06:00 UTC = 360 min (30 min antes del trading)
+          echo "Hora actual: $(date -u +'%H:%M UTC') — minuto del día: ${CURRENT_MIN}"
+          echo "Ventana segura: 02:00–06:00 UTC (09:00 pm–01:00 am Bogotá)"
+          if [ "${CURRENT_MIN}" -lt "${WINDOW_START_MIN}" ] || [ "${CURRENT_MIN}" -ge "${WINDOW_END_MIN}" ]; then
+            echo ""
+            echo "❌ ABORT: el Juez está corriendo FUERA de su ventana segura."
+            echo "   Hora actual:     $(date -u +'%H:%M UTC') (Bogotá: $(TZ=America/Bogota date +'%H:%M'))"
+            echo "   Ventana segura:  02:00–06:00 UTC (09:00 pm–01:00 am Bogotá)"
+            echo "   Programado para: 03:45 UTC (10:45 pm Bogotá)"
+            echo ""
+            echo "   Diagnóstico: retraso grave en el cron de GitHub Actions."
+            echo "   Ejecutar force-close-all ahora interrumpiría el trading activo."
+            echo "   Usa 'workflow_dispatch' para lanzar el ciclo manualmente."
+            exit 1
+          fi
+          echo "✅ Dentro de ventana segura — continuando con el ciclo evolutivo."
+
       - name: "Checkout del repositorio"
         uses: actions/checkout@v4
 
