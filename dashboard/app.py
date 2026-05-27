@@ -407,9 +407,9 @@ def _sidebar() -> tuple[list[str], list[int]]:
         st.markdown(f"""
         <div style="font-size:8px;color:{DIM};border-top:1px solid {BORDER};
                     padding-top:10px;margin-top:16px;line-height:1.8;">
-          INVERSIÓN EVOLUTIVA v1.0<br>
+          INVERSIÓN EVOLUTIVA v1.2<br>
           Cache TTL: 60 s · Par: EUR/USD<br>
-          Motor: DeepSeek + Neon PG 17
+          Motor: DeepSeek + Supabase PG · cron-job.org
         </div>
         """, unsafe_allow_html=True)
 
@@ -1444,9 +1444,15 @@ def _tab_instructions() -> None:
       se calcula sobre las mismas velas y sirve como base del SL dinámico.
       El razonamiento de los agentes y del Juez usa <b style="color:{TEXT};">DeepSeek</b>
       (<code>deepseek-chat</code>). El fitness (Calmar Ratio Proxy) se calcula
-      vía SQL sobre operaciones cerradas en <b style="color:{TEXT};">PostgreSQL — Neon</b>.
+      vía SQL sobre operaciones cerradas en <b style="color:{TEXT};">PostgreSQL — Supabase</b>.
       Los workflows (monitor cada 15min y juez diario lunes–viernes) corren en
-      <b style="color:{TEXT};">GitHub Actions</b> de forma completamente autónoma.
+      <b style="color:{TEXT};">GitHub Actions</b>, disparados externamente por
+      <b style="color:{TEXT};">cron-job.org</b> con precisión ±5 segundos
+      (reemplaza el cron interno de GH que sufría retrasos crónicos de varias horas).
+      Las acciones del workflow usan <b style="color:{TEXT};">Node.js 24</b>
+      (<code>actions/checkout@v6</code>, <code>actions/setup-python@v6</code>).
+      Todos los timestamps mostrados en el dashboard están en hora
+      <b style="color:{TEXT};">America/Bogota (UTC−5)</b>.
     </div>
     """, unsafe_allow_html=True)
 

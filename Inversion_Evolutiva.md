@@ -64,7 +64,8 @@ Los agentes **no son configurados manualmente**: nacen con parámetros aleatorio
 
 | Herramienta | Rol |
 |---|---|
-| **GitHub Actions** | Ejecución automática del monitor (cada 15 min, 1:30 am–10:30 pm Bogotá) y del Juez (11:00 pm Bogotá L-V) |
+| **GitHub Actions** | Runtime de ejecución de los 4 workflows (monitor, juez, health check, backfill). Lógica intacta — solo el disparo se delega a cron-job.org desde Sesión 12 |
+| **cron-job.org** | Scheduler externo gratuito que dispara los workflows vía `workflow_dispatch` API con precisión ±5 seg, reemplazando el cron interno de GH (poco fiable, retrasos crónicos de horas) |
 | **Streamlit Community Cloud** | Hosting del dashboard en `inversion-evolutiva.streamlit.app` |
 | **Vercel** | Hosting de la app móvil Next.js en `https://mobile-app-smoky-phi.vercel.app` |
 | **GitHub Secrets** | Almacenamiento seguro de todas las credenciales |
@@ -75,17 +76,23 @@ Los agentes **no son configurados manualmente**: nacen con parámetros aleatorio
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                     GITHUB ACTIONS                              │
+│  cron-job.org (scheduler externo · America/Bogota · ±5 seg)     │
+│  4 cronjobs → HTTPS POST → GitHub workflow_dispatch API         │
+└────────────────────────────┬────────────────────────────────────┘
+                             │
+                             ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                  GITHUB ACTIONS (runtime)                       │
 │                                                                 │
 │  trade_monitor.yml          judge_daily.yml                     │
-│  Cada 15 min, L-V           11:00 pm Bogotá (04:00 UTC), L-V    │
-│  1:30 am–10:30 pm Bogotá    ┌──────────────────────┐            │
-│  ┌──────────────────┐       │  Agente Juez         │            │
-│  │  TradeMonitor    │       │  - Evalúa fitness    │            │
-│  │  - Verifica SL/TP│       │  - Elimina bottom 5  │            │
-│  │  - Trailing stop │       │  - Crea 5 hijos      │            │
-│  │  - Abre pos. new │       │  - Redistribuye cap. │            │
-│  └────────┬─────────┘       │  - Razona con LLM    │            │
+│  Cada 15 min, L-V           10:45 pm Bogotá, L-V                │
+│  ┌──────────────────┐       ┌──────────────────────┐            │
+│  │  TradeMonitor    │       │  Agente Juez         │            │
+│  │  - Verifica SL/TP│       │  - Evalúa fitness    │            │
+│  │  - Trailing stop │       │  - Elimina bottom 5  │            │
+│  │  - Abre pos. new │       │  - Crea 5 hijos      │            │
+│  └────────┬─────────┘       │  - Redistribuye cap. │            │
+│           │                 │  - Razona con LLM    │            │
 │           │                 └──────────┬───────────┘            │
 └───────────┼──────────────────────────┼────────────────────────-┘
             │                          │
@@ -382,9 +389,11 @@ El trailing stop protege ganancias sin limitar el potencial alcista:
 
 El workflow `judge_daily.yml` ejecuta `trade_monitor --force-close-all` a las **10:45 pm Bogotá (03:45 UTC)**, exactamente 15 minutos antes del Juez. Esto cierra todas las posiciones abiertas al precio de mercado actual para que el Juez evalúe con P&L definitivo del día. El gap de 15 minutos es un buffer de seguridad por si el cierre se reintenta o tarda.
 
-### Guardia EOD defensiva (red de seguridad ante retrasos de GitHub Actions)
+### Guardia EOD defensiva (red de seguridad ante retrasos)
 
-Los crons programados de GitHub Actions **no garantizan disparo puntual**: pueden retrasarse horas durante picos de carga del runner. Para que un retraso del `judge_daily.yml` no deje posiciones abiertas durante toda la noche, `trade_monitor.py` incluye una función `_eod_guard()` que corre al inicio de **cada** ciclo de 15 minutos:
+Históricamente los crons programados de GitHub Actions **no garantizaban disparo puntual**: podían retrasarse horas durante picos de carga del runner. Desde Sesión 12 (27-may-2026) el disparo se hace vía **cron-job.org** (precisión ±5 seg), eliminando ese problema en condiciones normales. La guardia EOD se mantiene **como red de seguridad** por si alguna vez el scheduler externo se cae o si se ejecuta un rollback temporal al cron interno de GH.
+
+`trade_monitor.py` incluye una función `_eod_guard()` que corre al inicio de **cada** ciclo de 15 minutos:
 
 ```
 Para cada ciclo del monitor:
@@ -855,34 +864,70 @@ El dashboard es **solo lectura**: no tiene capacidad de enviar órdenes ni modif
 
 ---
 
-## 14. Automatización — GitHub Actions
+## 14. Automatización — GitHub Actions + cron-job.org
+
+### Estrategia de scheduling (desde Sesión 12, 2026-05-27)
+
+El **disparo programado** de los 4 workflows ya **no depende del cron interno de GitHub Actions**. GitHub no garantiza puntualidad en sus crons (`schedule:` es "best effort" según su documentación oficial) y en producción se observaron retrasos crónicos de **2–8 horas** que afectaban especialmente al `judge_daily.yml` (caso límite documentado: ejecución a las 7 AM Bogotá cuando debía correr a las 10:45 PM).
+
+A partir de Sesión 12, la disparada se delega a **[cron-job.org](https://cron-job.org)** — un servicio externo gratuito que invoca el endpoint `workflow_dispatch` de la GitHub REST API con precisión **±5 segundos**:
+
+```
+cron-job.org (Bogotá TZ, ±5 seg)
+        │
+        │  HTTPS POST con Bearer PAT
+        ▼
+GitHub API /repos/.../workflows/{file}/dispatches
+        │
+        ▼
+GitHub Actions ejecuta el workflow (lógica intacta)
+```
+
+Los bloques `schedule:` en los 4 workflows están **comentados** (no eliminados) para permitir rollback de 1 commit. El `workflow_dispatch:` queda como única vía de disparo activa.
+
+**Configuración de los 4 cronjobs en cron-job.org:**
+
+| Cronjob | Workflow target | Crontab (Bogotá TZ) | Frecuencia efectiva |
+|---|---|---|---|
+| GH Action - Trade Monitor | `trade_monitor.yml` | `*/15 * * * 1-5` | Cada 15 min, L-V |
+| GH Action - Judge Daily | `judge_daily.yml` | `45 22 * * 1-5` | 10:45 pm L-V |
+| GH Action - Health Check | `health_check.yml` | `0 8 * * 1-5` | 8:00 am L-V |
+| GH Action - Backfill Weekly | `manual_backfill.yml` | `0 1 * * 0` | Domingo 1:00 am |
+
+**Headers HTTP comunes a los 4 cronjobs:**
+```
+Authorization: Bearer ghp_xxx (GitHub Personal Access Token, scope Actions: R/W)
+Accept:        application/vnd.github.v3+json
+Content-Type:  application/json
+```
+**Method:** POST · **Body:** `{"ref":"master"}`
+
+**Validación en producción (27-may):** primer ciclo del Juez con el nuevo scheduler disparó a las **22:45:03 Bogotá** (programado 22:45:00 → desfase +3 seg) y completó el ciclo evolutivo en 15m 57s. Comparativa con los 5 ciclos anteriores bajo GH cron interno: retrasos entre +2h 39m y +3h 22m. La migración resolvió un problema crónico, no aislado.
+
+### Versiones de las GitHub Actions
+
+Todos los workflows usan **`actions/checkout@v6`** y **`actions/setup-python@v6`** (ambas estables desde enero 2026, compatibles con **Node.js 24**). Las versiones previas (`@v4` / `@v5`, basadas en Node.js 20) fueron actualizadas en Sesión 12 antes de la deprecación forzosa de GitHub del 2-jun-2026.
 
 ### `trade_monitor.yml` — Monitor intraday
 
+**Disparado por:** cron-job.org cada 15 min L-V Bogotá (job "GH Action - Trade Monitor").
+**Cobertura:** las 24 horas del día Bogotá L-V — 96 disparos/día × 5 días = 480/semana. Los ~10 disparos fuera del horario de trading (00:00–01:29 am Lun; 23:00–23:45 Vie) son no-op: `_within_trading_hours()` retorna `False`, el EOD guard verifica posiciones huérfanas (típicamente ninguna) y el monitor sale en <1s.
+
 ```
-Schedule (cinco entradas combinadas; cron en UTC, días L-V Bogotá):
-  - "30,45 6 * * 1-5"       → 1:30 am y 1:45 am Bogotá (06:30, 06:45 UTC)
-  - "*/15 7-23 * * 1-5"     → 2:00 am – 6:45 pm Bogotá (07:00 – 23:45 UTC)
-  - "*/15 0-2 * * 2-6"      → 7:00 pm – 9:45 pm Bogotá del día anterior
-                              (00:00 – 02:45 UTC del día siguiente)
-  - "0,15,30 3 * * 2-6"     → 10:00 pm, 10:15 pm, 10:30 pm Bogotá (último ciclo)
-                              (03:00, 03:15, 03:30 UTC del día siguiente)
-  - "*/15 4-6 * * 2-6"      → 11:00 pm – 1:45 am Bogotá (cubre ventana ciega
-                              EOD; activa la guardia _eod_guard si el
-                              judge_daily se retrasó)
-
-Cobertura efectiva: cada 15 minutos de lunes a viernes Bogotá, las 24 horas
-del día de trading. El monitor de las 11:00 pm – 1:45 am es exclusivamente
-defensivo: detecta posiciones huérfanas del día anterior y las cierra
-automáticamente vía _eod_guard().
-
 Pasos:
-  1. Checkout del repo
-  2. Setup Python 3.11
+  1. Checkout (actions/checkout@v6)
+  2. Setup Python 3.11 (actions/setup-python@v6)
   3. pip install -r requirements.txt
   4. python -m cron.trade_monitor --run-once
 
 En caso de fallo: crea un GitHub Issue con alerta (evita duplicados)
+
+Schedule histórico (comentado, sin uso desde Sesión 12):
+  - "30,45 6 * * 1-5"     → 1:30 am y 1:45 am Bogotá
+  - "*/15 7-23 * * 1-5"   → 2:00 am – 6:45 pm Bogotá
+  - "*/15 0-2 * * 2-6"    → 7:00 pm – 9:45 pm Bogotá
+  - "0,15,30 3 * * 2-6"   → 10:00 pm – 10:30 pm Bogotá (último ciclo)
+  - "*/15 4-6 * * 2-6"    → 11:00 pm – 1:45 am Bogotá (ventana ciega EOD)
 ```
 
 **Secrets requeridos:** `DATABASE_URL` (Supabase Transaction Pooler), `DEEPSEEK_API_KEY`, `DEEPSEEK_MODEL`, `FINNHUB_API_KEY`, `ALPHA_VANTAGE_API_KEY`, `GOOGLE_SHEET_ID`, `GOOGLE_CREDENTIALS_JSON`
@@ -891,20 +936,27 @@ En caso de fallo: crea un GitHub Issue con alerta (evita duplicados)
 
 ### `judge_daily.yml` — Ciclo evolutivo diario
 
-```
-Schedule: "45 3 * * 2-6"
-          10:45 pm Bogotá L-V (03:45 UTC del día siguiente).
+**Disparado por:** cron-job.org a las 22:45:00 Bogotá L-V (job "GH Action - Judge Daily").
 
+```
 Pasos (todos en un solo job):
-  1. Checkout + Python 3.11
-  2. Cierre EOD a las 10:45 pm Bogotá:
+  1. Guard de ventana segura (NUEVO en Sesión 12)
+     Solo activo cuando event=schedule. Aborta el run si la hora UTC
+     actual está fuera de 02:00–06:00 UTC (9 pm–1 am Bogotá). Protección
+     residual por si algún día se reactiva el cron de GH y se dispara
+     durante trading hours. workflow_dispatch (cron-job.org y manual)
+     omite el guard.
+  2. Checkout + Python 3.11 (@v6)
+  3. Cierre EOD a las 10:45 pm Bogotá:
         python -m cron.trade_monitor --force-close-all
-  3. sleep 900 (15 minutos) hasta las 11:00 pm Bogotá.
-  4. Health check de la DB
-  5. Ciclo evolutivo a las 11:00 pm Bogotá:
+  4. sleep 900 (15 minutos) hasta las 11:00 pm Bogotá.
+  5. Health check de la DB
+  6. Ciclo evolutivo a las 11:00 pm Bogotá:
         python -m cron.judge_scheduler --run-now
 
-Disparo manual: workflow_dispatch con opción dry_run=true (solo health check)
+Disparo manual: workflow_dispatch con opción dry_run=true (solo health check).
+Recuperación de ciclos perdidos: workflow_dispatch sin dry_run (la guardia
+de ventana segura se omite, permitiendo correr el Juez en cualquier hora).
 
 Parámetros de evolución (env vars):
   AGENTS_ELIMINATE_PER_CYCLE   = 5
@@ -912,34 +964,47 @@ Parámetros de evolución (env vars):
   MUTATION_SIGMA_PERIODS       = 0.08
   MUTATION_SIGMA_RISK          = 0.10
   MIN_ROI_FOR_HALL_OF_FAME     = 0.05
-  GRACE_PERIOD_DAYS            = 2       # Inmunidad en días HÁBILES
-  DIVERSITY_VARIANCE_THRESHOLD = 0.01    # CV mínimo del ADN antes del boost
-  SIGMA_BOOST_FACTOR           = 2.0     # Multiplicador de σ en baja diversidad
+  GRACE_PERIOD_DAYS            = 2
+  DIVERSITY_VARIANCE_THRESHOLD = 0.01
+  SIGMA_BOOST_FACTOR           = 2.0
 
-En caso de fallo: crea GitHub Issue con alerta
+En caso de fallo: crea GitHub Issue con alerta.
+
+Schedule histórico (comentado): "45 3 * * 2-6"  → 03:45 UTC
 ```
 
 ### `health_check.yml` — Verificación diaria de dependencias
 
-```
-Schedule: "0 13 * * 1-5"     → 08:00 Bogotá L-V (50 min antes del trading)
+**Disparado por:** cron-job.org a las 8:00:00 Bogotá L-V (job "GH Action - Health Check").
 
-Verifica que DB, DeepSeek API, Finnhub API, Yahoo Finance y todos los secrets
-estén disponibles. Si algún check falla, crea un GitHub Issue de alerta.
+Verifica que DB, DeepSeek API, Finnhub API, Yahoo Finance y todos los secrets estén disponibles. Si algún check falla, crea un GitHub Issue de alerta.
+
+```
+Schedule histórico (comentado): "0 13 * * 1-5"  → 13:00 UTC = 8:00 am Bogotá
 ```
 
 ### `manual_backfill.yml` — Sincronización Sheets ↔ DB
 
-```
-Schedule: "0 6 * * 0"        → Domingos 01:00 Bogotá (safety-net semanal)
-workflow_dispatch:           → Disparo manual desde GitHub UI
+**Disparado por:** cron-job.org los domingos a las 1:00 am Bogotá (job "GH Action - Backfill Weekly") + workflow_dispatch manual.
 
+```
 Pasos:
   1. python utils/diagnose_backfill.py  (verifica DB + creds Sheets)
   2. python -m utils.sheets_backfill    (limpia y reescribe Agentes + Operaciones)
 
 Corrige cualquier desincronización acumulada durante la semana.
+
+Schedule histórico (comentado): "0 6 * * 0"  → 06:00 UTC dominical
 ```
+
+### Plan de rollback al cron interno de GH
+
+Si cron-job.org sufriera una caída prolongada:
+1. Descomentar el bloque `schedule:` en los 4 workflows (1 commit).
+2. Deshabilitar los 4 cronjobs en cron-job.org (toggle en el dashboard).
+3. GitHub Actions vuelve a su scheduler interno con los crons originales.
+
+El sistema sigue operando — solo pierde puntualidad. Las guardias defensivas (`_eod_guard` en trade_monitor y ventana segura en judge_daily) mitigan el impacto.
 
 ---
 
@@ -1107,9 +1172,16 @@ Antigravity_Inversion_Evolutiva/
 
 ---
 
-*Documento actualizado el 2026-05-24 (Sesión 11 — auditoría sistemática, eliminación de código legacy y cierre de huecos de sincronización Sheets). Refleja el estado del sistema con primer agente Gen2 ya en producción y sincronización Sheets completamente automatizada.*
+*Documento actualizado el 2026-05-27 (Sesión 12 — migración de scheduling a cron-job.org, guard temporal en el Juez, actions a Node.js 24 y normalización de timezones en dashboard).*
 
 ## Historial de cambios mayores
+
+- **2026-05-27 (Sesión 12 — scheduling externo confiable + actions Node 24 + timezones dashboard):**
+  - **Migración de scheduling de GH Actions cron a cron-job.org** (commits `0d3b028` y posteriores): el cron interno de GitHub Actions, observado retrasando el `judge_daily.yml` entre 2h 39m y 3h 22m durante 5 días consecutivos (caso límite documentado: ciclo del 26-may corrió a las 07:00 am en lugar de 22:45 del 25-may; force-close-all interrumpió posiciones activas durante trading hours). Reemplazado por [cron-job.org](https://cron-job.org), un servicio externo gratuito con precisión ±5 seg. 4 cronjobs creados en zona America/Bogota: Trade Monitor (`*/15 * * * 1-5`), Judge Daily (`45 22 * * 1-5`), Health Check (`0 8 * * 1-5`), Backfill Weekly (`0 1 * * 0`). Disparan vía HTTPS POST al endpoint `workflow_dispatch` de la GitHub REST API con un Personal Access Token (scope: Actions R/W). Los bloques `schedule:` de los 4 workflows fueron comentados (no eliminados — rollback de 1 commit disponible). Validación en producción: primer Juez bajo el nuevo régimen disparó a las 22:45:03 Bogotá (+3 seg de margen) y completó 15m 57s sin warnings.
+  - **Guardia de ventana segura en `judge_daily.yml`** (commit `cf769c6`): nuevo paso al inicio del workflow que verifica `now_utc` y aborta con `exit 1` si está fuera de 02:00–06:00 UTC (9 pm–1 am Bogotá). Aplica solo a `event=schedule`, no a `workflow_dispatch` (esto permite recuperación manual de ciclos perdidos). Defensa residual por si algún día se reactiva el cron de GH y se dispara durante trading hours.
+  - **Actions actualizadas a v6 (Node.js 24)** (commit `e6960ed`): GitHub anunció el 2-jun-2026 como fecha de forzado de Node.js 24 y el 16-sep-2026 como eliminación total de Node.js 20 en los runners. Las 4 referencias a `actions/checkout@v4` y las 4 a `actions/setup-python@v5` (ambas sobre Node 20) actualizadas a `@v6` (Node 24). Validado en run real: el warning amarillo de deprecation desapareció y los runs son ~10s más rápidos.
+  - **Timezones del dashboard normalizadas a hora Bogotá** (commit `1e2defa`): dos lugares mostraban hora UTC raw — sidebar "Último ciclo" y Tab Agente Juez "Log de Actividad". `data.py` ahora marca `created_at` de `logs_juez` y `last_judge` de `fetch_system_status()` como tz-aware UTC. `app.py` añade helper `_fmt_bogota(dt, fmt)` que acepta naive/aware, datetime/Timestamp, None/NaT y devuelve string formateado en America/Bogota. Convención documentada: DB almacena UTC, data layer parsea como tz-aware UTC, capa de display convierte a Bogotá. El resto del dashboard (Operaciones, Precio, eje X de candlestick) ya convertía correctamente — sin cambios.
+  - **Detección del problema sistémico:** análisis del histórico de runs reveló que el Juez venía retrasándose **crónicamente** todos los días, no solo en el incidente del 26-may. La migración resolvió un problema de fondo, no aislado.
 
 - **2026-05-24 (Sesión 11 — auditoría sistemática + sincronización Sheets completa + limpieza legacy):**
   - **Auditoría profunda del aplicativo:** verificación independiente de los 4 workflows, motor evolutivo, motor de riesgo, agente Juez y monitor de trades. Resultado: sistema conforme a los parámetros establecidos. Primer agente de Generación 2 (`2026-05-23_01`) creado correctamente el 23-may con padres `2026-05-19_05 × 2026-05-19_02` (crossover fitness-proporcional). El agente eliminado (`2026-05-19_08`, fitness=-0.20) fue el único candidato elegible bajo la regla de cuota dinámica; durante 3 días seguidos (20, 21, 22-may) el ciclo se suspendió correctamente porque todos los Gen1 tenían fitness > 0.
