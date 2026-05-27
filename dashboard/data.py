@@ -2,11 +2,17 @@
 Capa de datos del Command Center.
 Todas las funciones usan st.cache_data(ttl=60) para no saturar Neon.
 Decimal → float se aplica en _coerce() antes de devolver el DataFrame.
+
+Convención de timezones:
+  - La DB Neon almacena timestamps en UTC (TIMESTAMP sin tzinfo).
+  - data.py convierte cada columna timestamp a UTC-aware (tz='UTC').
+  - app.py / charts.py convierten a America/Bogota para mostrar al usuario.
 """
 
 from __future__ import annotations
 
 import os
+from datetime import timezone
 from decimal import Decimal
 
 import pandas as pd
@@ -129,7 +135,8 @@ def fetch_judge_logs(limit: int = 40) -> pd.DataFrame:
     cols = ["id", "fecha", "tipo_evento", "agente_afectado_id",
             "descripcion", "razonamiento_llm", "created_at"]
     df = _coerce(pd.DataFrame(rows, columns=cols))
-    df["fecha"] = pd.to_datetime(df["fecha"])
+    df["fecha"]      = pd.to_datetime(df["fecha"])
+    df["created_at"] = pd.to_datetime(df["created_at"], utc=True)
     return df
 
 
@@ -209,6 +216,10 @@ def fetch_system_status() -> dict:
         max_gen = cur.fetchone()[0] or 1
         cur.execute("SELECT MAX(created_at) FROM logs_juez")
         last_judge = cur.fetchone()[0]
+        # Forzar tz-awareness UTC: la DB almacena en UTC pero psycopg2 devuelve
+        # datetime naive. app.py luego convierte a Bogotá para display.
+        if last_judge is not None and last_judge.tzinfo is None:
+            last_judge = last_judge.replace(tzinfo=timezone.utc)
         cur.execute("SELECT COUNT(*) FROM operaciones WHERE estado='abierta'")
         ops_open = cur.fetchone()[0]
         return {

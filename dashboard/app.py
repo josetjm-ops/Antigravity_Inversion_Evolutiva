@@ -20,6 +20,28 @@ except Exception:
     from datetime import timedelta
     _BOGOTA_TZ = timezone(timedelta(hours=-5))
 
+
+def _fmt_bogota(dt, fmt: str = "%m/%d %H:%M") -> str:
+    """
+    Formatea un timestamp en hora Bogotá. Acepta:
+      • datetime.datetime (aware o naive — naive se asume UTC)
+      • pandas.Timestamp (aware o naive — naive se asume UTC)
+      • None / NaT → devuelve "—"
+    Por convención, la DB Neon almacena timestamps en UTC.
+    """
+    if dt is None:
+        return "—"
+    try:
+        if pd.isna(dt):
+            return "—"
+    except (TypeError, ValueError):
+        pass
+    ts = pd.Timestamp(dt)
+    if ts.tz is None:
+        ts = ts.tz_localize("UTC")
+    return ts.tz_convert(_BOGOTA_TZ).strftime(fmt)
+
+
 # Asegura que el directorio raíz del proyecto esté en sys.path
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _ROOT not in sys.path:
@@ -366,7 +388,7 @@ def _sidebar() -> tuple[list[str], list[int]]:
         status = D.fetch_system_status()
         if status["ok"]:
             last_j = status["last_judge"]
-            last_str = last_j.strftime("%m/%d %H:%M") if last_j else "—"
+            last_str = _fmt_bogota(last_j, "%m/%d %H:%M")
             st.markdown(f"""
             <div style="font-size:11px;">
               <span style="color:{EMERALD};">● DB online</span>
@@ -613,7 +635,7 @@ def _tab_judge(df_logs: pd.DataFrame) -> None:
     for _, row in logs_show.head(40).iterrows():
         cls, label = _BADGE.get(row["tipo_evento"], ("jb-eval", row["tipo_evento"]))
         agente_str = f'&nbsp;·&nbsp;<span style="color:{DIM};font-size:10px;">{row["agente_afectado_id"]}</span>' if row["agente_afectado_id"] else ""
-        ts_str = row["created_at"].strftime("%m/%d %H:%M") if pd.notna(row["created_at"]) else ""
+        ts_str = _fmt_bogota(row["created_at"], "%m/%d %H:%M")
         razon  = row["razonamiento_llm"] or ""
         razon_html = (
             f'<div style="margin-top:8px;color:{DIM};font-size:11px;'
