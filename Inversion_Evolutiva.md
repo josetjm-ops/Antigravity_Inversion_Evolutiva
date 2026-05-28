@@ -1186,7 +1186,7 @@ Antigravity_Inversion_Evolutiva/
 │   └── logo.png
 ├── mobile-app/                  Next.js (app complementaria, Vercel)
 ├── scripts/                     Utilidades manuales (seed_gen1, diversify_gen1)
-├── tests/                       pytest (pipeline + evolution)
+├── tests/                       pytest (pipeline + evolution + intra-bar SL/TP)
 ├── utils/
 │   ├── sheets_logger.py         (gspread: trazabilidad en Google Sheets)
 │   ├── sheets_backfill.py       (sincronización completa DB → Sheets)
@@ -1205,11 +1205,11 @@ Antigravity_Inversion_Evolutiva/
 
 ---
 
-*Documento actualizado el 2026-05-27 (Sesión 13 — verificación intra-vela de SL/TP con OHLC 1m: elimina el sesgo evolutivo del check por snapshot, fitness ahora honesto).*
+*Documento actualizado el 2026-05-27 (Sesión 13 — verificación intra-vela de SL/TP con OHLC 1m: elimina el sesgo evolutivo del check por snapshot, fitness ahora honesto). Commit `8be1654` pusheado a `origin/master`.*
 
 ## Historial de cambios mayores
 
-- **2026-05-27 (Sesión 13 — verificación intra-vela de SL/TP con OHLC 1m):**
+- **2026-05-27 (Sesión 13 — verificación intra-vela de SL/TP con OHLC 1m) · commit `8be1654` · en producción:**
   - **Problema raíz detectado:** la operación #2803 (SELL @ 1.16496, TP=1.16263, abierta 02:46 am) cerró en SL trailing 1.16387 a las 18:30 aunque el precio claramente tocó el TP durante el día (mecha hasta ~1.16143). Causa: `cron/trade_monitor.py` chequeaba SL/TP contra un **único snapshot** del precio (`get_current_price()` → `regularMarketPrice` de Yahoo) cada 15 min. Las mechas entre dos ciclos eran sistemáticamente invisibles.
   - **Por qué es crítico para la evolución:** el fitness de cada agente se calcula sobre los resultados de sus operaciones. Si el simulador miente sistemáticamente, los genes `risk_reward_target`, `atr_factor`, `trailing_*` se calibran contra un mercado ficticio. Mutaciones hacia TP ambicioso parecen malas (nunca "llegan"), mutaciones hacia SL ajustado parecen buenas (nunca "saltan"). Se estaba criando ADN frágil que colapsaría en un broker real.
   - **Nueva migración 008 (`db/migrations/008_intrabar_verification.sql`):** añade columna `timestamp_ultima_verificacion TIMESTAMPTZ` a `operaciones` + backfill idempotente con `timestamp_entrada` para los registros existentes. Marca hasta qué momento el monitor ya examinó OHLC para cada operación.
@@ -1227,6 +1227,7 @@ Antigravity_Inversion_Evolutiva/
   - **Tests nuevos (`tests/test_sltp_intrabar.py`):** 13 tests pasan — 9 unitarios de `check_sl_tp_intrabar` (BUY/SELL × {solo TP, solo SL, ambos→SL, ninguno} + acción inválida) + 4 de integración del loop con velas sintéticas (caso #2803 reproducido cierra en TP, trailing intra-vela que aprieta SL, fallback sin velas, cursor de verificación avanza correctamente).
   - **`agents/investor_agent.close_operation`** propaga el `ts_salida` también al `SheetsLogger.update_operation` para que Sheets muestre el timestamp real de la mecha cuando el cierre es intra-vela.
   - **Lo que NO cambia:** `_apply_trailing_stop()`, `_eod_guard()`, `_evaluate_new_positions()`, schema `decision_riesgo` JSONB (SL/TP originales preservados como audit trail), cron schedule (cron-job.org `*/15 * * * 1-5`), lógica de evolución, judge_daily, pool de capital, sincronización Sheets.
+  - **Estado post-Sesión 13:** 6 archivos commiteados y pusheados a `origin/master` (commit `8be1654`). Los workflows de GitHub Actions usarán la nueva lógica intra-vela a partir del próximo disparo de `trade_monitor.yml`. **Pendiente aplicar en producción:** `python -m db.apply_migrations --only 008` para añadir la columna `timestamp_ultima_verificacion` a la tabla `operaciones` en Supabase (el código ya es retrocompatible con la columna ausente — fallback a `timestamp_entrada` — pero la columna es necesaria para el ratcheo preciso del cursor de verificación).
 
 - **2026-05-27 (Sesión 12 — scheduling externo confiable + actions Node 24 + timezones dashboard):**
   - **Migración de scheduling de GH Actions cron a cron-job.org** (commits `0d3b028` y posteriores): el cron interno de GitHub Actions, observado retrasando el `judge_daily.yml` entre 2h 39m y 3h 22m durante 5 días consecutivos (caso límite documentado: ciclo del 26-may corrió a las 07:00 am en lugar de 22:45 del 25-may; force-close-all interrumpió posiciones activas durante trading hours). Reemplazado por [cron-job.org](https://cron-job.org), un servicio externo gratuito con precisión ±5 seg. 4 cronjobs creados en zona America/Bogota: Trade Monitor (`*/15 * * * 1-5`), Judge Daily (`45 22 * * 1-5`), Health Check (`0 8 * * 1-5`), Backfill Weekly (`0 1 * * 0`). Disparan vía HTTPS POST al endpoint `workflow_dispatch` de la GitHub REST API con un Personal Access Token (scope: Actions R/W). Los bloques `schedule:` de los 4 workflows fueron comentados (no eliminados — rollback de 1 commit disponible). Validación en producción: primer Juez bajo el nuevo régimen disparó a las 22:45:03 Bogotá (+3 seg de margen) y completó 15m 57s sin warnings.
