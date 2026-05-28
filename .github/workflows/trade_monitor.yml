@@ -48,7 +48,11 @@ jobs:
   monitor:
     name: "SL/TP + evaluar nuevas posiciones"
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    # 12 min: cuando deepseek-reasoner se pone lento (~30-35s/agente) los 10
+    # agentes + setup + verificación SL/TP no caben en 5 min y el job se cancela
+    # a la mitad (caso 2026-05-28 11:15 UTC: solo 6 de 10 agentes evaluados).
+    # 12 min da holgura y sigue por debajo de la cadencia de 15 min (sin solape).
+    timeout-minutes: 12
     permissions:
       issues: write
 
