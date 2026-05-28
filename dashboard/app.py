@@ -1120,11 +1120,11 @@ def _tab_instructions() -> None:
             (distancia real de mercado, ~12–22 pips típico, gen mutable) →
             <b>④ porcentaje fijo</b> (fallback legacy si ATR = 0).
             El Take Profit se calcula como <code>SL × risk_reward_target</code> (gen mutable,
-            default 2.0×). El sizing es dinámico: 1–2% de equity en riesgo por pips,
-            máx. 20% de capital. El <b>trailing stop</b> (gen <code>trailing_activation_pips</code>
-            y <code>trailing_distance_pips</code>) queda registrado en la operación para que
-            el Trade Monitor lo aplique en cada ciclo de 15 minutos. Luego consulta a DeepSeek
-            para validación final.
+            default 2.0×). El sizing es dinámico: <code>lotes = (equity × risk_pct) / (sl_pips × 0.10)</code>, convertido a <b>nocional USD</b> con techo de <b>50:1 de apalancamiento</b> (máx. <code>equity × 50</code>).
+            El <b>trailing stop</b> (genes <code>trailing_activation_pips</code> y
+            <code>trailing_distance_pips</code>) queda registrado en la operación para que
+            el Trade Monitor lo aplique <b>vela a vela</b> dentro del verificador intra-bar.
+            Luego consulta a DeepSeek para validación final.
           </div>
         </div>
       </div>
@@ -1152,34 +1152,41 @@ def _tab_instructions() -> None:
       </div>
     </div>
 
-    <!-- ══ 4. MONITOREO Y CIERRE ══ -->
+        <!-- ══ 4. MONITOREO Y CIERRE ══ -->
     <div class="ins-section">
-      <div class="ins-title">4 · Monitor cada 15 minutos — SL/TP + Nuevas posiciones intraday</div>
+      <div class="ins-title">4 · Monitor cada 15 minutos — Verificación intra-vela OHLC 1m + Nuevas posiciones</div>
       <div class="ins-card ins-card-left-dim">
         <div class="ins-body">
           El <b>Trade Monitor</b> corre cada 15 minutos dentro del horario 1:30 am–10:30 pm
-          Bogotá (último ciclo) y realiza <b>dos tareas en cada ciclo</b>:<br><br>
-          <b>① Trailing Stop + Verificación SL/TP</b><br>
-          Obtiene el precio actual de EUR/USD (Yahoo Finance) y primero actualiza el
-          <b>trailing stop</b> de cada posición abierta: si el profit supera el gen
-          <code>trailing_activation_pips</code>, el SL dinámico se mueve hacia
-          <code>extremo_favorable − trailing_distance_pips</code>. El SL <b>nunca empeora</b>
-          — solo se mueve a favor del agente. Una vez actualizado el SL, verifica si el precio
-          tocó el Stop Loss o Take Profit:<br>
-          &nbsp;• <b style="color:{EMERALD};">✓ Take Profit alcanzado</b> — se cierra con ganancia al precio exacto del TP.<br>
-          &nbsp;• <b style="color:{RED};">✗ Stop Loss alcanzado</b> — se cierra con pérdida controlada al precio del SL (puede ser el SL dinámico movido por trailing).<br>
-          &nbsp;• <b style="color:{DIM};">◎ Cierre EOD (10:45 pm Bogotá)</b> — posiciones aún abiertas se cierran obligatoriamente al precio de mercado 15 minutos antes de la evaluación del Juez.<br><br>
+          Bogotá y realiza <b>dos tareas en cada ciclo</b>:<br><br>
+          <b>① Verificación intra-vela de SL/TP + Trailing stop</b><br>
+          Para cada agente con posición abierta, el monitor descarga las <b>velas OHLC
+          de 1 minuto</b> de Yahoo Finance desde la última verificación hasta ahora
+          (≥15 velas por ciclo) y las recorre en orden cronológico. Por cada vela:<br>
+          &nbsp;• <b>Primero</b> verifica si el <code>high</code> o <code>low</code>
+          tocó el Stop Loss o el Take Profit con el SL <em>antes</em> de aplicar trailing.
+          Si <b>ambos</b> se tocan en la misma vela → <s>SL gana</s>
+          (convención conservadora: ante ambigüedad intra-vela, asumir el peor caso).<br>
+          &nbsp;• <b>Luego</b>, si no hubo hit, aplica el trailing usando el extremo
+          favorable de la vela (<code>low</code> para SELL, <code>high</code> para BUY).
+          El SL dinámico <b>nunca empeora</b> — solo se mueve a favor del agente.<br><br>
+          Si SL o TP se activa, la operación cierra al <b>precio exacto del nivel</b>
+          y el <code>timestamp_salida</code> refleja el instante real de la mecha:<br>
+          &nbsp;• <b style="color:{EMERALD};">&#10003; Take Profit alcanzado</b> — ganancia al precio exacto del TP.<br>
+          &nbsp;• <b style="color:{RED};">&#10007; Stop Loss alcanzado</b> — pérdida controlada al precio del SL (puede ser el SL trailing apretado).<br>
+          &nbsp;• <b style="color:{DIM};">&#9677; Cierre EOD (10:45 pm Bogotá)</b> — posiciones aún abiertas cierran al precio de mercado.<br>
+          &nbsp;• <b style="color:{DIM};">&#9888; Fallback automático:</b> si Yahoo no devuelve velas
+          (fin de semana, error API), cae al check por snapshot único para no bloquear el ciclo.<br><br>
+          <b>Por qué importa para la evolución:</b> antes, el monitor comparaba un snapshot
+          cada 15 min. Una mecha que tocara el TP y rebotara era invisible: el trade
+          seguía abierto y terminaba cerrando en SL trailing. El fitness medía un mundo
+          ficticio. Con OHLC 1 min el simulador refleja lo que haría un broker real con
+          órdenes stop/limit, y el ADN que evoluciona es portable a producción real.<br><br>
           <b>② Evaluación de nuevas posiciones</b><br>
-          Para cada agente que quedó libre (sin posición abierta y con capital suficiente),
-          el monitor descarga <b>velas OHLCV actualizadas</b> de Yahoo Finance, recalcula
-          señales SMC (FVG, OB, Range Proxy) y técnicas (RSI, EMA, MACD) con los precios
-          del momento, y ejecuta el pipeline A→B→C completo incluyendo Stop Loss estructural
-          anclado al OB/FVG activo para decidir si abrir una nueva posición.<br><br>
-          <b>Ejemplo:</b> un agente abre a las 3:00 am, su Take Profit se activa a las 4:15 am.
-          A las 4:30 am el monitor detecta que está libre, descarga los precios actualizados
-          hasta las 4:30 am y evalúa si abrir una segunda posición con los indicadores frescos
-          de ese momento. Un agente puede operar múltiples veces en el mismo día,
-          de forma secuencial (una posición abierta a la vez).
+          Para cada agente libre (sin posición abierta y con capital suficiente),
+          descarga velas OHLCV actualizadas, recalcula SMC + RSI/EMA/MACD con los precios
+          del momento y ejecuta el pipeline A→B→C completo. Un agente puede operar
+          varias veces al día de forma <b>secuencial</b> (una posición abierta a la vez).
         </div>
       </div>
     </div>
@@ -1204,10 +1211,14 @@ def _tab_instructions() -> None:
         <div class="ins-step">
           <div class="ins-step-num">2</div>
           <div class="ins-step-text">
-            <b>Eliminación de los 5 peores</b> — Los 5 agentes con menor fitness
-            (Calmar Ratio) son marcados como <s>eliminado</s>. No importa si llevan poco
-            tiempo — si su rendimiento ajustado al riesgo es inferior, son descartados.
-            Su capital vuelve al <b>pool común del sistema</b> y se redistribuye entre todos.
+            <b>Cuota dinámica de eliminación</b> — Solo son eliminables los agentes
+            con <b>fitness ≤ 0</b>. Máximo 5 por día. Los agentes
+            <b>recién nacidos sin operaciones cerradas</b> y con menos de
+            <code>GRACE_PERIOD_DAYS</code> (default 2) días hábiles de edad son
+            <b>inmunes</b> ese día (Periodo de Gracia Operativa). Si todos los
+            elegibles tienen fitness &gt; 0, <b>no se elimina nadie</b> y el ciclo
+            queda suspendido. Los eliminados pasan a estado <s>eliminado</s> y su
+            capital se redistribuye entre los activos.
           </div>
         </div>
         <div class="ins-step">
@@ -1293,8 +1304,9 @@ def _tab_instructions() -> None:
             <div class="ins-time">1:30 am – 10:30 pm · cada 15 minutos</div>
             <div class="ins-timeline-text">
               <b style="color:{TEXT};">Monitor intraday (doble función)</b><br>
-              <span style="color:{DIM};">① SL/TP:</span> verifica si alguna posición abierta tocó
-              su Stop Loss o Take Profit y la cierra al precio exacto del nivel.<br>
+              <span style="color:{DIM};">① Verificación intra-vela:</span> descarga OHLC 1m
+              desde la última verificación, recorre cada vela y cierra al precio exacto del SL/TP
+              si <code>high/low</code> lo toca. Trailing se aplica vela a vela.<br>
               <span style="color:{DIM};">② Nuevas posiciones:</span> para cada agente libre
               (sin posición y con capital suficiente), descarga OHLCV actualizado, recalcula
               SMC (FVG, OB, Range Proxy) + RSI/EMA/MACD con los precios del momento y ejecuta el pipeline completo.
@@ -1443,9 +1455,11 @@ def _tab_instructions() -> None:
       como sustituto de VSA. El <b style="color:{TEXT};">ATR</b> (Wilder 14 períodos)
       se calcula sobre las mismas velas y sirve como base del SL dinámico.
       El razonamiento de los agentes y del Juez usa <b style="color:{TEXT};">DeepSeek</b>
-      (<code>deepseek-chat</code>). El fitness (Calmar Ratio Proxy) se calcula
+      (<code>deepseek-reasoner</code>). El fitness (Calmar Ratio Proxy) se calcula
       vía SQL sobre operaciones cerradas en <b style="color:{TEXT};">PostgreSQL — Supabase</b>.
-      Los workflows (monitor cada 15min y juez diario lunes–viernes) corren en
+      La verificación SL/TP usa <b style="color:{TEXT};">velas OHLC de 1 minuto</b>
+      (≥15 velas/ciclo, precio de cierre = nivel exacto SL/TP).
+      Los workflows (monitor cada 15 min y juez diario lunes–viernes) corren en
       <b style="color:{TEXT};">GitHub Actions</b>, disparados externamente por
       <b style="color:{TEXT};">cron-job.org</b> con precisión ±5 segundos
       (reemplaza el cron interno de GH que sufría retrasos crónicos de varias horas).
@@ -1467,7 +1481,7 @@ def main() -> None:
     estados_f, gens_f, n_logs = _sidebar()
 
     # Cargar datos
-    with st.spinner("Sincronizando con Neon..."):
+    with st.spinner("Sincronizando con Supabase..."):
         df_filtered = D.fetch_agents(estados=estados_f, gens=gens_f)
         df_active   = D.fetch_agents(estados=["activo"])
         df_all      = D.fetch_agents()
