@@ -359,15 +359,30 @@ timeout     = 30 seg
 Para cada agente:
   ┌─ ¿Tiene posición abierta?
   │
-  ├── SÍ → Verificar SL/TP:
-  │         1. Obtener precio actual (Yahoo Finance)
-  │         2. Aplicar trailing stop (si corresponde)
-  │         3. Verificar si precio tocó SL o TP
-  │         4. Si SÍ → cerrar posición:
-  │                     - Calcular P&L real
-  │                     - UPDATE operaciones (estado=cerrada, pnl, precio_salida)
-  │                     - UPDATE agentes (capital_actual, roi_total, ops_ganadoras)
-  │                     - Actualizar Google Sheets
+  ├── SÍ → Verificación intra-vela de SL/TP (desde Sesión 13):
+  │         1. Cargar timestamp_ultima_verificacion de la operación
+  │            (o timestamp_entrada si nunca se verificó).
+  │         2. Descargar OHLC 1-minuto de Yahoo Finance desde ese
+  │            timestamp hasta ahora (≈15 velas por ciclo).
+  │         3. Iterar velas en orden cronológico. Por cada vela:
+  │              a) Chequear si high/low tocó SL o TP usando el SL
+  │                 ANTES de aplicar trailing en esa vela.
+  │                 - HIT_SL: cerrar exactamente al precio del SL.
+  │                 - HIT_TP: cerrar exactamente al precio del TP.
+  │                 - Ambos en la misma vela → SL gana (conservador).
+  │                 timestamp_salida = timestamp real de la vela.
+  │              b) Sin hit → aplicar trailing usando el extremo
+  │                 favorable de la vela (low SELL / high BUY).
+  │         4. Si la operación cierra:
+  │              - UPDATE operaciones (estado=cerrada, pnl, precio_salida,
+  │                timestamp_salida del momento exacto de la mecha)
+  │              - UPDATE agentes (capital_actual, roi_total, ops_ganadoras)
+  │              - Actualizar Google Sheets
+  │         5. Si no cierra: persistir sl_dinamico, precio_extremo_favorable
+  │            y timestamp_ultima_verificacion = última vela procesada.
+  │         6. Fallback automático: si Yahoo no devuelve velas (mercado
+  │            cerrado, error API), cae al check legacy con snapshot único
+  │            para no bloquear el ciclo. Log warning en ese caso.
   │
   └── NO → Evaluar si abrir nueva posición:
             1. ¿Estamos en horario de trading? (1:30 am – 11:00 pm Bogotá)
@@ -376,6 +391,22 @@ Para cada agente:
             4. Si decisión = BUY/SELL → INSERT en operaciones
 ```
 
+### Por qué la verificación intra-vela importa para la evolución
+
+Antes de Sesión 13 el monitor comparaba un **único snapshot** del precio cada 15 min contra SL/TP. Cualquier mecha entre dos ciclos era invisible: un TP tocado y rebotado nunca cerraba el trade. Eso introducía un sesgo sistemático en el fitness:
+
+- TPs ambiciosos parecían malos (nunca "llegaban") → ADN sesgado hacia R:R bajo.
+- SLs ajustados parecían buenos (nunca "saltaban") → ADN frágil en producción real.
+- Los genes `risk_reward_target`, `atr_factor` y `trailing_*` se calibraban contra un mercado ficticio.
+
+Con OHLC 1-minuto, cada ciclo de 15 min cubre las 15 velas anteriores con precisión real. El precio de cierre cuando hay hit es **exactamente** el nivel SL/TP (lo que devolvería un broker real con una orden stop/limit), y el `timestamp_salida` refleja la mecha exacta. El fitness ahora se calcula sobre cierres honestos, y la evolución selecciona ADN portable a un broker real.
+
+### Convención conservadora ante ambigüedad intra-vela
+
+Si una sola vela toca SL y TP simultáneamente (gap o vela muy amplia), `check_sl_tp_intrabar` devuelve **HIT_SL**. Es la convención estándar de backtesters serios (Backtrader, vectorbt) — ante ambigüedad sobre el orden intra-vela, asumir el peor caso para el trader, evitando inflar el fitness con casos que en producción real podrían haber cerrado en SL.
+
+Por la misma razón, dentro de cada vela se chequea SL/TP **antes** de aplicar el trailing. Aplicar trailing primero (con el extremo favorable) y después chequear SL con el extremo adverso de la misma vela equivaldría a "ver el futuro" para apretar el SL — un sesgo a favor del trader.
+
 ### Trailing stop dinámico
 
 El trailing stop protege ganancias sin limitar el potencial alcista:
@@ -383,7 +414,7 @@ El trailing stop protege ganancias sin limitar el potencial alcista:
 1. Se activa cuando la posición acumula `trailing_activation_pips` de ganancia (gen del agente, default 15 pips).
 2. Una vez activo, el SL se mueve a `precio_extremo_favorable - trailing_distance_pips` (default 10 pips).
 3. El SL **nunca retrocede**: solo puede mejorar (moverse a favor).
-4. El precio extremo favorable se actualiza en cada ciclo de 15 minutos.
+4. Desde Sesión 13 el trailing se aplica **vela a vela** dentro del verificador intra-bar usando el extremo favorable de cada vela (low para SELL, high para BUY) en vez del snapshot único cada 15 min. Resultado: ratcheo más preciso, casi idéntico al de un broker tick-by-tick.
 
 ### Cierre al final del día (EOD)
 
@@ -746,6 +777,7 @@ Log de cada señal BUY/SELL/HOLD. Una fila por ciclo de decisión.
 | `decision_riesgo` | JSONB | Output completo del sub-agente C (SL, TP, razonamiento) |
 | `sl_dinamico` | DECIMAL | SL actual (actualizado por trailing stop) |
 | `precio_extremo_favorable` | DECIMAL | Precio más favorable alcanzado (para trailing) |
+| `timestamp_ultima_verificacion` | TIMESTAMPTZ | Hasta qué momento (UTC) ya se examinó OHLC 1m para esta operación. El monitor descarga velas posteriores a este valor en cada ciclo. Inicialmente = `timestamp_entrada`; avanza con la última vela procesada. Migración 008. |
 | `created_at` | TIMESTAMPTZ | Marca de creación del registro |
 
 ### `logs_juez`
@@ -1137,12 +1169,13 @@ Antigravity_Inversion_Evolutiva/
 ├── data/                        Fuentes de mercado y indicadores
 │   ├── indicators.py            (OHLCV + RSI/EMA/MACD/FVG/OB/ATR)
 │   ├── macro_scraper.py         (Finnhub: noticias + calendario)
-│   ├── simulated_broker.py      (Yahoo Finance: precio actual + SL/TP)
+│   ├── simulated_broker.py      (Yahoo Finance: snapshot + OHLC 1m intra-vela
+│   │                              · check_sl_tp_intrabar / get_intrabar_candles)
 │   └── alpha_vantage_client.py  (legado: dataclass TechnicalSignals)
 ├── db/
 │   ├── connection.py            (psycopg2 + Supabase pooler)
 │   ├── apply_migrations.py
-│   ├── migrations/              (001 – 007)
+│   ├── migrations/              (001 – 008)
 │   └── seeds/
 ├── evolution/
 │   └── evolution_engine.py      (fitness, crossover, mutación, redistribución)
@@ -1172,9 +1205,28 @@ Antigravity_Inversion_Evolutiva/
 
 ---
 
-*Documento actualizado el 2026-05-27 (Sesión 12 — migración de scheduling a cron-job.org, guard temporal en el Juez, actions a Node.js 24 y normalización de timezones en dashboard).*
+*Documento actualizado el 2026-05-27 (Sesión 13 — verificación intra-vela de SL/TP con OHLC 1m: elimina el sesgo evolutivo del check por snapshot, fitness ahora honesto).*
 
 ## Historial de cambios mayores
+
+- **2026-05-27 (Sesión 13 — verificación intra-vela de SL/TP con OHLC 1m):**
+  - **Problema raíz detectado:** la operación #2803 (SELL @ 1.16496, TP=1.16263, abierta 02:46 am) cerró en SL trailing 1.16387 a las 18:30 aunque el precio claramente tocó el TP durante el día (mecha hasta ~1.16143). Causa: `cron/trade_monitor.py` chequeaba SL/TP contra un **único snapshot** del precio (`get_current_price()` → `regularMarketPrice` de Yahoo) cada 15 min. Las mechas entre dos ciclos eran sistemáticamente invisibles.
+  - **Por qué es crítico para la evolución:** el fitness de cada agente se calcula sobre los resultados de sus operaciones. Si el simulador miente sistemáticamente, los genes `risk_reward_target`, `atr_factor`, `trailing_*` se calibran contra un mercado ficticio. Mutaciones hacia TP ambicioso parecen malas (nunca "llegan"), mutaciones hacia SL ajustado parecen buenas (nunca "saltan"). Se estaba criando ADN frágil que colapsaría en un broker real.
+  - **Nueva migración 008 (`db/migrations/008_intrabar_verification.sql`):** añade columna `timestamp_ultima_verificacion TIMESTAMPTZ` a `operaciones` + backfill idempotente con `timestamp_entrada` para los registros existentes. Marca hasta qué momento el monitor ya examinó OHLC para cada operación.
+  - **Nuevas funciones en `data/simulated_broker.py`:**
+    - `check_sl_tp_intrabar(action, stop_loss, take_profit, candle) -> PositionResult`: chequea si una vela OHLC tocó SL o TP. BUY → SL si low ≤ SL, TP si high ≥ TP. SELL → invertido. Si la vela toca ambos → devuelve `HIT_SL` (convención conservadora: ante ambigüedad intra-vela, asumir el peor caso para el trader).
+    - `get_intrabar_candles(since: datetime) -> list[dict]`: wrapper sobre `get_price_history(interval="1m", range_str="1d")` que filtra velas posteriores a `since`. Devuelve `[]` si Yahoo no responde (fin de semana, fallo API).
+    - Las funciones legacy (`get_current_price`, `check_sl_tp`, `exit_price_for`, `get_price_history`) quedan intactas para retro-compatibilidad y como fallback.
+  - **`agents/investor_agent.close_operation()`:** nuevo parámetro opcional `timestamp_salida: datetime | None = None`. Cuando el cierre proviene del verificador intra-vela, recibe el timestamp real de la mecha (no `datetime.now()`). Si se omite, comportamiento legacy (EOD / fallback).
+  - **Reescritura del loop SL/TP en `cron/trade_monitor.sync_once()`:** tres funciones privadas nuevas:
+    - `_verify_position_intrabar(op, fallback_price)`: orquesta la verificación. Carga velas desde `timestamp_ultima_verificacion`, itera cronológicamente, chequea SL/TP **primero** con el SL pre-trailing de cada vela, y solo si no hay hit aplica trailing usando el extremo favorable. Devuelve `{closed, candles_checked, fallback}`.
+    - `_persist_trailing(op, sl, extremo, since_ts)`: persiste `sl_dinamico`, `precio_extremo_favorable` y opcionalmente `timestamp_ultima_verificacion`.
+    - `_close_op(op, precio_salida, ts_salida, resultado)`: cierra la operación reusando `InvestorAgent.close_operation` con el timestamp real propagado.
+  - **Fallback automático:** si Yahoo no devuelve velas (mercado cerrado, error de red), el verificador cae al check snapshot legacy con `get_current_price()` para no bloquear el ciclo. Log warning en ese caso.
+  - **Sin cambio en el cron:** la frecuencia actual (cada 15 min vía cron-job.org) sigue igual porque cada ciclo ahora cubre los 15 min anteriores con resolución de 1 min — mejor precisión, mismo costo.
+  - **Tests nuevos (`tests/test_sltp_intrabar.py`):** 13 tests pasan — 9 unitarios de `check_sl_tp_intrabar` (BUY/SELL × {solo TP, solo SL, ambos→SL, ninguno} + acción inválida) + 4 de integración del loop con velas sintéticas (caso #2803 reproducido cierra en TP, trailing intra-vela que aprieta SL, fallback sin velas, cursor de verificación avanza correctamente).
+  - **`agents/investor_agent.close_operation`** propaga el `ts_salida` también al `SheetsLogger.update_operation` para que Sheets muestre el timestamp real de la mecha cuando el cierre es intra-vela.
+  - **Lo que NO cambia:** `_apply_trailing_stop()`, `_eod_guard()`, `_evaluate_new_positions()`, schema `decision_riesgo` JSONB (SL/TP originales preservados como audit trail), cron schedule (cron-job.org `*/15 * * * 1-5`), lógica de evolución, judge_daily, pool de capital, sincronización Sheets.
 
 - **2026-05-27 (Sesión 12 — scheduling externo confiable + actions Node 24 + timezones dashboard):**
   - **Migración de scheduling de GH Actions cron a cron-job.org** (commits `0d3b028` y posteriores): el cron interno de GitHub Actions, observado retrasando el `judge_daily.yml` entre 2h 39m y 3h 22m durante 5 días consecutivos (caso límite documentado: ciclo del 26-may corrió a las 07:00 am en lugar de 22:45 del 25-may; force-close-all interrumpió posiciones activas durante trading hours). Reemplazado por [cron-job.org](https://cron-job.org), un servicio externo gratuito con precisión ±5 seg. 4 cronjobs creados en zona America/Bogota: Trade Monitor (`*/15 * * * 1-5`), Judge Daily (`45 22 * * 1-5`), Health Check (`0 8 * * 1-5`), Backfill Weekly (`0 1 * * 0`). Disparan vía HTTPS POST al endpoint `workflow_dispatch` de la GitHub REST API con un Personal Access Token (scope: Actions R/W). Los bloques `schedule:` de los 4 workflows fueron comentados (no eliminados — rollback de 1 commit disponible). Validación en producción: primer Juez bajo el nuevo régimen disparó a las 22:45:03 Bogotá (+3 seg de margen) y completó 15m 57s sin warnings.

@@ -319,12 +319,19 @@ class InvestorAgent:
         op_id: int,
         precio_salida: float,
         capital_disponible: float,
+        timestamp_salida: datetime | None = None,
     ) -> dict[str, Any]:
         """
         Cierra una operación: calcula P&L desde precios reales de mercado
         y actualiza el capital y ROI del agente en la base de datos.
         Llamado por TradeMonitor cuando el precio toca SL, TP, o al EOD.
+
+        `timestamp_salida` (opcional, UTC-aware): permite registrar el
+        instante real en que la vela tocó SL/TP cuando el cierre proviene
+        del verificador intra-vela. Si se omite, se usa `datetime.now(UTC)`
+        (comportamiento legacy para EOD/snapshot).
         """
+        ts_salida = timestamp_salida or datetime.now(timezone.utc)
         with get_conn() as conn:
             cur = get_dict_cursor(conn)
             cur.execute(
@@ -373,7 +380,7 @@ class InvestorAgent:
                     estado           = 'cerrada'
                 WHERE id = %s
                 """,
-                (datetime.now(timezone.utc), precio_salida, pnl, pnl_pct, op_id),
+                (ts_salida, precio_salida, pnl, pnl_pct, op_id),
             )
             cur.execute(
                 """
@@ -390,7 +397,7 @@ class InvestorAgent:
         try:
             SheetsLogger().update_operation(
                 op_id, precio_salida, pnl,
-                timestamp_salida=datetime.now(timezone.utc),
+                timestamp_salida=ts_salida,
             )
         except Exception as e:
             log.error(f"[InvestorAgent] Error updating sheets (operation): {e}")

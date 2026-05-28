@@ -149,3 +149,90 @@ def get_price_history(interval: str = "1h", range_str: str = "5d") -> list[dict]
         })
     log.debug("[SimBroker] %d velas %s/%s cargadas.", len(candles), interval, range_str)
     return candles
+
+
+# ── Verificación intra-vela de SL/TP (resolución 1 minuto) ────────────────────
+#
+# Las funciones de abajo soportan el verificador intra-vela del trade_monitor,
+# que cierra el sesgo del snapshot único: con OHLC 1m podemos detectar mechas
+# que tocan SL o TP entre dos ejecuciones del cron (cada 15 min).
+
+def check_sl_tp_intrabar(
+    action: str,
+    stop_loss: float,
+    take_profit: float,
+    candle: dict,
+) -> PositionResult:
+    """
+    Verifica si una VELA OHLC tocó SL o TP de una posición abierta.
+
+    Convenciones de hit por dirección:
+      BUY  → HIT_SL si candle["low"]  <= stop_loss
+             HIT_TP si candle["high"] >= take_profit
+      SELL → HIT_SL si candle["high"] >= stop_loss
+             HIT_TP si candle["low"]  <= take_profit
+
+    Si la vela toca AMBOS niveles (gap o vela muy amplia) → devuelve "HIT_SL".
+    Esta es la convención conservadora estándar de backtesters serios
+    (Backtrader, vectorbt): ante ambigüedad intra-vela, asumir el peor caso
+    para el trader. Evita inflar el fitness con casos que en producción
+    real podrían haber cerrado en SL.
+
+    `candle` debe ser un dict con al menos las claves "high" y "low"
+    (como los devuelve `get_price_history()` y `get_intrabar_candles()`).
+    """
+    high = float(candle["high"])
+    low  = float(candle["low"])
+
+    if action == "BUY":
+        hit_sl = low  <= stop_loss
+        hit_tp = high >= take_profit
+    elif action == "SELL":
+        hit_sl = high >= stop_loss
+        hit_tp = low  <= take_profit
+    else:
+        return "OPEN"
+
+    if hit_sl:
+        # Cubre los casos: solo SL, o SL + TP simultáneo (peor caso).
+        return "HIT_SL"
+    if hit_tp:
+        return "HIT_TP"
+    return "OPEN"
+
+
+def get_intrabar_candles(since: datetime) -> list[dict]:
+    """
+    Devuelve velas OHLC de 1 minuto cuyo timestamp es POSTERIOR a `since`.
+
+    Reusa `get_price_history(interval="1m", range_str="1d")` y filtra. Si Yahoo
+    Finance no devuelve nada (mercado cerrado, fin de semana, fallo de API)
+    o si hay excepción de red, devuelve [] para que el llamador haga fallback
+    al check por snapshot legacy sin bloquear el ciclo.
+
+    `since` debe ser timezone-aware (UTC). Los timestamps de las velas que
+    devuelve get_price_history son UTC-aware, así que la comparación es
+    directa.
+    """
+    if since is not None and since.tzinfo is None:
+        # Si llega naive, asumir UTC para evitar TypeError en la comparación.
+        since = since.replace(tzinfo=timezone.utc)
+
+    try:
+        candles = get_price_history(interval="1m", range_str="1d")
+    except Exception as exc:
+        log.warning("[SimBroker] get_intrabar_candles fallback ([]) — %s", exc)
+        return []
+
+    if not candles:
+        return []
+
+    if since is None:
+        return candles
+
+    filtered = [c for c in candles if c["timestamp"] > since]
+    log.debug(
+        "[SimBroker] intrabar candles: %d de %d posteriores a %s",
+        len(filtered), len(candles), since.isoformat(),
+    )
+    return filtered

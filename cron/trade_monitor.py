@@ -189,6 +189,185 @@ def _apply_trailing_stop(op: dict, current_price: float) -> tuple[float, float]:
     return nuevo_sl, nuevo_extremo
 
 
+# ── Verificador intra-vela de SL/TP ───────────────────────────────────────────
+
+def _verify_position_intrabar(op: dict, fallback_price: float | None) -> dict:
+    """
+    Verifica SL/TP de una posición abierta usando OHLC de 1 minuto desde
+    `timestamp_ultima_verificacion` hasta ahora. Cierra la operación al
+    precio exacto del nivel si alguna vela lo tocó, o avanza el cursor
+    de verificación si no hubo hit.
+
+    Si Yahoo no devuelve velas (fin de semana, fallo de API), cae al
+    comportamiento legacy: chequea con `fallback_price` (snapshot único)
+    para no bloquear el ciclo.
+
+    Convenciones intra-vela:
+      1) Por cada vela en orden cronológico, primero se chequea SL/TP con
+         el SL ANTES del trailing de esa misma vela.
+      2) Si no hubo hit, se aplica trailing usando el extremo favorable
+         de la vela (low para SELL, high para BUY) como current_price.
+      3) Si una vela toca SL y TP a la vez → SL gana (peor caso, ver
+         check_sl_tp_intrabar).
+
+    Devuelve: {"closed": bool, "candles_checked": int, "fallback": bool}.
+    """
+    from data.simulated_broker import (
+        check_sl_tp, check_sl_tp_intrabar, exit_price_for, get_intrabar_candles,
+    )
+    from agents.investor_agent import InvestorAgent
+    from db.connection import get_conn, get_dict_cursor
+
+    op_id        = op["id"]
+    accion       = op["accion"]
+    take_profit  = float(op["take_profit"])
+
+    since = op.get("timestamp_ultima_verificacion") or op.get("timestamp_entrada")
+    candles = get_intrabar_candles(since=since) if since is not None else []
+
+    # ── Fallback: sin velas OHLC, usar snapshot legacy ────────────────────────
+    if not candles:
+        if fallback_price is None:
+            log.debug("[TradeMonitor] Op %d sin velas y sin snapshot — skip.", op_id)
+            return {"closed": False, "candles_checked": 0, "fallback": True}
+
+        # Aplicar trailing una vez con el snapshot
+        nuevo_sl, nuevo_extremo = _apply_trailing_stop(op, fallback_price)
+        _persist_trailing(op, nuevo_sl, nuevo_extremo, since_ts=None)
+        op["stop_loss"] = nuevo_sl
+        op["precio_extremo_favorable"] = nuevo_extremo
+
+        resultado = check_sl_tp(
+            action=accion,
+            entry_price=op["precio_entrada"],
+            stop_loss=op["stop_loss"],
+            take_profit=take_profit,
+            current_price=fallback_price,
+        )
+        if resultado == "OPEN":
+            return {"closed": False, "candles_checked": 0, "fallback": True}
+
+        precio_salida = exit_price_for(
+            resultado, op["stop_loss"], take_profit, fallback_price
+        )
+        _close_op(op, precio_salida, ts_salida=None, resultado=resultado)
+        return {"closed": True, "candles_checked": 0, "fallback": True}
+
+    # ── Camino normal: iterar velas 1m en orden cronológico ───────────────────
+    extremo_actualizado_alguna_vez = False
+    last_candle_ts = None
+
+    for candle in candles:
+        last_candle_ts = candle["timestamp"]
+
+        # (a) Chequear SL/TP primero con el SL pre-trailing de esta vela
+        resultado = check_sl_tp_intrabar(
+            action=accion,
+            stop_loss=op["stop_loss"],
+            take_profit=take_profit,
+            candle=candle,
+        )
+        if resultado != "OPEN":
+            precio_salida = exit_price_for(
+                resultado, op["stop_loss"], take_profit, float(candle["close"])
+            )
+            # Persistir SL/extremo si cambió durante este loop antes del hit
+            if extremo_actualizado_alguna_vez:
+                _persist_trailing(
+                    op, op["stop_loss"], op["precio_extremo_favorable"],
+                    since_ts=last_candle_ts,
+                )
+            _close_op(op, precio_salida, ts_salida=last_candle_ts, resultado=resultado)
+            log.info(
+                "[TradeMonitor] Op %d %s INTRABAR → %s en vela %s: salida=%.5f",
+                op_id, accion, resultado, last_candle_ts.isoformat(), precio_salida,
+            )
+            return {
+                "closed": True,
+                "candles_checked": candles.index(candle) + 1,
+                "fallback": False,
+            }
+
+        # (b) Sin hit en esta vela → aplicar trailing con el extremo favorable
+        favorable_extreme = float(candle["low"]) if accion == "SELL" else float(candle["high"])
+        nuevo_sl, nuevo_extremo = _apply_trailing_stop(op, favorable_extreme)
+        if nuevo_sl != op["stop_loss"] or nuevo_extremo != op.get("precio_extremo_favorable"):
+            extremo_actualizado_alguna_vez = True
+            op["stop_loss"] = nuevo_sl
+            op["precio_extremo_favorable"] = nuevo_extremo
+
+    # Sin cierre: persistir SL/extremo final + avanzar cursor de verificación
+    _persist_trailing(
+        op, op["stop_loss"], op["precio_extremo_favorable"], since_ts=last_candle_ts,
+    )
+    log.debug(
+        "[TradeMonitor] Op %d intra-vela OK — %d velas procesadas, SL=%.5f extremo=%.5f",
+        op_id, len(candles), op["stop_loss"], op["precio_extremo_favorable"],
+    )
+    return {"closed": False, "candles_checked": len(candles), "fallback": False}
+
+
+def _persist_trailing(op: dict, sl: float, extremo: float, since_ts) -> None:
+    """
+    Persiste sl_dinamico, precio_extremo_favorable y opcionalmente
+    timestamp_ultima_verificacion para la operación.
+    """
+    from db.connection import get_conn
+
+    if since_ts is not None:
+        sql = """
+            UPDATE operaciones
+            SET sl_dinamico = %s,
+                precio_extremo_favorable = %s,
+                timestamp_ultima_verificacion = %s
+            WHERE id = %s
+        """
+        params = (sl, extremo, since_ts, op["id"])
+    else:
+        sql = """
+            UPDATE operaciones
+            SET sl_dinamico = %s,
+                precio_extremo_favorable = %s
+            WHERE id = %s
+        """
+        params = (sl, extremo, op["id"])
+
+    with get_conn() as conn:
+        cur = conn.cursor()
+        cur.execute(sql, params)
+
+
+def _close_op(op: dict, precio_salida: float, ts_salida, resultado: str) -> None:
+    """
+    Cierra la operación reusando InvestorAgent.close_operation y propaga
+    el timestamp_salida real cuando proviene del verificador intra-vela.
+    """
+    from agents.investor_agent import InvestorAgent
+    from db.connection import get_conn, get_dict_cursor
+
+    with get_conn() as conn:
+        cur = get_dict_cursor(conn)
+        cur.execute(
+            "SELECT capital_actual FROM agentes WHERE id = %s",
+            (op["agente_id"],),
+        )
+        row = cur.fetchone()
+        capital_actual = float(row["capital_actual"]) if row else 10.0
+
+    agent = InvestorAgent(op["agente_id"], {})
+    result = agent.close_operation(
+        op_id=op["id"],
+        precio_salida=precio_salida,
+        capital_disponible=capital_actual,
+        timestamp_salida=ts_salida,
+    )
+    log.info(
+        "[TradeMonitor] Op %d %s → %s: salida=%.5f pnl=%.4f capital=%.4f",
+        op["id"], op["accion"], resultado,
+        precio_salida, result.get("pnl", 0), result.get("nuevo_capital", 0),
+    )
+
+
 # ── 1. Guardia EOD (red de seguridad ante retrasos del judge_daily) ───────────
 
 def _eod_guard() -> None:
@@ -248,7 +427,10 @@ def sync_once() -> dict:
     # force-close-all del juez no corrió a tiempo (falla común en GH Actions).
     _eod_guard()
 
-    from data.simulated_broker import get_current_price, check_sl_tp, exit_price_for
+    from data.simulated_broker import (
+        get_current_price, check_sl_tp, exit_price_for,
+        check_sl_tp_intrabar, get_intrabar_candles,
+    )
     from agents.investor_agent import InvestorAgent
     from db.connection import get_conn, get_dict_cursor
 
@@ -261,6 +443,8 @@ def sync_once() -> dict:
                 o.id,
                 o.agente_id,
                 o.accion,
+                o.timestamp_entrada,
+                o.timestamp_ultima_verificacion,
                 o.precio_entrada::float AS precio_entrada,
                 o.capital_usado::float  AS capital_usado,
                 COALESCE(o.sl_dinamico,
@@ -284,83 +468,26 @@ def sync_once() -> dict:
     sltp_checked = sltp_synced = sltp_errors = 0
 
     if open_ops:
+        # Snapshot único para fallback si no hay velas OHLC disponibles
         try:
             current_price = get_current_price()
             log.info(
-                "[TradeMonitor] EUR/USD = %.5f — revisando %d posiciones abiertas.",
+                "[TradeMonitor] EUR/USD = %.5f — revisando %d posiciones abiertas (intra-vela 1m).",
                 current_price, len(open_ops),
             )
         except Exception as exc:
-            log.error("[TradeMonitor] No se pudo obtener precio: %s", exc)
+            log.error("[TradeMonitor] No se pudo obtener precio snapshot: %s", exc)
             current_price = None
 
-        if current_price is not None:
-            for op in open_ops:
-                try:
-                    # Aplicar trailing stop antes de verificar SL/TP
-                    nuevo_sl, nuevo_extremo = _apply_trailing_stop(op, current_price)
-                    if nuevo_sl != op["stop_loss"] or nuevo_extremo != op.get("precio_extremo_favorable"):
-                        with get_conn() as conn:
-                            cur = conn.cursor()
-                            cur.execute(
-                                """
-                                UPDATE operaciones
-                                SET sl_dinamico = %s, precio_extremo_favorable = %s
-                                WHERE id = %s
-                                """,
-                                (nuevo_sl, nuevo_extremo, op["id"]),
-                            )
-                        log.info(
-                            "[TradeMonitor] Trailing — Op %d (%s) SL %.5f→%.5f extremo=%.5f",
-                            op["id"], op["accion"], op["stop_loss"], nuevo_sl, nuevo_extremo,
-                        )
-                        op["stop_loss"] = nuevo_sl
-
-                    resultado = check_sl_tp(
-                        action=op["accion"],
-                        entry_price=op["precio_entrada"],
-                        stop_loss=op["stop_loss"],
-                        take_profit=op["take_profit"],
-                        current_price=current_price,
-                    )
-                    sltp_checked += 1
-
-                    if resultado == "OPEN":
-                        log.debug(
-                            "[TradeMonitor] Op %d (%s) abierta — precio=%.5f SL=%.5f TP=%.5f",
-                            op["id"], op["accion"], current_price,
-                            op["stop_loss"], op["take_profit"],
-                        )
-                        continue
-
-                    precio_salida = exit_price_for(
-                        resultado, op["stop_loss"], op["take_profit"], current_price
-                    )
-                    with get_conn() as conn:
-                        cur = conn.cursor()
-                        cur.execute(
-                            "SELECT capital_actual FROM agentes WHERE id = %s",
-                            (op["agente_id"],),
-                        )
-                        row = cur.fetchone()
-                        capital_actual = float(row[0]) if row else 10.0
-
-                    agent  = InvestorAgent(op["agente_id"], {})
-                    result = agent.close_operation(
-                        op_id=op["id"],
-                        precio_salida=precio_salida,
-                        capital_disponible=capital_actual,
-                    )
-                    log.info(
-                        "[TradeMonitor] Op %d %s → %s: salida=%.5f pnl=%.4f capital=%.4f",
-                        op["id"], op["accion"], resultado,
-                        precio_salida, result.get("pnl", 0), result.get("nuevo_capital", 0),
-                    )
+        for op in open_ops:
+            try:
+                result_intrabar = _verify_position_intrabar(op, current_price)
+                sltp_checked += 1
+                if result_intrabar.get("closed"):
                     sltp_synced += 1
-
-                except Exception as exc:
-                    log.error("[TradeMonitor] Error procesando op %d: %s", op["id"], exc)
-                    sltp_errors += 1
+            except Exception as exc:
+                log.error("[TradeMonitor] Error procesando op %d: %s", op["id"], exc)
+                sltp_errors += 1
 
         log.info(
             "[TradeMonitor] SL/TP — revisadas=%d cerradas=%d errores=%d",
