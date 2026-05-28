@@ -634,6 +634,13 @@ button {
   padding: 14px;
 }
 
+.judge-item-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
 .judge-item span {
   color: var(--gold);
   display: block;
@@ -641,6 +648,13 @@ button {
   font-weight: 800;
   letter-spacing: 1px;
   text-transform: uppercase;
+}
+
+.judge-item-ts {
+  color: var(--dim);
+  font-size: 10px;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .judge-item strong {

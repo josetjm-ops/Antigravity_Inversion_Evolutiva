@@ -766,7 +766,12 @@ function JudgeLogs({ logs }) {
       <div className="judge-list">
         {list.map((log, idx) => (
           <article className="judge-item" key={`${log.created_at}-${idx}`}>
-            <span>{log.tipo_evento}</span>
+            <div className="judge-item-header">
+              <span>{log.tipo_evento}</span>
+              {log.created_at_bogota && (
+                <time className="judge-item-ts">{log.created_at_bogota}</time>
+              )}
+            </div>
             <strong>{log.agente_afectado_id || "Sistema"}</strong>
             <p>{log.razonamiento_llm || log.descripcion}</p>
           </article>

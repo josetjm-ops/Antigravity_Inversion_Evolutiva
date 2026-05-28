@@ -184,7 +184,8 @@ export async function GET() {
 
     const judgeLogsRes = await client.query(`
       SELECT fecha::text AS fecha, tipo_evento, agente_afectado_id,
-             descripcion, razonamiento_llm, created_at
+             descripcion, razonamiento_llm, created_at,
+             TO_CHAR(created_at AT TIME ZONE 'America/Bogota', 'DD/MM/YYYY HH24:MI') AS created_at_bogota
       FROM logs_juez
       ORDER BY created_at DESC
       LIMIT 30
