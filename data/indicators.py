@@ -75,6 +75,79 @@ def fetch_ohlcv(interval: str = "15m", range_str: str = "5d") -> pd.DataFrame:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# FILTRO DE TEMPORALIDAD SUPERIOR (HTF 1h)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def calc_htf_trend_series(
+    df_1h: pd.DataFrame,
+    ema_rapida: int = 50,
+    ema_lenta: int = 200,
+) -> pd.DataFrame:
+    """
+    Calcula la serie temporal del sesgo direccional en el timeframe de 1h.
+
+    Usa EMA50 y EMA200 sobre el cierre horario. La dirección se clasifica como:
+      BULL : precio > EMA50 Y EMA50 > EMA200  (tendencia alcista confirmada)
+      BEAR : precio < EMA50 Y EMA50 < EMA200  (tendencia bajista confirmada)
+      NEUTRAL: cualquier estado mixto (permite operar en ambas direcciones)
+
+    Devuelve el DataFrame original con columnas adicionales:
+      htf_ema_rapida, htf_ema_lenta, htf_direccion
+
+    Nota: con EMA200 se necesitan ≥200 barras de 1h para que el suavizado
+    converge (≈8 días). Con range_str="3mo" el warmup es más que suficiente.
+    """
+    close = df_1h["close"]
+    ema_r = close.ewm(span=ema_rapida,  adjust=False).mean()
+    ema_l = close.ewm(span=ema_lenta,   adjust=False).mean()
+
+    def _dir(row: pd.Series) -> str:
+        p, r, l = row["close"], row["htf_ema_rapida"], row["htf_ema_lenta"]
+        if p > r and r > l:
+            return "BULL"
+        if p < r and r < l:
+            return "BEAR"
+        return "NEUTRAL"
+
+    df_out = df_1h.copy()
+    df_out["htf_ema_rapida"] = ema_r.round(5)
+    df_out["htf_ema_lenta"]  = ema_l.round(5)
+    df_out["htf_direccion"]  = df_out.apply(_dir, axis=1)
+    return df_out[["timestamp", "close", "htf_ema_rapida", "htf_ema_lenta", "htf_direccion"]]
+
+
+def fetch_htf_trend(ema_rapida: int = 50, ema_lenta: int = 200) -> dict:
+    """
+    Descarga velas 1h (3 meses) y retorna el sesgo direccional actual como dict:
+      {"direccion": "BULL"|"BEAR"|"NEUTRAL", "ema_rapida": float, "ema_lenta": float}
+
+    Se llama UNA VEZ por ciclo en trade_monitor y se comparte entre todos los
+    agentes, igual que el OHLCV de 15m.
+
+    Ante cualquier fallo de descarga devuelve NEUTRAL para no bloquear el ciclo.
+    """
+    try:
+        df_1h = fetch_ohlcv(interval="1h", range_str="3mo")
+        serie = calc_htf_trend_series(df_1h, ema_rapida=ema_rapida, ema_lenta=ema_lenta)
+        ultima = serie.iloc[-1]
+        result = {
+            "direccion":   ultima["htf_direccion"],
+            "ema_rapida":  float(ultima["htf_ema_rapida"]),
+            "ema_lenta":   float(ultima["htf_ema_lenta"]),
+        }
+        log.info(
+            "[Indicators] HTF(1h) EMA%d=%.5f EMA%d=%.5f → %s",
+            ema_rapida, result["ema_rapida"],
+            ema_lenta,  result["ema_lenta"],
+            result["direccion"],
+        )
+        return result
+    except Exception as exc:
+        log.warning("[Indicators] fetch_htf_trend falló (%s) — usando NEUTRAL.", exc)
+        return {"direccion": "NEUTRAL", "ema_rapida": 0.0, "ema_lenta": 0.0}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # SMART MONEY CONCEPTS — DETECCIÓN
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -237,6 +310,7 @@ def calc_signals(
     df: pd.DataFrame,
     params: dict,
     params_smc: dict | None = None,
+    htf_trend: dict | None = None,
 ) -> TechnicalSignals:
     """
     Calcula RSI, EMA, MACD (parámetros genéticos del agente) y los indicadores
@@ -244,6 +318,8 @@ def calc_signals(
 
     params      : params_tecnicos del agente (genes clásicos)
     params_smc  : params_smc del agente (genes SMC). Si es None usa defaults.
+    htf_trend   : dict {"direccion", "ema_rapida", "ema_lenta"} del timeframe 1h.
+                  Si es None los campos HTF quedan en sus defaults seguros (NEUTRAL).
 
     Un solo DataFrame compartido entre todos los agentes; cada uno obtiene
     sus propios indicadores calculados en memoria.
@@ -268,10 +344,14 @@ def calc_signals(
     atr_period         = int(params_smc.get("atr_period",                14))
 
     # ── RSI ───────────────────────────────────────────────────────────────────
-    delta    = close.diff()
-    avg_gain = delta.clip(lower=0).ewm(com=rsi_p - 1, adjust=False).mean().iloc[-1]
-    avg_loss = (-delta).clip(lower=0).ewm(com=rsi_p - 1, adjust=False).mean().iloc[-1]
-    rsi_val  = 100.0 if avg_loss == 0 else round(100.0 - 100.0 / (1.0 + avg_gain / avg_loss), 4)
+    # Calculamos la serie completa para obtener también rsi_prev (vela anterior),
+    # necesario para detectar el cruce del nivel 50 en modo momentum.
+    delta      = close.diff()
+    avg_gains  = delta.clip(lower=0).ewm(com=rsi_p - 1, adjust=False).mean()
+    avg_losses = (-delta).clip(lower=0).ewm(com=rsi_p - 1, adjust=False).mean()
+    rsi_series = 100.0 - 100.0 / (1.0 + avg_gains / avg_losses.clip(lower=1e-10))
+    rsi_val    = round(float(rsi_series.iloc[-1]), 4)
+    rsi_prev   = round(float(rsi_series.iloc[-2]), 4) if len(rsi_series) >= 2 else rsi_val
 
     # ── EMA ───────────────────────────────────────────────────────────────────
     ema_r_val = round(float(close.ewm(span=ema_r, adjust=False).mean().iloc[-1]), 5)
@@ -292,10 +372,21 @@ def calc_signals(
     rng_actual, rng_ma20, rng_spike = calc_range_proxy(df, multiplier=range_multiplier)
     atr_val = calc_atr(df, period=atr_period)
 
+    # Dirección de la última vela (para condicionar la amplificación de range spike)
+    _last_open  = float(df["open"].iloc[-1])
+    _last_close = float(df["close"].iloc[-1])
+    _doji_thr   = 0.5 / 10_000   # menos de 0.5 pips de cuerpo → doji (NEUTRAL)
+    if _last_close - _last_open > _doji_thr:
+        candle_dir = "BULL"
+    elif _last_open - _last_close > _doji_thr:
+        candle_dir = "BEAR"
+    else:
+        candle_dir = "NEUTRAL"
+
     log.debug(
-        "[Indicators] RSI(%d)=%.2f EMA%d=%.5f EMA%d=%.5f MACD_hist=%.5f precio=%.5f "
+        "[Indicators] RSI(%d)=%.2f(prev=%.2f) EMA%d=%.5f EMA%d=%.5f MACD_hist=%.5f precio=%.5f "
         "FVG=%s(%s %.1fpips) OB=%s(%s) Range=%.1f/%.1f spike=%s ATR(%d)=%.1fpips",
-        rsi_p, rsi_val, ema_r, ema_r_val, ema_l, ema_l_val,
+        rsi_p, rsi_val, rsi_prev, ema_r, ema_r_val, ema_l, ema_l_val,
         float(hist.iloc[-1]), precio,
         fvg["activo"], fvg["direccion"], fvg["pips"],
         ob["activo"], ob["direccion"],
@@ -303,9 +394,11 @@ def calc_signals(
         atr_period, atr_val * 10_000,
     )
 
+    _htf = htf_trend or {}
     return TechnicalSignals(
         # Clásicos
         rsi=rsi_val,
+        rsi_prev=rsi_prev,
         ema_rapida=ema_r_val,
         ema_lenta=ema_l_val,
         macd=round(float(macd_line.iloc[-1]), 5),
@@ -328,11 +421,16 @@ def calc_signals(
         range_proxy=rng_actual,
         range_ma20=rng_ma20,
         range_spike=rng_spike,
+        candle_direccion=candle_dir,
         # ATR dinámico
         atr=atr_val,
+        # HTF (1h) — poblado desde fetch_htf_trend(); NEUTRAL si no se pasa
+        htf_direccion=str(_htf.get("direccion", "NEUTRAL")),
+        htf_ema_rapida=float(_htf.get("ema_rapida", 0.0)),
+        htf_ema_lenta=float(_htf.get("ema_lenta", 0.0)),
     )
 
 
 def fetch_signals(params: dict, params_smc: dict | None = None) -> TechnicalSignals:
-    """Convenience: descarga OHLCV y calcula señales clásicas + SMC en un paso."""
-    return calc_signals(fetch_ohlcv(), params, params_smc)
+    """Convenience: descarga OHLCV + HTF y calcula todas las señales en un paso."""
+    return calc_signals(fetch_ohlcv(), params, params_smc, htf_trend=fetch_htf_trend())

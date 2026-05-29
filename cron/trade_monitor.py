@@ -534,7 +534,7 @@ def _evaluate_new_positions() -> dict:
         return {"evaluated": 0, "opened": 0, "errors": 0}
 
     from agents.investor_agent import InvestorAgent
-    from data.indicators import fetch_ohlcv, calc_signals
+    from data.indicators import fetch_ohlcv, calc_signals, fetch_htf_trend
     from data.macro_scraper import fetch_macro_snapshot
     from db.connection import get_conn, get_dict_cursor
 
@@ -577,10 +577,11 @@ def _evaluate_new_positions() -> dict:
     # 1 request HTTP para todos; cada agente calcula sus propios indicadores en memoria
     try:
         df_ohlcv = fetch_ohlcv()
+        htf_trend = fetch_htf_trend()      # sesgo 1h compartido entre todos los agentes
         macro_snapshot = fetch_macro_snapshot(ventana_horas=4)
         log.info(
-            "[TradeMonitor] OHLCV listo (%d velas) · último cierre=%.5f",
-            len(df_ohlcv), float(df_ohlcv["close"].iloc[-1]),
+            "[TradeMonitor] OHLCV listo (%d velas) · último cierre=%.5f · HTF=%s",
+            len(df_ohlcv), float(df_ohlcv["close"].iloc[-1]), htf_trend["direccion"],
         )
     except Exception as exc:
         log.error("[TradeMonitor] Error descargando datos de mercado: %s", exc)
@@ -608,6 +609,7 @@ def _evaluate_new_positions() -> dict:
                 df_ohlcv,
                 agent_data["params_tecnicos"],
                 smc_params or None,
+                htf_trend=htf_trend,
             )
 
             params = {
@@ -622,6 +624,7 @@ def _evaluate_new_positions() -> dict:
             result = agent.run_cycle(
                 tech_signals=tech_signals,
                 macro_snapshot=macro_snapshot,
+                htf_trend=htf_trend,
             )
 
             if result.get("skipped"):

@@ -36,16 +36,58 @@ class SubAgentTechnical(BaseAgent):
 
     # ── Scoring clásico ───────────────────────────────────────────────────────
 
-    def _score_rsi(self, rsi: float) -> tuple[str, float]:
-        sobrecompra = self.params.get("rsi_sobrecompra", 70)
-        sobreventa  = self.params.get("rsi_sobreventa",  30)
-        if rsi <= sobreventa:
-            strength = (sobreventa - rsi) / sobreventa
-            return "BUY", min(0.95, 0.5 + strength)
-        if rsi >= sobrecompra:
-            strength = (rsi - sobrecompra) / (100 - sobrecompra)
-            return "SELL", min(0.95, 0.5 + strength)
-        return "HOLD", 0.40
+    def _score_rsi(self, rsi: float, rsi_prev: float = 50.0) -> tuple[str, float]:
+        """
+        Modo momentum (default): señala la dirección del mercado mediante el cruce
+        del nivel 50, alineándose con EMA y MACD en lugar de contradecirlos.
+
+          Cruce al alza   (prev ≤ 50 → actual > 50) : BUY  fuerte (0.60–0.85)
+          Cruce a la baja (prev ≥ 50 → actual < 50) : SELL fuerte (0.60–0.85)
+          Por encima de 50 sin cruce                 : BUY  débil  (0.40–0.60)
+          Por debajo de 50 sin cruce                 : SELL débil  (0.40–0.60)
+          Zona muerta (|rsi - 50| ≤ zona_muerta)     : HOLD
+
+        Modo reversion (legacy — params_tecnicos.rsi_modo == "reversion"):
+          Mantiene el comportamiento anterior (señal en sobreventa/sobrecompra).
+          Solo lo activa la evolución si descubre que funciona mejor.
+        """
+        modo = self.params.get("rsi_modo", "momentum")
+
+        if modo == "reversion":
+            sobrecompra = self.params.get("rsi_sobrecompra", 70)
+            sobreventa  = self.params.get("rsi_sobreventa",  30)
+            if rsi <= sobreventa:
+                return "BUY",  min(0.95, 0.5 + (sobreventa - rsi) / sobreventa)
+            if rsi >= sobrecompra:
+                return "SELL", min(0.95, 0.5 + (rsi - sobrecompra) / (100 - sobrecompra))
+            return "HOLD", 0.40
+
+        # ── Modo momentum: cruce del nivel 50 ────────────────────────────────
+        nivel    = 50.0
+        zona_muerta = float(self.params.get("rsi_zona_muerta", 5.0))
+
+        cruce_alcista  = rsi_prev <= nivel and rsi > nivel
+        cruce_bajista  = rsi_prev >= nivel and rsi < nivel
+
+        if cruce_alcista:
+            strength = min(1.0, (rsi - nivel) / 20.0)     # 0→1 en rango 50–70
+            return "BUY", round(min(0.85, 0.60 + strength * 0.25), 4)
+
+        if cruce_bajista:
+            strength = min(1.0, (nivel - rsi) / 20.0)     # 0→1 en rango 30–50
+            return "SELL", round(min(0.85, 0.60 + strength * 0.25), 4)
+
+        # Sin cruce — sesgo suave por posición respecto al nivel 50
+        dist = abs(rsi - nivel)
+        if dist <= zona_muerta:
+            return "HOLD", 0.35
+
+        if rsi > nivel:
+            strength = min(1.0, (rsi - nivel) / 30.0)
+            return "BUY",  round(min(0.60, 0.40 + strength * 0.15), 4)
+        else:
+            strength = min(1.0, (nivel - rsi) / 30.0)
+            return "SELL", round(min(0.60, 0.40 + strength * 0.15), 4)
 
     def _score_ema(self, ema_rapida: float, ema_lenta: float) -> tuple[str, float]:
         if ema_lenta == 0:
@@ -118,7 +160,7 @@ class SubAgentTechnical(BaseAgent):
             signals = fetch_signals(self.params, self.params_smc)
 
         # Scores clásicos
-        rsi_rec,  rsi_conf  = self._score_rsi(signals.rsi)
+        rsi_rec,  rsi_conf  = self._score_rsi(signals.rsi, getattr(signals, "rsi_prev", 50.0))
         ema_rec,  ema_conf  = self._score_ema(signals.ema_rapida, signals.ema_lenta)
         macd_rec, macd_conf = self._score_macd(signals.macd_hist)
 
@@ -143,16 +185,34 @@ class SubAgentTechnical(BaseAgent):
             (ob_rec,   ob_conf,   w_ob),
         ])
 
-        # Range spike amplifica la confianza de la señal dominante
-        if signals.range_spike:
-            conf = min(0.95, round(conf * 1.15, 4))
+        # Range spike: amplifica solo si la vela del spike confirma la señal.
+        # Si el spike va en dirección opuesta (ej. vela bajista durante señal BUY),
+        # no amplifica ni atenúa — la confianza queda intacta para que el umbral
+        # mínimo (0.50) decida normalmente sin distorsión en ningún sentido.
+        if signals.range_spike and rec in ("BUY", "SELL"):
+            candle_dir = getattr(signals, "candle_direccion", "NEUTRAL")
+            signal_dir = "BULL" if rec == "BUY" else "BEAR"
+            if candle_dir == signal_dir:
+                conf = min(0.95, round(conf * 1.15, 4))   # confirma → amplificar
+
+        # Filtro HTF: vetar señales que van contra la tendencia del timeframe 1h.
+        # Solo actúa cuando htf_filter_enabled=True (default) y la señal es direccional.
+        htf_vetada = False
+        htf_filter = bool(self.params_smc.get("htf_filter_enabled", True))
+        if htf_filter and rec in ("BUY", "SELL"):
+            htf = getattr(signals, "htf_direccion", "NEUTRAL")
+            if (rec == "BUY" and htf == "BEAR") or (rec == "SELL" and htf == "BULL"):
+                rec, conf, htf_vetada = "HOLD", round(conf, 4), True
 
         log.debug(
             "[SubAgentTechnical] RSI:%s(%.2f) EMA:%s(%.2f) MACD:%s(%.2f) "
-            "FVG:%s(%.2f) OB:%s(%.2f) range=%.1fpips spike=%s → %s(%.2f)",
+            "FVG:%s(%.2f) OB:%s(%.2f) range=%.1fpips spike=%s HTF=%s%s → %s(%.2f)",
             rsi_rec, rsi_conf, ema_rec, ema_conf, macd_rec, macd_conf,
             fvg_rec, fvg_conf, ob_rec, ob_conf,
-            signals.range_proxy, signals.range_spike, rec, conf,
+            signals.range_proxy, signals.range_spike,
+            getattr(signals, "htf_direccion", "N/A"),
+            "(VETO)" if htf_vetada else "",
+            rec, conf,
         )
 
         # Validate with LLM only when confidence is ambiguous (0.45–0.65)
@@ -183,6 +243,7 @@ class SubAgentTechnical(BaseAgent):
             "indicadores": {
                 # Clásicos
                 "rsi":             round(signals.rsi, 4),
+                "rsi_prev":        round(getattr(signals, "rsi_prev", 50.0), 4),
                 "ema_rapida":      round(signals.ema_rapida, 5),
                 "ema_lenta":       round(signals.ema_lenta, 5),
                 "ema_cross_alcista": signals.ema_cross_alcista,
@@ -200,9 +261,10 @@ class SubAgentTechnical(BaseAgent):
                 "ob_direccion":    signals.ob_direccion,
                 "ob_nivel_sup":    signals.ob_nivel_sup,
                 "ob_nivel_inf":    signals.ob_nivel_inf,
-                "range_proxy":     signals.range_proxy,
-                "range_ma20":      signals.range_ma20,
-                "range_spike":     signals.range_spike,
+                "range_proxy":      signals.range_proxy,
+                "range_ma20":       signals.range_ma20,
+                "range_spike":      signals.range_spike,
+                "candle_direccion": getattr(signals, "candle_direccion", "NEUTRAL"),
                 "atr":             round(signals.atr, 6),
                 "atr_pips":        round(signals.atr * 10_000, 2),
             },
@@ -213,6 +275,8 @@ class SubAgentTechnical(BaseAgent):
                 "fvg":         {"señal": fvg_rec,  "confianza": round(fvg_conf, 4)},
                 "ob":          {"señal": ob_rec,   "confianza": round(ob_conf, 4)},
                 "range_spike": signals.range_spike,
+                "htf":         {"direccion": getattr(signals, "htf_direccion", "NEUTRAL"),
+                                 "veto": htf_vetada},
             },
             "llm_ajuste": llm_razon,
         }

@@ -99,12 +99,16 @@ class InvestorAgent:
         self,
         tech_signals: TechnicalSignals | None = None,
         macro_snapshot: MacroSnapshot | None = None,
+        htf_trend: dict | None = None,
     ) -> dict[str, Any]:
         """
         Ejecuta un ciclo completo: Técnico → Macro → Riesgo → DB.
         Las posiciones abiertas (BUY/SELL) quedan registradas con precio de
         entrada real y serán monitoreadas por TradeMonitor para cierre por SL/TP.
         Si el agente ya tiene una posición abierta, el ciclo se omite.
+
+        htf_trend: sesgo direccional del 1h, calculado una vez por ciclo en
+                   trade_monitor y pasado a ambos sub-agentes que lo consumen.
         """
         if self._has_open_position():
             log.info("[InvestorAgent] %s ya tiene posición abierta — ciclo omitido.", self.agent_id)
@@ -118,7 +122,7 @@ class InvestorAgent:
         capital = float(self.params.get("capital_actual", 10.0))
 
         senal_tecnico = self.sub_technical.analyze(tech_signals)
-        senal_macro   = self.sub_macro.analyze(macro_snapshot)
+        senal_macro   = self.sub_macro.analyze(macro_snapshot, htf_trend=htf_trend)
         decision: RiskDecision = self.sub_risk.analyze(senal_tecnico, senal_macro, capital)
 
         precio_entrada = senal_tecnico.get("indicadores", {}).get("precio_actual")

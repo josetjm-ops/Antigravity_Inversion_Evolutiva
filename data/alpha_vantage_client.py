@@ -23,6 +23,9 @@ class TechnicalSignals:
     precio_actual: float
     ema_cross_alcista: bool
 
+    # ── RSI momentum (opcional — default neutro) ──────────────────────────────
+    rsi_prev:        float = field(default=50.0)    # RSI vela anterior; 50.0 = sin cruce detectado
+
     # ── Smart Money Concepts (opcionales — defaults seguros) ──────────────────
     fvg_activo:      bool  = field(default=False)   # FVG detectado y no rellenado
     fvg_direccion:   str   = field(default="NONE")  # "BULL" | "BEAR" | "NONE"
@@ -33,10 +36,15 @@ class TechnicalSignals:
     ob_direccion:    str   = field(default="NONE")  # "BULL" | "BEAR" | "NONE"
     ob_nivel_sup:    float = field(default=0.0)     # precio techo del OB
     ob_nivel_inf:    float = field(default=0.0)     # precio piso del OB
-    range_proxy:     float = field(default=0.0)     # (high-low) última vela en pips
-    range_ma20:      float = field(default=0.0)     # media móvil 20p del range en pips
-    range_spike:     bool  = field(default=False)   # range_proxy > range_ma20 * multiplier
-    atr:             float = field(default=0.0)     # ATR(14) Wilder en precio, ej. 0.0012 = 12 pips
+    range_proxy:      float = field(default=0.0)    # (high-low) última vela en pips
+    range_ma20:       float = field(default=0.0)    # media móvil 20p del range en pips
+    range_spike:      bool  = field(default=False)  # range_proxy > range_ma20 * multiplier
+    candle_direccion: str   = field(default="NEUTRAL")  # "BULL"|"BEAR"|"NEUTRAL" — dirección última vela
+    atr:              float = field(default=0.0)    # ATR(14) Wilder en precio, ej. 0.0012 = 12 pips
+    # ── Filtro de temporalidad superior (HTF 1h) ──────────────────────────────
+    htf_direccion:   str   = field(default="NEUTRAL")  # "BULL" | "BEAR" | "NEUTRAL"
+    htf_ema_rapida:  float = field(default=0.0)        # EMA50(1h) al momento del análisis
+    htf_ema_lenta:   float = field(default=0.0)        # EMA200(1h) al momento del análisis
 
 
 def _get(params: dict) -> dict:

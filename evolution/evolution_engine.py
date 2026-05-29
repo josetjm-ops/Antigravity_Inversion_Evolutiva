@@ -55,6 +55,7 @@ _BOUNDS_TECNICOS_PERIODS = {
     "rsi_periodo":       (5,   50,  True),   # (min, max, is_int)
     "rsi_sobrecompra":   (55,  90,  False),
     "rsi_sobreventa":    (10,  45,  False),
+    "rsi_zona_muerta":   (1.0, 15.0, False), # banda neutral RSI momentum (Session 15 — Fase 2)
     "ema_rapida":        (3,   29,  True),
     "ema_lenta":         (10,  50,  True),
     "macd_rapida":       (5,   20,  True),
@@ -77,6 +78,8 @@ _BOUNDS_MACRO = {
     "umbral_sentimiento_venta":   (0.15, 0.45, False),
     "ventana_noticias_horas":     (1,   8,    True),
     "peso_total_macro":           (0.2, 0.7,  False),
+    # Sesgo tendencial HTF (Session 15 — Fase 3): intensidad del prior de tendencia
+    "peso_sesgo_tendencia":       (0.20, 0.65, False),
 }
 
 _BOUNDS_RIESGO = {
@@ -103,6 +106,8 @@ _DEFAULT_SMC_PARAMS: dict = {
     "trailing_activation_pips": 15.0,   # activar trailing tras 15 pips de profit
     "trailing_distance_pips":   10.0,   # mantener trailing a 10 pips del extremo
     "atr_period":               14,
+    # HTF trend filter (Session 15 — Fase 1)
+    "htf_filter_enabled":       1,      # 1=activo, 0=desactivado; no se muta gaussianamente
 }
 
 _BOUNDS_SMC = {
