@@ -139,8 +139,10 @@ Cada agente lleva cuatro diccionarios JSON que constituyen su "ADN". Estos pará
 | Gen | Rango | Descripción |
 |---|---|---|
 | `rsi_periodo` | 5–50 (entero) | Período de cálculo del RSI |
-| `rsi_sobrecompra` | 55–90 | Umbral RSI para señal SELL |
-| `rsi_sobreventa` | 10–45 | Umbral RSI para señal BUY |
+| `rsi_sobrecompra` | 55–90 | Umbral RSI para señal SELL (solo en modo `reversion`) |
+| `rsi_sobreventa` | 10–45 | Umbral RSI para señal BUY (solo en modo `reversion`) |
+| `rsi_modo` | `"momentum"` / `"reversion"` | Filosofía RSI: `"momentum"` usa cruce del nivel 50 (default desde Sesión 15); `"reversion"` usa sobrecompra/sobreventa legacy. Solo cambia por crossover, no por mutación gaussiana. |
+| `rsi_zona_muerta` | 1.0–15.0 | Banda de neutralidad (pips de RSI) alrededor del nivel 50 en modo momentum. RSI dentro de ±zona_muerta → HOLD. Gen mutable gaussianamente. |
 | `ema_rapida` | 3–29 (entero) | Período de la EMA rápida |
 | `ema_lenta` | 10–50 (entero) | Período de la EMA lenta (siempre > EMA rápida) |
 | `macd_rapida` | 5–20 (entero) | Período rápido del MACD |
@@ -161,6 +163,7 @@ Cada agente lleva cuatro diccionarios JSON que constituyen su "ADN". Estos pará
 | `umbral_sentimiento_venta` | 0.15–0.45 | Sentimiento máximo para recomendar SELL |
 | `ventana_noticias_horas` | 1–8 (entero) | Horizonte temporal del análisis macro |
 | `peso_total_macro` | 0.2–0.7 | Peso global de la señal macro en la decisión final |
+| `peso_sesgo_tendencia` | 0.20–0.65 | Intensidad del sesgo de tendencia HTF cuando no hay eventos de alto impacto. El sub-agente B devuelve BUY/SELL con esta confianza en lugar de HOLD plano. Gen mutable gaussianamente (desde Sesión 15). |
 
 #### `params_riesgo` — Sub-agente C
 
@@ -189,6 +192,7 @@ Cada agente lleva cuatro diccionarios JSON que constituyen su "ADN". Estos pará
 | `trailing_activation_pips` | 5–40 | Pips de ganancia para activar el trailing stop |
 | `trailing_distance_pips` | 5–25 | Distancia del trailing stop al precio extremo favorable |
 | `atr_period` | 7–21 (entero) | Período del ATR (Average True Range) de Wilder |
+| `htf_filter_enabled` | 0 / 1 | Habilita el filtro de tendencia de temporalidad superior (1h). Cuando es 1, bloquea señales que contradicen EMA50/EMA200 en velas de 1h. Se almacena como entero 0/1 (no float) para que `_mutate_block` lo ignore — es una decisión estratégica, no un parámetro continuo (desde Sesión 15). |
 
 ### Capital
 
@@ -234,15 +238,27 @@ Calcula scores individuales para 5 indicadores y los combina con ponderación ge
 
 | Indicador | Señal BUY | Señal SELL | Peso |
 |---|---|---|---|
-| RSI | < `rsi_sobreventa` | > `rsi_sobrecompra` | `peso_rsi` |
+| RSI (modo momentum) | Cruce al alza del nivel 50, o RSI > 50 fuera de zona muerta | Cruce a la baja del nivel 50, o RSI < 50 fuera de zona muerta | `peso_rsi` |
 | Cruce EMA | EMA rápida > EMA lenta | EMA rápida < EMA lenta | `peso_ema` |
 | MACD histograma | > 0.00005 | < -0.00005 | `peso_macd` |
 | FVG activo | Dirección BULL | Dirección BEAR | `peso_fvg` |
 | Order Block | Dirección BULL | Dirección BEAR | `peso_ob` |
 
-Si hay un **range spike** (rango actual > MA20 del rango × `range_spike_multiplier`), la confianza de la señal dominante se amplifica ×1.15 (máx. 0.95).
+**RSI — modo momentum (default desde Sesión 15):** en lugar de la lógica sobrecompra/sobreventa (que contradice la tendencia), el RSI señala la dirección del mercado mediante el cruce del nivel 50.
+- Cruce al alza (prev ≤ 50 → actual > 50): BUY fuerte (0.60–0.85)
+- Cruce a la baja (prev ≥ 50 → actual < 50): SELL fuerte (0.60–0.85)
+- Sin cruce, fuera de la zona muerta (|RSI − 50| > `rsi_zona_muerta`): BUY/SELL débil (0.40–0.60)
+- Sin cruce, dentro de la zona muerta: HOLD (0.35)
+- Modo legacy `"reversion"` (sobrecompra/sobreventa): solo se activa si la evolución descubre que funciona mejor.
 
-La señal ponderada emite BUY si `score_buy > score_sell` y `score_buy > 0.45`. Igual para SELL. Si ninguno supera el umbral, emite HOLD.
+**Range spike condicionado (desde Sesión 15):** si hay un spike de volatilidad (rango actual > MA20 × `range_spike_multiplier`) Y la dirección de la última vela confirma la señal, la confianza se amplifica ×1.15 (máx. 0.95). Si el spike contradice la señal, la confianza queda intacta — ni amplifica ni atenúa.
+
+**Filtro HTF — veto de tendencia superior (desde Sesión 15):** después de calcular la señal ponderada, si `htf_filter_enabled=1` y la señal es BUY/SELL, se consulta la dirección EMA50/EMA200 en velas de 1h:
+- BUY cuando HTF = BEAR → HOLD (veto)
+- SELL cuando HTF = BULL → HOLD (veto)
+- HTF = NEUTRAL → no veta (la señal pasa intacta)
+
+La señal ponderada emite BUY si `score_buy > score_sell`, `score_buy > 0.40` y la ventaja es > 0.15. Igual para SELL. Si no hay dominancia clara, emite HOLD.
 
 ### Sub-agente B — Análisis Macro
 
@@ -250,6 +266,7 @@ La señal ponderada emite BUY si `score_buy > score_sell` y `score_buy > 0.45`. 
 2. Descarga titulares de noticias forex recientes.
 3. Envía todo al LLM DeepSeek y recibe un JSON con `recomendacion`, `confianza` y `sentimiento_score` (-1.0 a +1.0).
 4. Aplica los umbrales genéticos del agente: si `sentimiento_score` normalizado ≥ `umbral_sentimiento_compra` → BUY; si ≤ `umbral_sentimiento_venta` → SELL.
+5. **Sesgo de tendencia HTF (desde Sesión 15):** si no hay eventos de alto impacto y el LLM devuelve HOLD con baja confianza, en lugar de quedarse en HOLD plano aplica `_sesgo_tendencia()`: consulta la dirección EMA50/EMA200 en 1h y emite BUY (BULL) o SELL (BEAR) con confianza = `min(0.55, peso_sesgo_tendencia)`. Esto evita que el sub-agente B sea siempre neutral en días sin noticias — alinea el sesgo macro con la tendencia de fondo real del mercado.
 
 ### Sub-agente C — Riesgo y Decisión Final
 
@@ -1141,6 +1158,7 @@ Carpeta con utilidades que se ejecutan de forma puntual (no automática). No se 
 | `seed_gen1.py` | Crea 10 agentes Generación 1 con parámetros por defecto y $10 c/u (pool inicial $100). | Una sola vez al migrar a una nueva BD vacía. Editar la constante `HOY` antes de ejecutar. |
 | `diversify_gen1.py` | Aplica mutación gaussiana individualizada a los 10 agentes activos para darles ADN propio (σ elevada). | Cuando los 10 agentes tienen params idénticos (típicamente justo después de un seed) y el motor evolutivo queda bloqueado por falta de fitness diferencial. |
 | `recompute_pnl.py` | Recalcula `pnl`, `capital_usado` (nocional USD) y `pnl_porcentaje` para todas las ops cerradas que tenían `capital_usado` en lotes (convención anterior al commit `6572c11`). Reconstruye `capital_actual` y `roi_total` de los agentes. | **Ya ejecutado** el 2026-05-20. Solo necesario si se detectan operaciones históricas con `capital_usado` < 1.0 (indicativo de lotes en vez de USD). |
+| `backtest_estrategia.py` | Backtest determinista walk-forward sobre datos históricos de Yahoo Finance. Replica el pipeline Técnico → Macro → Riesgo vela por vela con el LLM neutralizado (ruta heurística pura). Calcula PnL, win-rate, drawdown y Calmar Ratio. Soporta genes reales desde DB (`--agent-id`), rango configurable (`--range`) y desglose por día (`--dia`). | Validar cambios de estrategia antes del deploy. Usar `--range 1mo` como referencia estándar. |
 
 Comando para ejecutar:
 ```bash
@@ -1167,7 +1185,7 @@ Antigravity_Inversion_Evolutiva/
 │   ├── trade_monitor.py         (cada 15 min: SL/TP + nuevas + guardia EOD)
 │   └── judge_scheduler.py       (lanza el ciclo evolutivo del Juez)
 ├── data/                        Fuentes de mercado y indicadores
-│   ├── indicators.py            (OHLCV + RSI/EMA/MACD/FVG/OB/ATR)
+│   ├── indicators.py            (OHLCV + RSI/EMA/MACD/FVG/OB/ATR + HTF series 1h)
 │   ├── macro_scraper.py         (Finnhub: noticias + calendario)
 │   ├── simulated_broker.py      (Yahoo Finance: snapshot + OHLC 1m intra-vela
 │   │                              · check_sl_tp_intrabar / get_intrabar_candles)
@@ -1175,7 +1193,7 @@ Antigravity_Inversion_Evolutiva/
 ├── db/
 │   ├── connection.py            (psycopg2 + Supabase pooler)
 │   ├── apply_migrations.py
-│   ├── migrations/              (001 – 008)
+│   ├── migrations/              (001 – 009)
 │   └── seeds/
 ├── evolution/
 │   └── evolution_engine.py      (fitness, crossover, mutación, redistribución)
@@ -1185,7 +1203,7 @@ Antigravity_Inversion_Evolutiva/
 │   ├── data.py
 │   └── logo.png
 ├── mobile-app/                  Next.js (app complementaria, Vercel)
-├── scripts/                     Utilidades manuales (seed_gen1, diversify_gen1)
+├── scripts/                     Utilidades manuales (seed_gen1, diversify_gen1, backtest_estrategia)
 ├── tests/                       pytest (pipeline + evolution + intra-bar SL/TP)
 ├── utils/
 │   ├── sheets_logger.py         (gspread: trazabilidad en Google Sheets)
@@ -1205,9 +1223,23 @@ Antigravity_Inversion_Evolutiva/
 
 ---
 
-*Documento actualizado el 2026-05-28 (Sesión 14 — hotfix producción: aplicada migración 008 que faltaba en Supabase (el monitor caía con `UndefinedColumn` desde el deploy de Sesión 13), timeout del job de monitor subido 5→12 min, y cerrados los 4 issues de alerta abiertos). Commit `9f910ed` pusheado a `origin/master`.*
+*Documento actualizado el 2026-05-29 (Sesión 15 — auditoría estratégica completa: filtro HTF 1h, RSI momentum (cruce nivel 50), sesgo macro por tendencia HTF, range spike condicionado, 4 genes nuevos + migración 009, backtest walk-forward de validación). Commit `bea6a9f` pusheado a `origin/master`. Calmar Ratio: 0.151 → 1.508 (+901%) sobre 1 mes de datos.*
 
 ## Historial de cambios mayores
+
+- **2026-05-29 (Sesión 15 — auditoría estratégica completa: filtro HTF + RSI momentum + sesgo macro + backtest) · commit `bea6a9f` · en producción:**
+  - **Contexto:** todas las operaciones del 29-may cerraron en pérdida. Análisis de los gráficos (EUR/USD 15m y 1h) reveló tres problemas estructurales: (1) el RSI operaba en modo sobrecompra/sobreventa, comprando en tendencias bajistas; (2) la macro siempre devolvía HOLD plano cuando no había noticias, dejando la decisión solo al técnico con señales débiles; (3) los spikes de volatilidad amplificaban la confianza sin verificar si la vela confirmaba la dirección.
+  - **Fase 1 — Filtro HTF (`htf_filter_enabled`, `data/indicators.py`, `agents/sub_agent_technical.py`, `cron/trade_monitor.py`):** se descarga EMA50/EMA200 en velas de 1h y se calcula `htf_direccion` (BULL/BEAR/NEUTRAL). Señales que contradicen la tendencia superior se vetan → forzadas a HOLD. El filtro se aplica después del scoring ponderado y antes del LLM para que el veto sea definitivo. Añadidos tres campos a `TechnicalSignals`: `htf_direccion`, `htf_ema_rapida`, `htf_ema_lenta`.
+  - **Fase 2 — RSI Momentum (`agents/sub_agent_technical._score_rsi`):** reescritura completa de la lógica RSI. El modo `"momentum"` (nuevo default) usa el cruce del nivel 50 en lugar de sobrecompra/sobreventa: cruce alcista → BUY fuerte (0.60–0.85), cruce bajista → SELL fuerte (0.60–0.85), sin cruce pero fuera de la `rsi_zona_muerta` → señal débil (0.40–0.60), dentro de la zona muerta → HOLD (0.35). Se necesita el RSI de la vela anterior (`rsi_prev`) para detectar el cruce — añadido como campo opcional en `TechnicalSignals` con default 50.0.
+  - **Fase 3 — Sesgo macro por tendencia HTF (`agents/sub_agent_macro.py`, `agents/investor_agent.py`):** nuevo método `_sesgo_tendencia(htf_trend)` en `SubAgentMacro`. Cuando el LLM devuelve HOLD con confianza baja y no hay eventos de alto impacto, en lugar de propagar HOLD plano (0.35) el sub-agente B usa la dirección EMA 1h para emitir BUY/SELL con confianza = `min(0.55, peso_sesgo_tendencia)`. El gen `peso_sesgo_tendencia` (0.20–0.65, default 0.40) controla la intensidad. `InvestorAgent.run_cycle` ahora acepta y propaga `htf_trend` al sub-agente B.
+  - **Fase 4 — Range Spike condicionado (`agents/sub_agent_technical.analyze`):** el spike de volatilidad (rango > MA20 × multiplicador) solo amplifica la confianza ×1.15 si la dirección de la última vela (`candle_direccion`) confirma la señal. Si contradice, la confianza queda intacta — ni amplifica ni atenúa. Eliminado el bloque de atenuación que introducía regresión (−1.6pp win-rate vs la versión sin atenuación en backtest).
+  - **Fase 5 — Genes nuevos en `evolution_engine.py` + migración 009:** los 4 genes nuevos registrados en `_BOUNDS_*` para que `_mutate_block` los evolucione: `rsi_zona_muerta` (1.0–15.0, en `_BOUNDS_TECNICOS_PERIODS`), `peso_sesgo_tendencia` (0.20–0.65, en `_BOUNDS_MACRO`), `htf_filter_enabled` (no mutado gaussianamente — en `_DEFAULT_SMC_PARAMS` como valor entero 0/1). El gen `rsi_modo` es string → solo cambia por crossover, no tiene entry en `_BOUNDS_*`. Migración `009_htf_rsi_sesgo_genes.sql` hace backfill idempotente de los 4 genes en los 10 agentes existentes usando el patrón `params_col || '{"key": val}'::jsonb WHERE NOT (params_col ? 'key')`. Aplicada en producción en Sesión 15.
+  - **Fase 6 — Backtest walk-forward de validación (`scripts/backtest_estrategia.py`):** nuevo script que reproduce el pipeline completo vela por vela (LLM neutralizado → ruta heurística determinista). Descarga OHLCV 15m de Yahoo Finance + serie HTF 1h para el filtro. Replica exactamente `check_sl_tp_intrabar`, `_apply_trailing_stop` y `close_operation`. Resultados sobre 1 mes (2.068 velas, genes semilla):
+    - **ANTES (sin las 4 fases):** PnL +$0.20, win-rate 45.5%, drawdown 13.23%, Calmar 0.151
+    - **DESPUÉS (con las 4 fases):** PnL +$1.32, win-rate 47.7%, drawdown 8.73%, Calmar 1.508
+    - Mejora: PnL ×6.6 (+561%), drawdown −4.5pp, Calmar +901%
+  - **9 archivos en el commit:** `data/alpha_vantage_client.py`, `data/indicators.py`, `agents/sub_agent_technical.py`, `agents/sub_agent_macro.py`, `agents/investor_agent.py`, `cron/trade_monitor.py`, `evolution/evolution_engine.py`, `db/migrations/009_htf_rsi_sesgo_genes.sql` (nuevo), `scripts/backtest_estrategia.py` (nuevo).
+  - **Estado post-Sesión 15:** migración 009 aplicada en producción (10 agentes activos, todos con los 4 genes nuevos). Push a `origin/master`. El sistema opera con las 4 mejoras activas. Monitoreo recomendado durante 2-3 días hábiles para confirmar la mejora en producción.
 
 - **2026-05-28 (Sesión 14 — hotfix producción: migración 008 faltante + timeout del monitor) · commit `9f910ed` · en producción:**
   - **Síntoma reportado:** desde las 9:30 pm del 27-may no se generaban operaciones nuevas; el dashboard quedó congelado toda la noche.
