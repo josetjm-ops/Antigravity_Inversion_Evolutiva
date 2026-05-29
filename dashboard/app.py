@@ -1009,7 +1009,8 @@ def _tab_instructions() -> None:
             <div class="ins-param-label">📊 Parámetros Técnicos</div>
             <div class="ins-param-items">
               Período RSI (5–50)<br>
-              Umbrales sobrecompra/venta<br>
+              RSI modo (momentum / reversion)<br>
+              Zona muerta RSI (1.0–15.0 pips)<br>
               EMA rápida y lenta<br>
               Períodos MACD<br>
               Pesos RSI / EMA / MACD
@@ -1021,7 +1022,8 @@ def _tab_instructions() -> None:
               Pesos por impacto de noticias<br>
               Umbrales de sentimiento<br>
               Ventana temporal (1–8 h)<br>
-              Peso macro vs técnico total
+              Peso macro vs técnico total<br>
+              Sesgo tendencia HTF (0.20–0.65)
             </div>
           </div>
           <div class="ins-param-box">
@@ -1044,7 +1046,8 @@ def _tab_instructions() -> None:
               ATR factor SL (0.8–3.0)<br>
               Trailing activation pips (5–40)<br>
               Trailing distance pips (5–25)<br>
-              Período ATR (7–21)
+              Período ATR (7–21)<br>
+              Filtro HTF habilitado (0 / 1)
             </div>
           </div>
         </div>
@@ -1092,10 +1095,15 @@ def _tab_instructions() -> None:
             <b>Sub-agente Técnico</b> — Detecta señales SMC: <b>Fair Value Gaps</b> (FVG)
             alcistas y bajistas en las últimas 50 velas, <b>Order Blocks</b> (OB) en las
             últimas 80 velas, y un <b>Range Proxy</b> (high–low en pips) como sustituto de
-            volumen. Complementa con RSI, EMA y MACD. Calcula una señal ponderada con
-            pesos genéticos individuales (FVG, OB, RSI, EMA, MACD). Un spike de rango
-            amplifica la confianza ×1.15 cuando hay expansión de volatilidad. Si la confianza
-            cae en zona ambigua (0.45–0.65), consulta a DeepSeek para confirmar.
+            volumen. Complementa con <b>RSI momentum</b> (cruce del nivel 50 — el RSI señala
+            la dirección del mercado en lugar de contradecirla), EMA y MACD. Calcula una
+            señal ponderada con pesos genéticos individuales (FVG, OB, RSI, EMA, MACD).<br>
+            Un <b>spike de rango</b> amplifica la confianza ×1.15 <em>solo si la última vela
+            confirma la dirección de la señal</em> (condicionado desde Sesión 15 — un spike
+            contrario no atenúa ni amplifica).<br>
+            El <b>filtro HTF</b> (<code>htf_filter_enabled</code>) veta la señal si contradice
+            la tendencia EMA50/EMA200 en velas de 1h: señal BUY cuando HTF = BEAR → HOLD.
+            Si la confianza cae en zona ambigua (0.45–0.65), consulta a DeepSeek para confirmar.
           </div>
         </div>
         <div class="ins-step">
@@ -1104,7 +1112,11 @@ def _tab_instructions() -> None:
             <b>Sub-agente Macro</b> — Analiza el calendario económico y titulares de noticias
             Forex en tiempo real vía <b>Finnhub API</b>. DeepSeek devuelve un score de
             sentimiento (−1.0 a +1.0). Los eventos de alto impacto (USD/EUR) tienen más peso
-            que los de bajo impacto, según los parámetros del agente.
+            que los de bajo impacto, según los parámetros del agente.<br>
+            Cuando no hay eventos de alto impacto y el LLM devolvería HOLD plano, aplica el
+            <b>sesgo de tendencia HTF</b>: usa la dirección EMA50/EMA200 en 1h para emitir
+            BUY/SELL con confianza = <code>min(0.55, peso_sesgo_tendencia)</code>. Evita que
+            el sub-agente B sea siempre neutral en días sin noticias.
           </div>
         </div>
         <div class="ins-step">
@@ -1276,6 +1288,10 @@ def _tab_instructions() -> None:
           <code>risk_pct_per_trade</code> (1–2%), <code>peso_fvg/peso_ob</code> (0.05–0.50),
           <code>atr_factor</code> (0.8–3.0), <code>trailing_activation_pips</code> (5–40),
           <code>trailing_distance_pips</code> (5–25), <code>atr_period</code> (7–21).<br>
+          &nbsp;• Genes nuevos (Sesión 15): <code>rsi_zona_muerta</code> (1.0–15.0, técnico),
+          <code>peso_sesgo_tendencia</code> (0.20–0.65, macro). El gen <code>htf_filter_enabled</code>
+          es entero 0/1 — decisión estratégica, no mutable gaussianamente.
+          El gen <code>rsi_modo</code> es string — solo cambia por crossover.<br>
           &nbsp;• El riesgo por operación se fuerza dentro del rango 1–2% del equity (hard limits no mutables).
         </div>
       </div>
@@ -1454,6 +1470,8 @@ def _tab_instructions() -> None:
       <b style="color:{TEXT};">Range Proxy</b> <code>(high−low) × 10 000</code> en pips
       como sustituto de VSA. El <b style="color:{TEXT};">ATR</b> (Wilder 14 períodos)
       se calcula sobre las mismas velas y sirve como base del SL dinámico.
+      El <b style="color:{TEXT};">filtro HTF</b> descarga adicionalmente velas de <b style="color:{TEXT};">1h / 3 meses</b>
+      y calcula EMA50/EMA200 para bloquear señales contra la tendencia principal (Sesión 15).
       El razonamiento de los agentes y del Juez usa <b style="color:{TEXT};">DeepSeek</b>
       (<code>deepseek-reasoner</code>). El fitness (Calmar Ratio Proxy) se calcula
       vía SQL sobre operaciones cerradas en <b style="color:{TEXT};">PostgreSQL — Supabase</b>.
