@@ -213,19 +213,19 @@ class SubAgentRisk(BaseAgent):
             conf = conf_tecnica * peso_tec + conf_macro * peso_mac
             return rec_tec, round(conf, 4)
 
-        # HOLD de un agente = abstención, no conflicto
+        # El técnico abre con su propia señal aunque el macro se abstenga.
         if rec_mac == "HOLD" and rec_tec in ("BUY", "SELL"):
             return rec_tec, round(conf_tecnica, 4)
+        # El macro nunca abre por sí solo: sin confirmación técnica no hay entrada.
         if rec_tec == "HOLD" and rec_mac in ("BUY", "SELL"):
-            return rec_mac, round(conf_macro, 4)
+            return "HOLD", round(conf_macro, 4)
 
-        # Conflicto real (BUY vs SELL): la señal más fuerte gana si supera 0.75
+        # Conflicto real (BUY vs SELL): el técnico decide la dirección; el macro puede vetar a HOLD.
         conf_tec_w = conf_tecnica * peso_tec
         conf_mac_w = conf_macro * peso_mac
         if conf_tec_w > conf_mac_w and conf_tecnica > 0.75:
             return rec_tec, round(conf_tec_w, 4)
-        if conf_mac_w > conf_tec_w and conf_macro > 0.75:
-            return rec_mac, round(conf_mac_w, 4)
+        # El macro no impone su dirección en conflicto — solo veta.
         return "HOLD", round(max(conf_tec_w, conf_mac_w), 4)
 
     # ── Análisis principal ────────────────────────────────────────────────────

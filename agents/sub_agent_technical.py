@@ -95,18 +95,21 @@ class SubAgentTechnical(BaseAgent):
         """
         score_buy  = sum(c * w for r, c, w in signals if r == "BUY")
         score_sell = sum(c * w for r, c, w in signals if r == "SELL")
-        total_weight = sum(w for _, _, w in signals)
+        # Normalizar solo sobre el peso de los indicadores direccionales (los que sí opinan).
+        # Dividir por el peso total diluye la señal con los indicadores neutros.
+        dir_weight = sum(w for r, _, w in signals if r in ("BUY", "SELL"))
 
-        if total_weight == 0:
+        if dir_weight == 0:
             return "HOLD", 0.30
-        score_buy  /= total_weight
-        score_sell /= total_weight
+        buy_norm  = score_buy  / dir_weight
+        sell_norm = score_sell / dir_weight
 
-        if score_buy > score_sell and score_buy > 0.45:
-            return "BUY",  round(score_buy, 4)
-        if score_sell > score_buy and score_sell > 0.45:
-            return "SELL", round(score_sell, 4)
-        return "HOLD", round(max(score_buy, score_sell, 0.30), 4)
+        # Exige dominancia clara: margen mínimo de 0.15 y convicción base de 0.40.
+        if buy_norm > sell_norm and (buy_norm - sell_norm) > 0.15 and buy_norm > 0.40:
+            return "BUY",  round(buy_norm, 4)
+        if sell_norm > buy_norm and (sell_norm - buy_norm) > 0.15 and sell_norm > 0.40:
+            return "SELL", round(sell_norm, 4)
+        return "HOLD", round(max(buy_norm, sell_norm, 0.30), 4)
 
     # ── Análisis principal ────────────────────────────────────────────────────
 
