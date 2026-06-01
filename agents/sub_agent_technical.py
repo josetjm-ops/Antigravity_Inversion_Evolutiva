@@ -128,6 +128,27 @@ class SubAgentTechnical(BaseAgent):
         rec = "BUY" if ob_direccion == "BULL" else "SELL"
         return rec, 0.65
 
+    def _score_breakout(
+        self, breakout_activo: bool, breakout_direccion: str, breakout_pips: float,
+        range_spike: bool,
+    ) -> tuple[str, float]:
+        """
+        Ruptura de estructura (S3): cierre por encima/debajo del rango de N velas.
+
+        La confianza base es 0.65; se amplifica hasta 0.90 si además hay range_spike
+        (expansión de volatilidad que confirma que la ruptura tiene fuerza real).
+        Sin breakout activo devuelve HOLD (el agente S3 espera el momento preciso).
+        """
+        if not breakout_activo or breakout_direccion == "NONE":
+            return "HOLD", 0.30
+        min_pips = float(self.params_smc.get("breakout_min_pips", 5.0))
+        strength = min(1.0, breakout_pips / (min_pips * 3))
+        conf     = round(min(0.85, 0.65 + strength * 0.20), 4)
+        if range_spike:
+            conf = min(0.90, round(conf * 1.10, 4))
+        rec = "BUY" if breakout_direccion == "BULL" else "SELL"
+        return rec, conf
+
     # ── Sistema ponderado ─────────────────────────────────────────────────────
 
     def _weighted_signal(self, signals: list[tuple[str, float, float]]) -> tuple[str, float]:
@@ -155,48 +176,82 @@ class SubAgentTechnical(BaseAgent):
 
     # ── Análisis principal ────────────────────────────────────────────────────
 
-    def analyze(self, signals: TechnicalSignals | None = None) -> dict[str, Any]:
+    def analyze(
+        self,
+        signals: TechnicalSignals | None = None,
+        especie: str = "tendencia",
+    ) -> dict[str, Any]:
+        """
+        Calcula la señal técnica enrutando por especie:
+
+          tendencia  — momentum RSI50 + EMA + MACD + HTF strict (comportamiento original)
+          reversion  — RSI en extremos (mode=reversion) + OB/FVG como entrada estructural
+                       + HTF desactivado (opera contra-tendencia en rango)
+          ruptura    — breakout de estructura como señal primaria, confirmado por
+                       range_spike; RSI/EMA como contexto secundario
+
+        La especie se pasa desde InvestorAgent, que la carga de la DB.
+        """
         if signals is None:
             signals = fetch_signals(self.params, self.params_smc)
 
-        # Scores clásicos
+        # ── Scores comunes a las tres especies ──────────────────────────────
         rsi_rec,  rsi_conf  = self._score_rsi(signals.rsi, getattr(signals, "rsi_prev", 50.0))
         ema_rec,  ema_conf  = self._score_ema(signals.ema_rapida, signals.ema_lenta)
         macd_rec, macd_conf = self._score_macd(signals.macd_hist)
-
-        # Scores SMC
-        fvg_rec, fvg_conf = self._score_fvg(
+        fvg_rec,  fvg_conf  = self._score_fvg(
             signals.fvg_activo, signals.fvg_direccion, signals.fvg_pips
         )
-        ob_rec, ob_conf = self._score_ob(signals.ob_activo, signals.ob_direccion)
+        ob_rec,  ob_conf    = self._score_ob(signals.ob_activo, signals.ob_direccion)
+        bo_rec,  bo_conf    = self._score_breakout(
+            signals.breakout_activo, signals.breakout_direccion,
+            signals.breakout_pips,   signals.range_spike,
+        )
 
-        # Pesos (clásicos desde params_tecnicos, SMC desde params_smc)
+        # ── Ensamble ponderado por especie ───────────────────────────────────
         w_rsi  = float(self.params.get("peso_rsi",  0.25))
         w_ema  = float(self.params.get("peso_ema",  0.25))
         w_macd = float(self.params.get("peso_macd", 0.20))
         w_fvg  = float(self.params_smc.get("peso_fvg", 0.15))
         w_ob   = float(self.params_smc.get("peso_ob",  0.15))
+        w_bo   = float(self.params_smc.get("peso_breakout", 0.40))  # peso alto para S3
 
-        rec, conf = self._weighted_signal([
-            (rsi_rec,  rsi_conf,  w_rsi),
-            (ema_rec,  ema_conf,  w_ema),
-            (macd_rec, macd_conf, w_macd),
-            (fvg_rec,  fvg_conf,  w_fvg),
-            (ob_rec,   ob_conf,   w_ob),
-        ])
+        if especie == "ruptura":
+            # S3: breakout domina; RSI y EMA solo como contexto
+            rec, conf = self._weighted_signal([
+                (bo_rec,   bo_conf,   w_bo),
+                (rsi_rec,  rsi_conf,  w_rsi * 0.5),
+                (ema_rec,  ema_conf,  w_ema * 0.5),
+                (fvg_rec,  fvg_conf,  w_fvg),
+                (ob_rec,   ob_conf,   w_ob),
+            ])
+        elif especie == "reversion":
+            # S2: RSI reversion + OB/FVG estructural; EMA/MACD con peso reducido
+            rec, conf = self._weighted_signal([
+                (rsi_rec,  rsi_conf,  w_rsi * 1.5),
+                (ob_rec,   ob_conf,   w_ob  * 1.5),
+                (fvg_rec,  fvg_conf,  w_fvg * 1.5),
+                (ema_rec,  ema_conf,  w_ema * 0.4),
+                (macd_rec, macd_conf, w_macd * 0.4),
+            ])
+        else:
+            # S1 tendencia (default): ensamble original
+            rec, conf = self._weighted_signal([
+                (rsi_rec,  rsi_conf,  w_rsi),
+                (ema_rec,  ema_conf,  w_ema),
+                (macd_rec, macd_conf, w_macd),
+                (fvg_rec,  fvg_conf,  w_fvg),
+                (ob_rec,   ob_conf,   w_ob),
+            ])
 
-        # Range spike: amplifica solo si la vela del spike confirma la señal.
-        # Si el spike va en dirección opuesta (ej. vela bajista durante señal BUY),
-        # no amplifica ni atenúa — la confianza queda intacta para que el umbral
-        # mínimo (0.50) decida normalmente sin distorsión en ningún sentido.
+        # ── Range spike: amplifica si confirma la señal (todas las especies) ─
         if signals.range_spike and rec in ("BUY", "SELL"):
             candle_dir = getattr(signals, "candle_direccion", "NEUTRAL")
             signal_dir = "BULL" if rec == "BUY" else "BEAR"
             if candle_dir == signal_dir:
-                conf = min(0.95, round(conf * 1.15, 4))   # confirma → amplificar
+                conf = min(0.95, round(conf * 1.15, 4))
 
-        # Filtro HTF: vetar señales que van contra la tendencia del timeframe 1h.
-        # Solo actúa cuando htf_filter_enabled=True (default) y la señal es direccional.
+        # ── Filtro HTF: solo S1 y S3 (S2 opera contra-tendencia) ─────────────
         htf_vetada = False
         htf_filter = bool(self.params_smc.get("htf_filter_enabled", True))
         if htf_filter and rec in ("BUY", "SELL"):
@@ -205,11 +260,14 @@ class SubAgentTechnical(BaseAgent):
                 rec, conf, htf_vetada = "HOLD", round(conf, 4), True
 
         log.debug(
-            "[SubAgentTechnical] RSI:%s(%.2f) EMA:%s(%.2f) MACD:%s(%.2f) "
-            "FVG:%s(%.2f) OB:%s(%.2f) range=%.1fpips spike=%s HTF=%s%s → %s(%.2f)",
+            "[SubAgentTechnical:%s] RSI:%s(%.2f) EMA:%s(%.2f) MACD:%s(%.2f) "
+            "FVG:%s(%.2f) OB:%s(%.2f) BO:%s(%.2f) spike=%s ADX=%.1f régimen=%s HTF=%s%s → %s(%.2f)",
+            especie,
             rsi_rec, rsi_conf, ema_rec, ema_conf, macd_rec, macd_conf,
-            fvg_rec, fvg_conf, ob_rec, ob_conf,
-            signals.range_proxy, signals.range_spike,
+            fvg_rec, fvg_conf, ob_rec, ob_conf, bo_rec, bo_conf,
+            signals.range_spike,
+            getattr(signals, "adx", 0.0),
+            getattr(signals, "regime_estado", "N/A"),
             getattr(signals, "htf_direccion", "N/A"),
             "(VETO)" if htf_vetada else "",
             rec, conf,
@@ -219,11 +277,13 @@ class SubAgentTechnical(BaseAgent):
         llm_razon = None
         if 0.45 <= conf <= 0.65:
             prompt = (
+                f"Especie={especie}. "
                 f"RSI={signals.rsi:.2f} ({rsi_rec} conf={rsi_conf:.2f}), "
                 f"EMA ({ema_rec}), MACD_hist={signals.macd_hist:.5f} ({macd_rec}). "
-                f"FVG={signals.fvg_activo} {signals.fvg_direccion} {signals.fvg_pips:.1f}pips ({fvg_rec} conf={fvg_conf:.2f}), "
-                f"OB={signals.ob_activo} {signals.ob_direccion} ({ob_rec} conf={ob_conf:.2f}). "
-                f"Range={signals.range_proxy:.1f}pips ma20={signals.range_ma20:.1f} spike={signals.range_spike}. "
+                f"FVG={signals.fvg_activo} {signals.fvg_direccion} {signals.fvg_pips:.1f}pips, "
+                f"OB={signals.ob_activo} {signals.ob_direccion}. "
+                f"Breakout={signals.breakout_activo} {signals.breakout_direccion} {signals.breakout_pips:.1f}pips. "
+                f"ADX={signals.adx:.1f} régimen={signals.regime_estado}. "
                 f"Señal ponderada: {rec} (confianza={conf:.2f}). "
                 f"¿Confirmas o ajustas? Responde solo JSON."
             )
@@ -238,45 +298,53 @@ class SubAgentTechnical(BaseAgent):
 
         return {
             "agente_id":     self.agent_id,
+            "especie":       especie,
             "recomendacion": rec,
             "confianza":     conf,
             "indicadores": {
                 # Clásicos
-                "rsi":             round(signals.rsi, 4),
-                "rsi_prev":        round(getattr(signals, "rsi_prev", 50.0), 4),
-                "ema_rapida":      round(signals.ema_rapida, 5),
-                "ema_lenta":       round(signals.ema_lenta, 5),
+                "rsi":               round(signals.rsi, 4),
+                "rsi_prev":          round(getattr(signals, "rsi_prev", 50.0), 4),
+                "ema_rapida":        round(signals.ema_rapida, 5),
+                "ema_lenta":         round(signals.ema_lenta, 5),
                 "ema_cross_alcista": signals.ema_cross_alcista,
-                "macd":            round(signals.macd, 5),
-                "macd_signal":     round(signals.macd_signal, 5),
-                "macd_hist":       round(signals.macd_hist, 5),
-                "precio_actual":   round(signals.precio_actual, 5),
+                "macd":              round(signals.macd, 5),
+                "macd_signal":       round(signals.macd_signal, 5),
+                "macd_hist":         round(signals.macd_hist, 5),
+                "precio_actual":     round(signals.precio_actual, 5),
                 # SMC
-                "fvg_activo":      signals.fvg_activo,
-                "fvg_direccion":   signals.fvg_direccion,
-                "fvg_pips":        signals.fvg_pips,
-                "fvg_nivel_sup":   signals.fvg_nivel_sup,
-                "fvg_nivel_inf":   signals.fvg_nivel_inf,
-                "ob_activo":       signals.ob_activo,
-                "ob_direccion":    signals.ob_direccion,
-                "ob_nivel_sup":    signals.ob_nivel_sup,
-                "ob_nivel_inf":    signals.ob_nivel_inf,
-                "range_proxy":      signals.range_proxy,
-                "range_ma20":       signals.range_ma20,
-                "range_spike":      signals.range_spike,
-                "candle_direccion": getattr(signals, "candle_direccion", "NEUTRAL"),
-                "atr":             round(signals.atr, 6),
-                "atr_pips":        round(signals.atr * 10_000, 2),
+                "fvg_activo":        signals.fvg_activo,
+                "fvg_direccion":     signals.fvg_direccion,
+                "fvg_pips":          signals.fvg_pips,
+                "fvg_nivel_sup":     signals.fvg_nivel_sup,
+                "fvg_nivel_inf":     signals.fvg_nivel_inf,
+                "ob_activo":         signals.ob_activo,
+                "ob_direccion":      signals.ob_direccion,
+                "ob_nivel_sup":      signals.ob_nivel_sup,
+                "ob_nivel_inf":      signals.ob_nivel_inf,
+                "range_proxy":       signals.range_proxy,
+                "range_ma20":        signals.range_ma20,
+                "range_spike":       signals.range_spike,
+                "candle_direccion":  getattr(signals, "candle_direccion", "NEUTRAL"),
+                "atr":               round(signals.atr, 6),
+                "atr_pips":          round(signals.atr * 10_000, 2),
+                # Régimen + Ruptura
+                "adx":               round(getattr(signals, "adx", 0.0), 2),
+                "regime_estado":     getattr(signals, "regime_estado", "NEUTRAL"),
+                "breakout_activo":   signals.breakout_activo,
+                "breakout_direccion": signals.breakout_direccion,
+                "breakout_pips":     signals.breakout_pips,
             },
             "scores_individuales": {
-                "rsi":         {"señal": rsi_rec,  "confianza": round(rsi_conf, 4)},
-                "ema":         {"señal": ema_rec,  "confianza": round(ema_conf, 4)},
-                "macd":        {"señal": macd_rec, "confianza": round(macd_conf, 4)},
-                "fvg":         {"señal": fvg_rec,  "confianza": round(fvg_conf, 4)},
-                "ob":          {"señal": ob_rec,   "confianza": round(ob_conf, 4)},
+                "rsi":      {"señal": rsi_rec,  "confianza": round(rsi_conf, 4)},
+                "ema":      {"señal": ema_rec,  "confianza": round(ema_conf, 4)},
+                "macd":     {"señal": macd_rec, "confianza": round(macd_conf, 4)},
+                "fvg":      {"señal": fvg_rec,  "confianza": round(fvg_conf, 4)},
+                "ob":       {"señal": ob_rec,   "confianza": round(ob_conf, 4)},
+                "breakout": {"señal": bo_rec,   "confianza": round(bo_conf, 4)},
                 "range_spike": signals.range_spike,
-                "htf":         {"direccion": getattr(signals, "htf_direccion", "NEUTRAL"),
-                                 "veto": htf_vetada},
+                "htf": {"direccion": getattr(signals, "htf_direccion", "NEUTRAL"),
+                        "veto": htf_vetada},
             },
             "llm_ajuste": llm_razon,
         }

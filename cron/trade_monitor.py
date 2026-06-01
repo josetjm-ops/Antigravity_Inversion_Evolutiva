@@ -553,6 +553,7 @@ def _evaluate_new_positions() -> dict:
             """
             SELECT a.id,
                    a.generacion,
+                   a.especie,
                    a.params_tecnicos,
                    a.params_macro,
                    a.params_riesgo,
@@ -584,12 +585,15 @@ def _evaluate_new_positions() -> dict:
 
     # 1 request HTTP para todos; cada agente calcula sus propios indicadores en memoria
     try:
+        from data.indicators import calc_regime
         df_ohlcv = fetch_ohlcv()
         htf_trend = fetch_htf_trend()      # sesgo 1h compartido entre todos los agentes
         macro_snapshot = fetch_macro_snapshot(ventana_horas=4)
+        regime = calc_regime(df_ohlcv)     # régimen compartido: TENDENCIA / RANGO / NEUTRAL
         log.info(
-            "[TradeMonitor] OHLCV listo (%d velas) · último cierre=%.5f · HTF=%s",
-            len(df_ohlcv), float(df_ohlcv["close"].iloc[-1]), htf_trend["direccion"],
+            "[TradeMonitor] OHLCV listo (%d velas) · último cierre=%.5f · HTF=%s · ADX=%.1f → %s",
+            len(df_ohlcv), float(df_ohlcv["close"].iloc[-1]),
+            htf_trend["direccion"], regime["adx"], regime["estado"],
         )
     except Exception as exc:
         log.error("[TradeMonitor] Error descargando datos de mercado: %s", exc)
@@ -600,6 +604,28 @@ def _evaluate_new_positions() -> dict:
     for agent_data in candidates:
         agent_id = agent_data["id"]
         try:
+            especie = str(agent_data.get("especie") or "tendencia")
+
+            # ── Gate de régimen (Fase 2) ──────────────────────────────────────
+            # S1 tendencia : sólo opera en mercados con tendencia (ADX alto)
+            # S2 reversion : sólo opera en mercados en rango (ADX bajo)
+            # S3 ruptura   : opera en ambos regímenes (busca la explosión)
+            # NEUTRAL : cualquier especie puede operar (régimen indefinido)
+            regime_estado = regime["estado"]
+            bloqueado_por_regimen = False
+            if regime_estado != "NEUTRAL":
+                if especie == "tendencia" and regime_estado == "RANGO":
+                    bloqueado_por_regimen = True
+                elif especie == "reversion" and regime_estado == "TENDENCIA":
+                    bloqueado_por_regimen = True
+            if bloqueado_por_regimen:
+                log.info(
+                    "[TradeMonitor] %s (%s) — bloqueado por régimen %s (ADX=%.1f). HOLD.",
+                    agent_id, especie, regime_estado, regime["adx"],
+                )
+                evaluated += 1
+                continue
+
             # Ventana de cuarentena macro — gen propio del agente
             smc_params      = agent_data.get("params_smc") or {}
             quarantine_min  = int(smc_params.get("macro_quarantine_minutes", 60))
@@ -627,6 +653,7 @@ def _evaluate_new_positions() -> dict:
                 "params_smc":      smc_params or None,
                 "capital_actual":  agent_data["capital_actual"],
                 "generacion":      str(agent_data.get("generacion", "")),
+                "especie":         especie,
             }
             agent  = InvestorAgent(agent_id, params)
             result = agent.run_cycle(

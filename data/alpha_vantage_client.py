@@ -46,6 +46,15 @@ class TechnicalSignals:
     htf_ema_rapida:  float = field(default=0.0)        # EMA50(1h) al momento del análisis
     htf_ema_lenta:   float = field(default=0.0)        # EMA200(1h) al momento del análisis
 
+    # ── Clasificador de régimen (Fase 2) ──────────────────────────────────────
+    adx:             float = field(default=0.0)        # ADX(14) fuerza de tendencia 0-100
+    regime_estado:   str   = field(default="NEUTRAL")  # "TENDENCIA" | "RANGO" | "NEUTRAL"
+
+    # ── Detección de ruptura S3 (Fase 2) ─────────────────────────────────────
+    breakout_activo:    bool  = field(default=False)   # ruptura de estructura detectada
+    breakout_direccion: str   = field(default="NONE")  # "BULL" | "BEAR" | "NONE"
+    breakout_pips:      float = field(default=0.0)     # distancia de la ruptura en pips
+
 
 def _get(params: dict) -> dict:
     params["apikey"] = _API_KEY

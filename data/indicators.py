@@ -286,6 +286,106 @@ def calc_atr(df: pd.DataFrame, period: int = 14) -> float:
     return round(atr_val, 6)
 
 
+def calc_adx(df: pd.DataFrame, period: int = 14) -> float:
+    """
+    Average Directional Index (Wilder) sobre velas OHLCV de 15 min.
+
+    ADX mide la FUERZA de la tendencia (no su dirección):
+      ADX >= 25 → mercado en tendencia
+      ADX <  25 → mercado en rango / sin dirección clara
+
+    Retorna un escalar 0-100. Con pocos datos retorna 0 (seguro = NEUTRAL).
+    """
+    if len(df) < period + 2:
+        return 0.0
+
+    high  = df["high"]
+    low   = df["low"]
+    close = df["close"]
+
+    prev_high  = high.shift(1)
+    prev_low   = low.shift(1)
+    prev_close = close.shift(1)
+
+    plus_dm  = (high - prev_high).clip(lower=0)
+    minus_dm = (prev_low - low).clip(lower=0)
+    both     = (high - prev_high) < (prev_low - low)
+    plus_dm[both]  = 0.0
+    neither  = (high - prev_high) <= 0
+    plus_dm[neither] = 0.0
+    only_minus = (prev_low - low) <= 0
+    minus_dm[only_minus] = 0.0
+
+    tr = pd.concat([
+        high - low,
+        (high - prev_close).abs(),
+        (low  - prev_close).abs(),
+    ], axis=1).max(axis=1)
+
+    atr14      = tr.ewm(com=period - 1, adjust=False).mean()
+    plus_di    = 100.0 * plus_dm.ewm(com=period - 1, adjust=False).mean() / atr14.clip(lower=1e-10)
+    minus_di   = 100.0 * minus_dm.ewm(com=period - 1, adjust=False).mean() / atr14.clip(lower=1e-10)
+    di_sum     = (plus_di + minus_di).clip(lower=1e-10)
+    dx         = 100.0 * (plus_di - minus_di).abs() / di_sum
+    adx_series = dx.ewm(com=period - 1, adjust=False).mean()
+
+    return round(float(adx_series.iloc[-1]), 2)
+
+
+def calc_regime(df: pd.DataFrame, adx_period: int = 14, adx_threshold: float = 25.0) -> dict:
+    """
+    Clasifica el régimen actual del mercado en función del ADX.
+
+    Retorna:
+      {"estado": "TENDENCIA"|"RANGO"|"NEUTRAL", "adx": float}
+
+    TENDENCIA : ADX >= adx_threshold (el precio sigue una dirección fuerte)
+    RANGO     : ADX <  adx_threshold (el precio oscila sin dirección)
+    NEUTRAL   : no hay suficientes datos para calcularlo (ADX = 0)
+    """
+    adx = calc_adx(df, period=adx_period)
+    if adx == 0.0:
+        estado = "NEUTRAL"
+    elif adx >= adx_threshold:
+        estado = "TENDENCIA"
+    else:
+        estado = "RANGO"
+    return {"estado": estado, "adx": adx}
+
+
+def detect_breakout(df: pd.DataFrame, lookback: int = 20, min_pips: float = 5.0) -> dict:
+    """
+    Detecta si el precio actual está rompiendo la estructura de rango reciente.
+
+    Ruptura alcista: cierre actual > máximo de las últimas `lookback` velas
+                     (excluida la vela actual) por al menos min_pips.
+    Ruptura bajista: cierre actual < mínimo de las últimas `lookback` velas
+                     (excluida la vela actual) por al menos min_pips.
+
+    Se usa el cierre (no el máximo/mínimo intra-vela) para confirmar que el
+    precio CERRÓ fuera del rango: evita falsos positivos por mechas.
+    """
+    empty = {"activo": False, "direccion": "NONE", "pips": 0.0}
+
+    if len(df) < lookback + 2:
+        return empty
+
+    prev_slice  = df["close"].iloc[-(lookback + 1):-1]
+    precio_act  = float(df["close"].iloc[-1])
+
+    struct_high = float(prev_slice.max())
+    struct_low  = float(prev_slice.min())
+
+    bull_pips = (precio_act - struct_high) * 10_000
+    bear_pips = (struct_low  - precio_act) * 10_000
+
+    if bull_pips >= min_pips:
+        return {"activo": True, "direccion": "BULL", "pips": round(bull_pips, 2)}
+    if bear_pips >= min_pips:
+        return {"activo": True, "direccion": "BEAR", "pips": round(bear_pips, 2)}
+    return empty
+
+
 def calc_range_proxy(df: pd.DataFrame, multiplier: float = 1.5) -> tuple[float, float, bool]:
     """
     Calcula el Range Proxy (high - low en pips) como sustituto del volumen.
@@ -338,10 +438,14 @@ def calc_signals(
     macd_sg = int(params.get("macd_senal",    9))
 
     # ── Parámetros genéticos SMC ──────────────────────────────────────────────
-    fvg_min_pips       = float(params_smc.get("fvg_min_pips",            5.0))
-    ob_impulse_pips    = float(params_smc.get("ob_impulse_pips",         10.0))
-    range_multiplier   = float(params_smc.get("range_spike_multiplier",   1.5))
-    atr_period         = int(params_smc.get("atr_period",                14))
+    fvg_min_pips         = float(params_smc.get("fvg_min_pips",              5.0))
+    ob_impulse_pips      = float(params_smc.get("ob_impulse_pips",           10.0))
+    range_multiplier     = float(params_smc.get("range_spike_multiplier",     1.5))
+    atr_period           = int(params_smc.get("atr_period",                  14))
+    breakout_lookback    = int(params_smc.get("breakout_lookback_bars",       20))
+    breakout_min_pips    = float(params_smc.get("breakout_min_pips",          5.0))
+    adx_period           = int(params_smc.get("adx_period",                  14))
+    adx_threshold        = float(params_smc.get("adx_threshold",             25.0))
 
     # ── RSI ───────────────────────────────────────────────────────────────────
     # Calculamos la serie completa para obtener también rsi_prev (vela anterior),
@@ -366,11 +470,13 @@ def calc_signals(
 
     precio = round(float(close.iloc[-1]), 5)
 
-    # ── SMC ───────────────────────────────────────────────────────────────────
+    # ── SMC + Régimen + Ruptura ───────────────────────────────────────────────
     fvg  = detect_fvg(df, min_pips=fvg_min_pips)
     ob   = detect_order_blocks(df, impulse_pips=ob_impulse_pips)
     rng_actual, rng_ma20, rng_spike = calc_range_proxy(df, multiplier=range_multiplier)
-    atr_val = calc_atr(df, period=atr_period)
+    atr_val  = calc_atr(df, period=atr_period)
+    regime   = calc_regime(df, adx_period=adx_period, adx_threshold=adx_threshold)
+    breakout = detect_breakout(df, lookback=breakout_lookback, min_pips=breakout_min_pips)
 
     # Dirección de la última vela (para condicionar la amplificación de range spike)
     _last_open  = float(df["open"].iloc[-1])
@@ -428,6 +534,13 @@ def calc_signals(
         htf_direccion=str(_htf.get("direccion", "NEUTRAL")),
         htf_ema_rapida=float(_htf.get("ema_rapida", 0.0)),
         htf_ema_lenta=float(_htf.get("ema_lenta", 0.0)),
+        # Régimen (Fase 2)
+        adx=regime["adx"],
+        regime_estado=regime["estado"],
+        # Ruptura S3 (Fase 2)
+        breakout_activo=breakout["activo"],
+        breakout_direccion=breakout["direccion"],
+        breakout_pips=breakout["pips"],
     )
 
 

@@ -102,12 +102,19 @@ _DEFAULT_SMC_PARAMS: dict = {
     "peso_fvg":                 0.15,
     "peso_ob":                  0.15,
     # ATR-based SL + Trailing Stop (Session 6)
-    "atr_factor":               1.5,    # SL = ATR × 1.5 ≈ 12-22 pips
-    "trailing_activation_pips": 15.0,   # activar trailing tras 15 pips de profit
-    "trailing_distance_pips":   10.0,   # mantener trailing a 10 pips del extremo
+    "atr_factor":               1.5,
+    "trailing_activation_pips": 15.0,
+    "trailing_distance_pips":   10.0,
     "atr_period":               14,
     # HTF trend filter (Session 15 — Fase 1)
     "htf_filter_enabled":       1,      # 1=activo, 0=desactivado; no se muta gaussianamente
+    # Ruptura S3 (Fase 2)
+    "breakout_lookback_bars":   20,     # velas 15m para detectar ruptura de estructura
+    "breakout_min_pips":        5.0,    # distancia mínima de ruptura confirmada
+    "peso_breakout":            0.40,   # peso del score de ruptura en el ensamble S3
+    # Régimen (Fase 2) — no se mutan gaussianamente; son umbrales estratégicos
+    "adx_period":               14,
+    "adx_threshold":            25.0,
 }
 
 _BOUNDS_SMC = {
@@ -124,7 +131,15 @@ _BOUNDS_SMC = {
     "trailing_activation_pips": (5.0,  40.0,  False),
     "trailing_distance_pips":   (5.0,  25.0,  False),
     "atr_period":               (7,    21,    True),
+    # Ruptura S3 (Fase 2) — mutables
+    "breakout_lookback_bars":   (10,   50,    True),
+    "breakout_min_pips":        (3.0,  15.0,  False),
+    "peso_breakout":            (0.20,  0.70, False),
 }
+
+# Mínimo de agentes por especie para garantizar diversidad real.
+# El motor evolutivo no elimina un agente si hacerlo bajaría su especie de este umbral.
+_MIN_AGENTS_PER_ESPECIE = int(os.getenv("MIN_AGENTS_PER_ESPECIE", "2"))
 
 
 # ── Fitness: Calmar Ratio Proxy ──────────────────────────────────────────────
@@ -356,6 +371,7 @@ def breed_agent(
     sigma_weights: float | None = None,
     sigma_periods: float | None = None,
     sigma_risk: float | None = None,
+    especie: str = "tendencia",
 ) -> dict:
     """
     Genera un nuevo agente a partir de dos padres.
@@ -397,10 +413,19 @@ def breed_agent(
     tec_child  = _enforce_ema_constraint(tec_child)
     risk_child = _enforce_sl_tp_constraint(risk_child)
 
+    # S2 (reversion): forzar rsi_modo=reversion y htf_filter_enabled=0 tras crossover.
+    # S1/S3: asegurar htf_filter_enabled=1 (no lo heredan apagado de un padre S2).
+    if especie == "reversion":
+        tec_child["rsi_modo"]         = "reversion"
+        smc_child["htf_filter_enabled"] = 0
+    else:
+        smc_child["htf_filter_enabled"] = 1
+
     return {
         "id":               child_id,
         "fecha_nacimiento": birth_date,
         "generacion":       generation,
+        "especie":          especie,
         "padre_1_id":       parent1["id"],
         "padre_2_id":       parent2["id"],
         "params_tecnicos":  tec_child,
@@ -510,6 +535,7 @@ class EvolutionEngine:
                 SELECT a.id, a.generacion, a.fecha_nacimiento, a.capital_actual,
                        a.roi_total, a.operaciones_total, a.operaciones_ganadoras,
                        a.params_tecnicos, a.params_macro, a.params_riesgo, a.params_smc,
+                       COALESCE(a.especie, 'tendencia') AS especie,
                        COALESCE(f.fitness_score, 0) AS fitness_score
                 FROM agentes a
                 LEFT JOIN fitness f ON a.id = f.id
@@ -604,8 +630,25 @@ class EvolutionEngine:
             if float(a.get("fitness_score", 0) or 0) <= 0
         ]
 
-        n = min(N_ELIMINATE, len(eliminable))
-        eliminated = eliminable[:n]
+        # Protección de diversidad de especies (Fase 2): no eliminar un agente
+        # si hacerlo bajaría su especie por debajo de _MIN_AGENTS_PER_ESPECIE.
+        # Contamos cuántos activos hay por especie ANTES de eliminar nadie.
+        especie_counts: dict[str, int] = {}
+        for a in agents:
+            esp = str(a.get("especie") or "tendencia")
+            especie_counts[esp] = especie_counts.get(esp, 0) + 1
+
+        protected_eliminable: list[dict] = []
+        temp_counts = dict(especie_counts)
+        for a in eliminable:
+            esp = str(a.get("especie") or "tendencia")
+            if temp_counts.get(esp, 0) > _MIN_AGENTS_PER_ESPECIE:
+                protected_eliminable.append(a)
+                temp_counts[esp] = temp_counts[esp] - 1
+            # Si la especie ya está en el mínimo, este agente queda protegido.
+
+        n = min(N_ELIMINATE, len(protected_eliminable))
+        eliminated = protected_eliminable[:n]
 
         elim_ids = {a["id"] for a in eliminated}
         survivors = [a for a in agents if a["id"] not in elim_ids]
@@ -654,12 +697,12 @@ class EvolutionEngine:
                 id, fecha_nacimiento, generacion,
                 padre_1_id, padre_2_id,
                 params_tecnicos, params_macro, params_riesgo, params_smc,
-                capital_inicial, capital_actual, estado
+                capital_inicial, capital_actual, especie, estado
             ) VALUES (
                 %(id)s, %(fecha_nacimiento)s, %(generacion)s,
                 %(padre_1_id)s, %(padre_2_id)s,
                 %(params_tecnicos)s, %(params_macro)s, %(params_riesgo)s, %(params_smc)s,
-                %(capital_inicial)s, %(capital_actual)s, 'activo'
+                %(capital_inicial)s, %(capital_actual)s, %(especie)s, 'activo'
             )
             """,
             {
@@ -947,21 +990,32 @@ class EvolutionEngine:
             # reproducir agentes que aún no han probado su rendimiento.
             parent_candidates = parent_pool
 
-            for i in range(len(eliminated)):
+            for i, elim in enumerate(eliminated):
+                # El hijo hereda la especie del eliminado: sustituye como-por-como.
+                # Así la distribución de especies se mantiene ciclo a ciclo.
+                child_especie = str(elim.get("especie") or "tendencia")
+
+                # Prefiere padres de la misma especie para cruzar genes coherentes.
+                # Si no hay suficientes de la especie, usa todo el pool.
+                same_species = [a for a in parent_candidates
+                                if str(a.get("especie") or "tendencia") == child_especie]
+                pool = same_species if len(same_species) >= 2 else parent_candidates
+
                 # Selección por ROI (fitness-proportionate selection)
-                rois = [max(float(a["roi_total"]), 0.0001) for a in parent_candidates]
+                rois = [max(float(a["roi_total"]), 0.0001) for a in pool]
                 total_roi = sum(rois)
                 weights = [r / total_roi for r in rois]
-                p1, p2 = random.choices(parent_candidates, weights=weights, k=2)
+                p1, p2 = random.choices(pool, weights=weights, k=2)
                 # Garantiza padres distintos si hay suficientes
-                if p1["id"] == p2["id"] and len(parent_candidates) > 1:
-                    others = [a for a in parent_candidates if a["id"] != p1["id"]]
+                if p1["id"] == p2["id"] and len(pool) > 1:
+                    others = [a for a in pool if a["id"] != p1["id"]]
                     p2 = random.choice(others)
 
                 child_id = f"{self.today.strftime('%Y-%m-%d')}_{next_idx + i:02d}"
                 child = breed_agent(
                     p1, p2, child_id, self.today, max_gen + 1,
                     sigma_weights=sw, sigma_periods=sp, sigma_risk=sr,
+                    especie=child_especie,
                 )
                 new_agents.append(child)
 

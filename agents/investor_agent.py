@@ -48,6 +48,7 @@ class InvestorAgent:
         self.agent_id   = agent_id
         self.params     = params
         self.generacion = str(params.get("generacion", ""))
+        self.especie    = str(params.get("especie", "tendencia"))
         self.sub_technical = SubAgentTechnical(
             agent_id,
             params.get("params_tecnicos", {}),
@@ -67,7 +68,8 @@ class InvestorAgent:
             cur = get_dict_cursor(conn)
             cur.execute(
                 """
-                SELECT params_tecnicos, params_macro, params_riesgo, capital_actual, generacion
+                SELECT params_tecnicos, params_macro, params_riesgo, capital_actual,
+                       generacion, especie
                 FROM agentes
                 WHERE id = %s AND estado = 'activo'
                 """,
@@ -82,6 +84,7 @@ class InvestorAgent:
             "params_riesgo":   row["params_riesgo"],
             "capital_actual":  float(row["capital_actual"]),
             "generacion":      str(row["generacion"]),
+            "especie":         str(row["especie"] or "tendencia"),
         })
 
     # ── Verificación de posición abierta ─────────────────────────────────────
@@ -128,7 +131,7 @@ class InvestorAgent:
 
         capital = float(self.params.get("capital_actual", 10.0))
 
-        senal_tecnico = self.sub_technical.analyze(tech_signals)
+        senal_tecnico = self.sub_technical.analyze(tech_signals, especie=self.especie)
         senal_macro   = self.sub_macro.analyze(macro_snapshot, htf_trend=htf_trend)
         decision: RiskDecision = self.sub_risk.analyze(senal_tecnico, senal_macro, capital)
 
