@@ -996,13 +996,62 @@ def _tab_instructions() -> None:
 
     <!-- ══ 1. LOS AGENTES ══ -->
     <div class="ins-section">
-      <div class="ins-title">1 · Los Agentes Inversionistas</div>
+      <div class="ins-title">1 · Los Agentes Inversionistas — 3 Especies</div>
+
+      <!-- Especies -->
+      <div class="ins-card ins-card-left-gold" style="margin-bottom:12px;">
+        <div style="font-size:10px;color:{GOLD};letter-spacing:1.5px;
+                    text-transform:uppercase;font-weight:700;margin-bottom:10px;">
+          🧬 Tres arquetipos decorrelacionados (desde Sesión 16)
+        </div>
+        <div class="ins-body">
+          Los 10 agentes ya <b>no son copias del mismo sistema</b>. Pertenecen a tres
+          <b>especies estratégicas</b> genuinamente distintas, cada una diseñada para
+          ganar en un régimen de mercado diferente:
+        </div>
+        <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:14px;">
+          <div class="ins-param-box" style="border-left:3px solid {GOLD};">
+            <div class="ins-param-label">📈 Tendencia (4 agentes)</div>
+            <div class="ins-param-items">
+              Momentum RSI + EMA + MACD<br>
+              Filtro HTF activo<br>
+              Opera cuando <b style="color:{GOLD};">ADX ≥ 25</b><br>
+              (mercado con dirección clara)
+            </div>
+          </div>
+          <div class="ins-param-box" style="border-left:3px solid {EMERALD};">
+            <div class="ins-param-label">↔️ Reversión (3 agentes)</div>
+            <div class="ins-param-items">
+              RSI en extremos + OB/FVG<br>
+              HTF desactivado<br>
+              Opera cuando <b style="color:{EMERALD};">ADX &lt; 25</b><br>
+              (mercado en rango)
+            </div>
+          </div>
+          <div class="ins-param-box" style="border-left:3px solid {AMBER};">
+            <div class="ins-param-label">💥 Ruptura (3 agentes)</div>
+            <div class="ins-param-items">
+              Breakout de estructura N velas<br>
+              Confirmado por range_spike<br>
+              Opera en <b style="color:{AMBER};">ambos regímenes</b><br>
+              (busca explosión de volatilidad)
+            </div>
+          </div>
+        </div>
+        <div class="ins-body" style="margin-top:12px;">
+          <b>Clasificador ADX:</b> cada ciclo se calcula el ADX(14) sobre las velas de 15m.
+          ADX ≥ 25 = <em>TENDENCIA</em> (S1 + S3 activos, S2 bloqueado).
+          ADX &lt; 25 = <em>RANGO</em> (S2 activo, S1 bloqueado). NEUTRAL = todos operan.<br><br>
+          <b>Resultado práctico:</b> en días de mercado lateral (como el 01-jun-2026 con ADX=17.7),
+          los 4 agentes tendencia quedan en HOLD automáticamente y los 3 de reversión operan
+          en la dirección <em>correcta</em> para ese régimen. <s>Nunca más "todos pierden a la vez".</s>
+        </div>
+      </div>
+
       <div class="ins-card ins-card-left-gold">
         <div class="ins-body">
-          El sistema comienza con <b>10 agentes génesis (Generación 1)</b>, cada uno con
-          <b>$10.00 USD de capital virtual</b> y un conjunto único de parámetros estratégicos
-          que definen cómo interpreta el mercado y gestiona el riesgo.
-          Estos parámetros son el "ADN" del agente y se heredan, cruzan y mutan entre generaciones.
+          Cada agente tiene <b>$10.00 USD de capital virtual</b> y un conjunto único de parámetros
+          que constituyen su "ADN". Se heredan, cruzan y mutan entre generaciones.
         </div>
         <div class="ins-param-grid" style="margin-top:14px;">
           <div class="ins-param-box">
@@ -1010,7 +1059,7 @@ def _tab_instructions() -> None:
             <div class="ins-param-items">
               Período RSI (5–50)<br>
               RSI modo (momentum / reversion)<br>
-              Zona muerta RSI (1.0–15.0 pips)<br>
+              Zona muerta RSI (1.0–15.0)<br>
               EMA rápida y lenta<br>
               Períodos MACD<br>
               Pesos RSI / EMA / MACD
@@ -1036,17 +1085,19 @@ def _tab_instructions() -> None:
             </div>
           </div>
           <div class="ins-param-box">
-            <div class="ins-param-label">🔮 Genes SMC</div>
+            <div class="ins-param-label">🔮 Genes SMC + Régimen</div>
             <div class="ins-param-items">
               FVG mínimo en pips (2–15)<br>
-              OB impulso mínimo en pips (5–20)<br>
-              Multiplicador spike de rango (1.2–3.0)<br>
+              OB impulso mínimo (5–20)<br>
+              Spike de rango (1.2–3.0×)<br>
               Cuarentena macro (30–120 min)<br>
               Pesos FVG / OB (0.05–0.50)<br>
               ATR factor SL (0.8–3.0)<br>
               Trailing activation pips (5–40)<br>
               Trailing distance pips (5–25)<br>
-              Período ATR (7–21)<br>
+              <b>Breakout lookback bars (10–50)</b> S3<br>
+              <b>Breakout min pips (3–15)</b> S3<br>
+              <b>Peso breakout (0.20–0.70)</b> S3<br>
               Filtro HTF habilitado (0 / 1)
             </div>
           </div>
@@ -1213,24 +1264,23 @@ def _tab_instructions() -> None:
         <div class="ins-step">
           <div class="ins-step-num">1</div>
           <div class="ins-step-text">
-            <b>Clasificación por Calmar Ratio (Fitness)</b> — Todos los agentes activos
-            se ordenan por su <b>fitness score</b>: Calmar Ratio Proxy =
-            <code>ROI / (max_drawdown + 1)</code>, con penalidad de −0.5 si el agente
-            opera más de 3 veces/día con win rate &lt; 50%. Un agente con ROI 5% pero
-            drawdown 50% pierde frente a uno con ROI 3% y drawdown controlado del 5%.
+            <b>Fitness por Expectancy neta (desde Sesión 16)</b> — Los agentes se ordenan
+            por <code>fitness = (expectancy/trade / (max_drawdown+1)) × confianza_estadística</code>.
+            La <b>expectancy</b> es <code>win_rate × ganancia_media − loss_rate × pérdida_media</code>
+            (ya neta de spread+slippage). La <b>confianza estadística</b> escala de 0 a 1
+            según cuántos trades cerrados tiene el agente vs. la muestra mínima de 15.
+            Un agente con ROI 5% en 2 trades no supera a uno con ROI 3% en 30 trades.
           </div>
         </div>
         <div class="ins-step">
           <div class="ins-step-num">2</div>
           <div class="ins-step-text">
-            <b>Cuota dinámica de eliminación</b> — Solo son eliminables los agentes
-            con <b>fitness ≤ 0</b>. Máximo 5 por día. Los agentes
-            <b>recién nacidos sin operaciones cerradas</b> y con menos de
-            <code>GRACE_PERIOD_DAYS</code> (default 2) días hábiles de edad son
-            <b>inmunes</b> ese día (Periodo de Gracia Operativa). Si todos los
-            elegibles tienen fitness &gt; 0, <b>no se elimina nadie</b> y el ciclo
-            queda suspendido. Los eliminados pasan a estado <s>eliminado</s> y su
-            capital se redistribuye entre los activos.
+            <b>Cuota dinámica + muestra mínima + protección de especies</b> —
+            Son <b>inmunes</b> (no elegibles para eliminación): agentes con &lt; 15 trades
+            cerrados (muestra insuficiente) o recién nacidos sin operaciones.
+            Solo son eliminables los elegibles con <b>fitness ≤ 0</b>. Máximo 5 por día.
+            <b>Protección de diversidad:</b> nunca se elimina un agente si bajaría su
+            especie (tendencia/reversion/ruptura) por debajo de 2 agentes activos.
           </div>
         </div>
         <div class="ins-step">
@@ -1244,18 +1294,20 @@ def _tab_instructions() -> None:
         <div class="ins-step">
           <div class="ins-step-num">4</div>
           <div class="ins-step-text">
-            <b>Creación de 5 nuevos agentes</b> — Se generan 5 agentes de la siguiente
-            generación mediante cruce genético y mutación gaussiana a partir de los supervivientes.
+            <b>Torneo de candidatos + backtest OOS (desde Sesión 16)</b> — Para cada slot
+            vacante se generan <b>3 candidatos</b> con genes distintos. Cada uno se
+            backtestea sobre los <b>últimos 20 días de historia</b> (el mismo pipeline
+            de producción: señales → régimen → SL/TP → fricción, sin LLM).
+            Solo se despliega el candidato con mayor fitness out-of-sample.
+            Los otros 2 se descartan antes de operar en vivo.
           </div>
         </div>
         <div class="ins-step">
           <div class="ins-step-num">5</div>
           <div class="ins-step-text">
             <b>Redistribución igualitaria de capital</b> — Se suma el <code>capital_actual</code>
-            de los 10 agentes activos resultantes (supervivientes + nuevos) y se divide en
-            partes iguales. Todos inician el día siguiente con <b>exactamente el mismo capital</b>.
-            El pool total solo fluctúa por las ganancias y pérdidas reales de trading —
-            ninguna operación interna inyecta ni retira dinero del sistema.
+            de los 10 agentes activos resultantes y se divide en partes iguales.
+            Todos inician el día siguiente con <b>exactamente el mismo capital</b>.
           </div>
         </div>
       </div>
@@ -1268,9 +1320,10 @@ def _tab_instructions() -> None:
         <div class="ins-body">
           Cada nuevo agente se crea en dos pasos:<br><br>
           <b>① Cruce (Crossover)</b> — Se seleccionan 2 padres del pool de supervivientes.
-          La probabilidad de ser elegido como padre es proporcional al ROI de cada agente
-          (los mejores tienen más probabilidad de reproducirse). Cada parámetro del hijo
-          se hereda del Padre 1 con 60% de probabilidad, del Padre 2 con 40%.<br><br>
+          La probabilidad de ser padre es proporcional al <b>fitness score</b> (expectancy neta,
+          no ROI crudo — desde Sesión 16). Se prefieren padres de la misma especie para cruzar
+          genes coherentes. Cada parámetro del hijo se hereda del Padre 1 con 60%, del Padre 2 con 40%.
+          El hijo hereda la <b>especie del eliminado</b> que reemplaza.<br><br>
           <b>② Mutación Gaussiana</b> — Cada parámetro heredado se perturba con ruido aleatorio:
           <code style="font-size:11px;color:{EMERALD};">
             param_hijo = param_padre × (1 + N(0, σ))
@@ -1463,28 +1516,32 @@ def _tab_instructions() -> None:
     <div style="background:{CARD2};border:1px solid {BORDER};border-radius:8px;
                 padding:14px 18px;font-size:11px;color:{DIM};line-height:1.8;">
       <b style="color:{GOLD};">Nota técnica:</b>
-      Las velas OHLCV (~420 velas de 15min, 5 días) se obtienen de
+      Las velas OHLCV (5.600+ velas de 15min, 60 días) se obtienen de
       <b style="color:{TEXT};">Yahoo Finance</b> (gratuito, sin API key) — 1 descarga compartida
       por ciclo, cada agente calcula sus señales en memoria con sus propios genes.
       El volumen EUR/USD es siempre 0 (par OTC), por eso se usa el
       <b style="color:{TEXT};">Range Proxy</b> <code>(high−low) × 10 000</code> en pips
       como sustituto de VSA. El <b style="color:{TEXT};">ATR</b> (Wilder 14 períodos)
-      se calcula sobre las mismas velas y sirve como base del SL dinámico.
-      El <b style="color:{TEXT};">filtro HTF</b> descarga adicionalmente velas de <b style="color:{TEXT};">1h / 3 meses</b>
-      y calcula EMA50/EMA200 para bloquear señales contra la tendencia principal (Sesión 15).
+      se calcula sobre las mismas velas y sirve como base del SL dinámico
+      (piso <b style="color:{TEXT};">10 pips</b> desde Sesión 16 — evita stops barridos por ruido de 1m).
+      El <b style="color:{TEXT};">clasificador ADX</b> calcula el régimen del mercado
+      (TENDENCIA / RANGO) una vez por ciclo y habilita/bloquea cada especie según corresponde.
+      El <b style="color:{TEXT};">filtro HTF</b> descarga velas de <b style="color:{TEXT};">1h / 3 meses</b>
+      y calcula EMA50/EMA200 para bloquear señales contra la tendencia principal.
       El razonamiento de los agentes y del Juez usa <b style="color:{TEXT};">DeepSeek</b>
-      (<code>deepseek-reasoner</code>). El fitness (Calmar Ratio Proxy) se calcula
-      vía SQL sobre operaciones cerradas en <b style="color:{TEXT};">PostgreSQL — Supabase</b>.
+      (<code>deepseek-reasoner</code>). El fitness (Expectancy ajustada por riesgo × confianza
+      estadística) se calcula vía SQL sobre operaciones cerradas en
+      <b style="color:{TEXT};">PostgreSQL — Supabase</b>.
       La verificación SL/TP usa <b style="color:{TEXT};">velas OHLC de 1 minuto</b>
-      (≥15 velas/ciclo, precio de cierre = nivel exacto SL/TP).
+      (≥15 velas/ciclo, cierre = nivel exacto SL/TP).
+      <b style="color:{TEXT};">Fricción 1.4 pips round-trip</b> (spread + slippage) descontada
+      de cada operación al cerrar — el P&L en la DB es siempre neto de costos.
+      El <b style="color:{TEXT};">torneo de candidatos</b> backtestea 3 mutaciones por slot
+      sobre los últimos 20 días de historia antes de desplegar al ganador (Sesión 16).
       Los workflows (monitor cada 15 min y juez diario lunes–viernes) corren en
       <b style="color:{TEXT};">GitHub Actions</b>, disparados externamente por
-      <b style="color:{TEXT};">cron-job.org</b> con precisión ±5 segundos
-      (reemplaza el cron interno de GH que sufría retrasos crónicos de varias horas).
-      Las acciones del workflow usan <b style="color:{TEXT};">Node.js 24</b>
-      (<code>actions/checkout@v6</code>, <code>actions/setup-python@v6</code>).
-      Todos los timestamps mostrados en el dashboard están en hora
-      <b style="color:{TEXT};">America/Bogota (UTC−5)</b>.
+      <b style="color:{TEXT};">cron-job.org</b> con precisión ±5 segundos.
+      Todos los timestamps están en hora <b style="color:{TEXT};">America/Bogota (UTC−5)</b>.
     </div>
     """, unsafe_allow_html=True)
 

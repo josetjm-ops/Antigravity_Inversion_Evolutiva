@@ -176,7 +176,7 @@ Cada agente lleva cuatro diccionarios JSON que constituyen su "ADN". Estos pará
 | `umbral_confianza_minima` | 0.45–0.85 | Confianza mínima para emitir BUY o SELL |
 | `peso_tecnico_vs_macro` | 0.30–0.75 | Peso de la señal técnica sobre la macro (complemento = peso macro) |
 
-#### `params_smc` — Smart Money Concepts + ATR
+#### `params_smc` — Smart Money Concepts + ATR + Régimen + Ruptura
 
 | Gen | Rango | Descripción |
 |---|---|---|
@@ -192,7 +192,22 @@ Cada agente lleva cuatro diccionarios JSON que constituyen su "ADN". Estos pará
 | `trailing_activation_pips` | 5–40 | Pips de ganancia para activar el trailing stop |
 | `trailing_distance_pips` | 5–25 | Distancia del trailing stop al precio extremo favorable |
 | `atr_period` | 7–21 (entero) | Período del ATR (Average True Range) de Wilder |
-| `htf_filter_enabled` | 0 / 1 | Habilita el filtro de tendencia de temporalidad superior (1h). Cuando es 1, bloquea señales que contradicen EMA50/EMA200 en velas de 1h. Se almacena como entero 0/1 (no float) para que `_mutate_block` lo ignore — es una decisión estratégica, no un parámetro continuo (desde Sesión 15). |
+| `htf_filter_enabled` | 0 / 1 | Habilita el filtro de tendencia de temporalidad superior (1h). Activo en S1/S3; siempre 0 en S2 (opera contra-tendencia por diseño). |
+| `breakout_lookback_bars` | 10–50 (entero) | Velas 15m para buscar el máximo/mínimo de estructura (S3 ruptura). Ruptura: cierre actual > máximo de `lookback` velas anteriores (o < mínimo). Gen mutable gaussianamente. (desde Sesión 16 — Fase 2) |
+| `breakout_min_pips` | 3.0–15.0 | Distancia mínima de la ruptura en pips para considerarla válida (S3). (desde Sesión 16 — Fase 2) |
+| `peso_breakout` | 0.20–0.70 | Peso del score de ruptura en el ensamble S3. (desde Sesión 16 — Fase 2) |
+| `adx_period` | 14 (fijo) | Período del ADX para el clasificador de régimen. No se muta gaussianamente. |
+| `adx_threshold` | 25.0 (fijo) | Umbral ADX para clasificar el régimen: ≥ 25 = TENDENCIA, < 25 = RANGO. No se muta. |
+
+#### `especie` — Arquetipo estratégico (columna en `agentes`, no en `params_smc`)
+
+| Valor | Filosofía | Cuándo opera | HTF filter |
+|---|---|---|---|
+| `tendencia` | Momentum multi-timeframe: RSI cruce 50 + EMA + MACD alineados con tendencia 1h | ADX ≥ 25 (mercado con dirección clara) | Activo (veta señales contra-tendencia) |
+| `reversion` | Mean-reversion en extremos RSI + OB/FVG estructural en mercado lateral | ADX < 25 (mercado en rango) | Desactivado (opera deliberadamente contra-tendencia) |
+| `ruptura` | Breakout de estructura (cierre fuera del rango N velas) confirmado por range_spike | Ambos regímenes | Activo |
+
+La especie es **inmutable por mutación gaussiana**: el hijo hereda siempre la especie del agente eliminado que reemplaza (reproducción como-por-como), preservando la distribución de arquetipos. Solo cambia si la evolución decide que una especie no merece representación (pero el motor garantiza mínimo 2 agentes por especie activos).
 
 ### Capital
 
@@ -232,33 +247,55 @@ Yahoo Finance
               Google Sheets → log_operation()
 ```
 
-### Sub-agente A — Análisis Técnico
+### Sub-agente A — Análisis Técnico (enrutado por especie desde Sesión 16)
 
-Calcula scores individuales para 5 indicadores y los combina con ponderación genética:
+`analyze()` recibe la `especie` del agente y construye el ensamble ponderado según el arquetipo:
+
+**S1 — tendencia** (ensamble original):
 
 | Indicador | Señal BUY | Señal SELL | Peso |
 |---|---|---|---|
-| RSI (modo momentum) | Cruce al alza del nivel 50, o RSI > 50 fuera de zona muerta | Cruce a la baja del nivel 50, o RSI < 50 fuera de zona muerta | `peso_rsi` |
+| RSI modo momentum | Cruce al alza nivel 50, o RSI > 50 fuera de zona muerta | Cruce a la baja, o RSI < 50 | `peso_rsi` |
 | Cruce EMA | EMA rápida > EMA lenta | EMA rápida < EMA lenta | `peso_ema` |
-| MACD histograma | > 0.00005 | < -0.00005 | `peso_macd` |
+| MACD histograma | > 0.00005 | < −0.00005 | `peso_macd` |
 | FVG activo | Dirección BULL | Dirección BEAR | `peso_fvg` |
 | Order Block | Dirección BULL | Dirección BEAR | `peso_ob` |
 
-**RSI — modo momentum (default desde Sesión 15):** en lugar de la lógica sobrecompra/sobreventa (que contradice la tendencia), el RSI señala la dirección del mercado mediante el cruce del nivel 50.
+**S2 — reversion** (pesos ajustados, contra-tendencia):
+- RSI modo `reversion` (sobrecompra/sobreventa) × 1.5
+- OB y FVG × 1.5 (entradas estructurales en extremos de precio)
+- EMA y MACD × 0.4 (contexto reducido — el mercado está en rango, no en tendencia)
+- HTF filter desactivado (`htf_filter_enabled=0`): opera deliberadamente en extremos contra la tendencia corta.
+
+**S3 — ruptura** (breakout primario):
+- Breakout de estructura × `peso_breakout` (0.20–0.70, default 0.40): cierre fuera del máximo/mínimo de `breakout_lookback_bars` velas anteriores. Confianza 0.65–0.90, amplificada si hay range_spike confirmatorio.
+- RSI, EMA × 0.5 (contexto secundario)
+- FVG, OB (pesos normales)
+
+**Clasificador de régimen ADX (compartido, calculado una vez por ciclo):**
+`calc_regime()` calcula el ADX(14) sobre las velas de 15m y clasifica:
+- ADX ≥ 25 → `TENDENCIA` (S1 y S3 habilitados; S2 bloqueado)
+- ADX < 25 → `RANGO` (S2 habilitado; S1 bloqueado)
+- Sin datos → `NEUTRAL` (todas las especies pueden operar)
+
+Este gate se aplica en `trade_monitor._evaluate_new_positions()` **antes** del pipeline A→B→C. Un agente bloqueado por régimen incompatible cuenta como evaluado pero no genera señal.
+
+**Detección de ruptura `detect_breakout()` (S3):**
+- Ruptura alcista: `close[-1] > max(close[-lookback-1:-1])` con diferencia ≥ `breakout_min_pips`.
+- Ruptura bajista: `close[-1] < min(close[-lookback-1:-1])` con diferencia ≥ `breakout_min_pips`.
+- Usa el cierre (no la mecha) para confirmar que el precio **cerró** fuera del rango, evitando falsos positivos.
+
+**RSI — modo momentum (default desde Sesión 15):**
 - Cruce al alza (prev ≤ 50 → actual > 50): BUY fuerte (0.60–0.85)
-- Cruce a la baja (prev ≥ 50 → actual < 50): SELL fuerte (0.60–0.85)
-- Sin cruce, fuera de la zona muerta (|RSI − 50| > `rsi_zona_muerta`): BUY/SELL débil (0.40–0.60)
-- Sin cruce, dentro de la zona muerta: HOLD (0.35)
-- Modo legacy `"reversion"` (sobrecompra/sobreventa): solo se activa si la evolución descubre que funciona mejor.
+- Cruce a la baja: SELL fuerte (0.60–0.85)
+- Sin cruce, fuera de zona muerta: BUY/SELL débil (0.40–0.60)
+- Dentro de zona muerta: HOLD (0.35)
 
-**Range spike condicionado (desde Sesión 15):** si hay un spike de volatilidad (rango actual > MA20 × `range_spike_multiplier`) Y la dirección de la última vela confirma la señal, la confianza se amplifica ×1.15 (máx. 0.95). Si el spike contradice la señal, la confianza queda intacta — ni amplifica ni atenúa.
+**Range spike condicionado:** amplifica ×1.15 (máx. 0.95) solo si la dirección de la última vela confirma la señal. Spike contrario: confianza intacta.
 
-**Filtro HTF — veto de tendencia superior (desde Sesión 15):** después de calcular la señal ponderada, si `htf_filter_enabled=1` y la señal es BUY/SELL, se consulta la dirección EMA50/EMA200 en velas de 1h:
-- BUY cuando HTF = BEAR → HOLD (veto)
-- SELL cuando HTF = BULL → HOLD (veto)
-- HTF = NEUTRAL → no veta (la señal pasa intacta)
+**Filtro HTF:** activo en S1 y S3. Veta BUY si HTF = BEAR, y SELL si HTF = BULL. Desactivado en S2 por diseño.
 
-La señal ponderada emite BUY si `score_buy > score_sell`, `score_buy > 0.40` y la ventaja es > 0.15. Igual para SELL. Si no hay dominancia clara, emite HOLD.
+La señal ponderada emite BUY/SELL si `score_dominante > 0.40` y la ventaja sobre la dirección opuesta es > 0.15. Si no hay dominancia clara, emite HOLD.
 
 ### Sub-agente B — Análisis Macro
 
@@ -279,8 +316,10 @@ La señal ponderada emite BUY si `score_buy > score_sell`, `score_buy > 0.40` y 
 **Jerarquía de Stop Loss (en orden de prioridad):**
 1. **Order Block estructural** — nivel del OB no mitigado (fuente más fuerte).
 2. **Fair Value Gap** — nivel del FVG no rellenado.
-3. **ATR dinámico** — `precio ± (ATR × atr_factor)`. Rango: mín. 5 pips, máx. 50 pips.
+3. **ATR dinámico** — `precio ± (ATR × atr_factor)`. Piso: `MIN_SL_PIPS` (default **10 pips**), máx. 50 pips. El piso protege el SL del ruido normal de las velas de 1m que usa el monitor intra-vela. (Fase 0, desde Sesión 16)
 4. **Porcentaje fijo** — `stop_loss_pct` del precio de entrada (fallback si ATR = 0).
+
+> **Fricción de mercado (Fase 0, desde Sesión 16):** al cerrar cada operación BUY/SELL, `close_operation()` descuenta `TRADE_FRICTION_PIPS` (default 1.4 pips round-trip ≈ 0.8 spread + 0.6 slippage) del P&L, independientemente del resultado. Sin esto el simulador es optimista y la evolución converge hacia estrategias que solo "funcionan" sin costos. Con fricción modelada, el fitness refleja el edge real neto.
 
 **Take Profit:** siempre `TP = distancia_SL × risk_reward_target`.
 
@@ -429,9 +468,11 @@ Por la misma razón, dentro de cada vela se chequea SL/TP **antes** de aplicar e
 El trailing stop protege ganancias sin limitar el potencial alcista:
 
 1. Se activa cuando la posición acumula `trailing_activation_pips` de ganancia (gen del agente, default 15 pips).
-2. Una vez activo, el SL se mueve a `precio_extremo_favorable - trailing_distance_pips` (default 10 pips).
-3. El SL **nunca retrocede**: solo puede mejorar (moverse a favor).
-4. Desde Sesión 13 el trailing se aplica **vela a vela** dentro del verificador intra-bar usando el extremo favorable de cada vela (low para SELL, high para BUY) en vez del snapshot único cada 15 min. Resultado: ratcheo más preciso, casi idéntico al de un broker tick-by-tick.
+2. **Fase 0 (desde Sesión 16):** la activación nunca ocurre antes de +1R de ganancia flotante (R = distancia original del SL en pips). Si el gen pedía activar antes de 1R, se eleva a 1R automáticamente. Así un trade ganador jamás puede recortarse por debajo del break-even.
+3. La distancia de seguimiento se acota a `min(trailing_distance_pips, 0.7 × activation_pips)` para garantizar que el profit bloqueado al activar sea siempre > 0.
+4. Una vez activo, el SL se mueve a `precio_extremo_favorable - trailing_distance_pips`.
+5. El SL **nunca retrocede**: solo puede mejorar (moverse a favor).
+6. Desde Sesión 13 el trailing se aplica **vela a vela** dentro del verificador intra-bar usando el extremo favorable de cada vela (low para SELL, high para BUY). Resultado: ratcheo preciso, casi idéntico al de un broker tick-by-tick.
 
 ### Cierre al final del día (EOD)
 
@@ -467,101 +508,119 @@ Para que esto funcione en la "ventana ciega" de 03:30 – 06:30 UTC (11pm – 1:
 ### Secuencia del ciclo evolutivo
 
 ```
-1. EVALUACIÓN DE FITNESS (Calmar Ratio Proxy)
-   ─────────────────────────────────────────
-   fitness = ROI_total / (max_drawdown + 1)
-   Penalidad: -0.5 si avg_ops_dia > 3 Y win_rate < 50%
+1. EVALUACIÓN DE FITNESS — Expectancy ajustada por riesgo (Fase 1, desde Sesión 16)
+   ────────────────────────────────────────────────────────────────────────────────
+   expectancy = win_rate × avg_win − (1 − win_rate) × avg_loss
+   (P&L ya es neto de fricción: TRADE_FRICTION_PIPS descontado al cerrar cada op)
 
-2. RANKING + FILTRO DE ELEGIBILIDAD (Periodo de Gracia Operativa)
-   ─────────────────────────────────────────────────────────────
+   confianza_estadistica = LEAST(1.0, n_trades / MIN_SAMPLE_TRADES)
+   (escala 0→1 mientras el agente acumula muestra mínima de 15 trades cerrados)
+
+   fitness = (expectancy / (max_drawdown + 0.01))
+             × confianza_estadistica
+             − penalidad_overtrading
+
+   Penalidad: −0.5 si avg_ops_dia > 3 Y win_rate < 50%
+
+   Por qué expectancy y no ROI: con ROI, 3 trades de suerte inflan el fitness.
+   La expectancy neta por trade es estadísticamente estable y exige que el edge
+   sea real, no acumulable por azar. La confianza estadística bloquea la selección
+   de agentes con muestra insuficiente.
+
+2. RANKING + FILTRO DE ELEGIBILIDAD (Muestra mínima + Periodo de Gracia)
+   ──────────────────────────────────────────────────────────────────────
    Ordenar 10 agentes por fitness DESC.
-   Desempate por juventud: fecha_nacimiento DESC, id DESC.
+   Desempate: fecha_nacimiento DESC, id DESC.
 
    Filtrar agentes INMUNES (no elegibles para eliminación esa tarde):
-     - operaciones_total == 0   (nunca ha cerrado una operación)
-     - AND edad < GRACE_PERIOD_DAYS días HÁBILES (lun-vie)
+     A. GRACIA: operaciones_total == 0 Y edad < GRACE_PERIOD_DAYS días HÁBILES
+     B. MUESTRA INSUFICIENTE: n_trades_cerradas < MIN_SAMPLE_TRADES (default 15)
+        → Con pocos trades el fitness es ruido. La evolución no puede seleccionar
+          habilidad de una muestra de 3-5 operaciones.
    Los inmunes mantienen estado 'activo' automáticamente.
 
-3. CUOTA DINÁMICA DE ELIMINACIÓN
-   ──────────────────────────────
+3. CUOTA DINÁMICA + PROTECCIÓN DE ESPECIES
+   ─────────────────────────────────────────
    Sobre los agentes ELEGIBLES (no inmunes):
      - Se ordenan por (fitness ASC, fecha_nacimiento ASC, id ASC)
-       → los primeros candidatos son veteranos rezagados.
-     - Solo se eliminan agentes con fitness_score <= 0 (negativo o cero).
+       → primeros candidatos son veteranos rezagados.
+     - Solo eliminables los que tienen fitness_score <= 0.
      - n_eliminate = min(N_ELIMINATE=5, len(eliminables))
 
-   La cuota deja de ser rígida: NUNCA se elimina a un agente veterano con
-   fitness > 0 solo para cumplir con la cifra de 5 eliminaciones.
+   Protección de diversidad de especies (Fase 2): nunca se elimina un agente
+   si hacerlo bajaría su especie (tendencia/reversion/ruptura) por debajo de
+   MIN_AGENTS_PER_ESPECIE (default 2). Se saltea ese candidato y se toma el
+   siguiente peor de una especie con ≥ 3 agentes.
 
 4. ¿CICLO SUSPENDIDO?
    ───────────────────
-   Si la cuota dinámica resulta = 0 (todos los elegibles son rentables o
-   todos los activos están en Periodo de Gracia):
-     - NO se elimina ningún agente
-     - NO se crean nuevos agentes
-     - NO se redistribuye capital (la población queda intacta)
-     - Se registra UN único log 'evaluacion_diaria' con
-       cycle_suspended=true y suspension_reason explícito
-     - NO se invoca al LLM (se ahorra gasto de tokens en días HOLD)
-     - El día siguiente la población joven puede acumular más datos
-
-   Si la cuota > 0, continúa con los pasos 5–9.
+   Si cuota dinámica = 0: ciclo suspendido, sin eliminación/reproducción/redistribución.
 
 5. FORZADO DE DIVERSIDAD GENÉTICA
    ───────────────────────────────
-   Se calcula el coeficiente de variación (CV) promedio del ADN de los
-   supervivientes elegibles sobre claves técnicas, macro y SMC.
-   Si CV < DIVERSITY_VARIANCE_THRESHOLD (default 0.01 = 1%):
-     - sigma_weights, sigma_periods, sigma_risk se multiplican por
-       SIGMA_BOOST_FACTOR (default 2.0)
-     - Esto fuerza exploración agresiva y evita el estancamiento por clones.
+   CV < DIVERSITY_VARIANCE_THRESHOLD → sigmas × SIGMA_BOOST_FACTOR (default 2.0).
 
-6. REPRODUCCIÓN (un hijo por cada eliminado)
-   ──────────────────────────────────────────
+6. REPRODUCCIÓN CON TORNEO DE CANDIDATOS (Fase 3, desde Sesión 16)
+   ──────────────────────────────────────────────────────────────────
    Para cada cupo vacante:
-     a. Seleccionar 2 padres del pool de supervivientes ELEGIBLES
-        (probabilidad proporcional al ROI de cada padre)
-     b. Crossover de los 4 bloques de genes
-     c. Mutación gaussiana sobre cada gen (sigmas posiblemente boosteadas)
-     d. Normalizar pesos y aplicar constraints
-     e. INSERT en agentes (generacion = max_generacion_activa + 1)
+     a. Descargar datos históricos: fetch_backtest_data() — 1 request compartido
+        para todos los hijos del ciclo: 60d/15m + 3mo/1h de Yahoo Finance.
+     b. Generar N_CANDIDATE_CHILDREN candidatos (default 3), cada uno con padres
+        distintos (selección fitness-proporcional, preferentemente misma especie).
+     c. Ejecutar run_backtest() en cada candidato: walk-forward OOS 20 días,
+        mismo pipeline de producción (señales + régimen ADX + SL/TP + fricción),
+        sin LLM (heurística pura, determinista).
+     d. Insertar el candidato con mayor fitness OOS.
+        Si Yahoo Finance falla → fallback a crianza directa sin backtest.
+     e. El hijo hereda la especie del eliminado (como-por-como).
+     f. S2 hijos: rsi_modo=reversion, htf_filter_enabled=0 forzados post-crossover.
+     g. INSERT en agentes con columna especie. capital_inicial = cuota del pool.
+
+   Selección de padres: probabilidad proporcional a fitness_score (Fase 1),
+   no al ROI crudo. Agentes con < MIN_SAMPLE_TRADES tienen fitness ≈ 0 →
+   raramente seleccionados como padres.
 
 7. RAZONAMIENTO LLM (solo si el ciclo NO está suspendido)
-   ──────────────────────────────────────────────────────
-   DeepSeek analiza los resultados y produce:
-   - Por qué fallaron los eliminados (parámetros problemáticos)
-   - Qué se espera de los nuevos agentes (herencia + mutación)
-   - Insight sobre condiciones de mercado del día
-   - Recomendaciones de parámetros para próximas generaciones
 
-8. PERSISTENCIA EN LOGS
-   ──────────────────────
-   logs_juez ← evaluacion_diaria (veredicto global con métricas nuevas)
-   logs_juez ← eliminacion (uno por agente eliminado)
-   logs_juez ← seleccion_padres (uno por agente nuevo)
-   logs_juez ← nuevo_agente (uno por agente nuevo)
+8. PERSISTENCIA EN LOGS (logs_juez: evaluacion_diaria, eliminacion, nuevo_agente)
 
 9. REDISTRIBUCIÓN DE CAPITAL
-   ──────────────────────────
-   pool_total = SUM(capital_actual) de todos los activos antes del ciclo
-   capital_por_agente = pool_total / n_agentes_activos
-   UPDATE agentes SET capital_actual = capital_por_agente WHERE estado = 'activo'
-   → Todos arrancan el día siguiente con el mismo capital
-   (En ciclos suspendidos este paso se omite: el capital se preserva tal cual.)
+   pool_total / n_agentes_activos → todos inician el día siguiente igualados.
 ```
 
-### Cálculo del Calmar Ratio Proxy
+### Cálculo del Fitness — Expectancy ajustada (Fase 1)
 
 ```sql
--- Por agente:
-fitness = ROI_total / (max_drawdown + 1)
-        - PENALIDAD
+-- Por agente (n_trades = operaciones cerradas):
+expectancy = (n_wins/n_trades) × avg_win − (1 − n_wins/n_trades) × avg_loss
 
--- max_drawdown: mayor caída desde un pico del capital acumulado:
-drawdown = (peak - capital_acumulado) / peak
+-- confianza estadística (ramp-up hasta 15 trades):
+confianza = LEAST(1.0, n_trades / 15)
 
--- Penalidad por overtrading sin resultados:
-IF avg_ops_dia > 3 AND win_rate < 50% THEN penalidad = 0.5
+-- fitness final:
+fitness = (expectancy / (max_drawdown + 1)) × confianza − penalidad_overtrading
+
+-- max_drawdown: máxima caída desde pico del capital acumulado
+-- avg_win / avg_loss: ya son netos de fricción (1.4 pips descontados al cerrar)
+```
+
+### Backtester Walk-Forward (Fase 3)
+
+```
+Walk-forward split:
+  Train    : primeros BACKTEST_TRAIN_DAYS (40d) — warmup de indicadores
+  Validate : últimos  BACKTEST_VALIDATE_DAYS (20d) — período OOS
+
+Dentro del período OOS, la simulación replica producción exactamente:
+  - calc_signals() con los mismos genes del candidato
+  - Clasificador ADX: S1 bloqueado en RANGO, S2 bloqueado en TENDENCIA
+  - SubAgentTechnical.analyze(especie=...) — ensamble por arquetipo
+  - SubAgentRisk._compute_levels() — SL ≥ 10 pips, R:R objetivo
+  - check_sl_tp_intrabar() sobre cada vela 15m: SL/TP exactos
+  - Fricción TRADE_FRICTION_PIPS descontada por trade
+
+Rendimiento: ~3.5s/candidato, ~53s por ciclo completo (5 slots × 3 candidatos).
+Margen: 11 minutos libres del workflow judge_daily (timeout 12 min).
 ```
 
 ### Periodo de Gracia Operativa (inmunidad)
@@ -765,7 +824,8 @@ Registro central de cada agente. Campos clave:
 | `params_tecnicos` | JSONB | Genes del sub-agente A |
 | `params_macro` | JSONB | Genes del sub-agente B |
 | `params_riesgo` | JSONB | Genes del sub-agente C |
-| `params_smc` | JSONB | Genes SMC + ATR (incluye `atr_period` desde migración 006) |
+| `params_smc` | JSONB | Genes SMC + ATR + Régimen + Ruptura (incluye `breakout_*`, `adx_*` desde migración 010) |
+| `especie` | VARCHAR(20) | Arquetipo estratégico: `tendencia` / `reversion` / `ruptura`. Columna añadida en migración 010. Inmutable por mutación gaussiana — solo cambia entre generaciones por regla de sustitución como-por-como. |
 | `capital_inicial` / `capital_actual` | DECIMAL | Capital en dólares |
 | `roi_total` | DECIMAL | ROI acumulado en porcentaje |
 | `operaciones_total` / `operaciones_ganadoras` | INTEGER | Estadísticas |
@@ -1083,6 +1143,13 @@ Todas las variables se definen en `.env` local (desarrollo) o en **GitHub Secret
 | `GRACE_PERIOD_DAYS` | Días HÁBILES (lun-vie) de inmunidad para agentes recién nacidos sin operaciones (default: `2`) |
 | `DIVERSITY_VARIANCE_THRESHOLD` | Coeficiente de variación mínimo del ADN antes de activar el sigma boost. Subir a `0.05` para criterio más estricto (default: `0.01`) |
 | `SIGMA_BOOST_FACTOR` | Multiplicador aplicado a las sigmas cuando la diversidad cae bajo el umbral (default: `2.0`) |
+| `TRADE_FRICTION_PIPS` | Fricción round-trip (spread + slippage) en pips descontada del P&L de cada operación al cerrar. Default: `1.4` (≈ 0.8 spread retail EUR/USD + 0.6 slippage). **Fase 0, desde Sesión 16.** |
+| `MIN_SL_PIPS` | Piso mínimo del Stop Loss en pips. Por debajo de esto el SL muere por el ruido de las velas de 1m. Default: `10.0`. El sizing escala inverso a sl_pips (mismo riesgo porcentual). **Fase 0, desde Sesión 16.** |
+| `MIN_SAMPLE_TRADES` | Operaciones cerradas mínimas antes de que un agente sea elegible para eliminación, reproducción o Hall of Fame. Default: `15`. **Fase 1, desde Sesión 16.** |
+| `MIN_AGENTS_PER_ESPECIE` | Agentes mínimos por especie (tendencia/reversion/ruptura). La evolución no elimina si bajaría una especie de este umbral. Default: `2`. **Fase 2, desde Sesión 16.** |
+| `BACKTEST_TRAIN_DAYS` | Días de warmup del backtester (ignorados en la evaluación). Default: `40`. **Fase 3, desde Sesión 16.** |
+| `BACKTEST_VALIDATE_DAYS` | Días OOS del backtester (out-of-sample, define el fitness). Default: `20`. **Fase 3, desde Sesión 16.** |
+| `N_CANDIDATE_CHILDREN` | Candidatos generados por slot vacante en el torneo de reproducción. Default: `3`. **Fase 3, desde Sesión 16.** |
 | `LOG_LEVEL` | Nivel de logs (default: `INFO`) |
 | `ENVIRONMENT` | Ambiente (`production` / `development`) |
 
@@ -1193,10 +1260,11 @@ Antigravity_Inversion_Evolutiva/
 ├── db/
 │   ├── connection.py            (psycopg2 + Supabase pooler)
 │   ├── apply_migrations.py
-│   ├── migrations/              (001 – 009)
+│   ├── migrations/              (001 – 010: migración 010 añade columna especie)
 │   └── seeds/
 ├── evolution/
-│   └── evolution_engine.py      (fitness, crossover, mutación, redistribución)
+│   ├── evolution_engine.py      (fitness expectancy, crossover, especies, torneo backtest)
+│   └── backtester.py            (walk-forward OOS: señales→SL/TP→fricción, ~3.5s/candidato)
 ├── dashboard/                   Streamlit (inversion-evolutiva.streamlit.app)
 │   ├── app.py
 │   ├── charts.py
@@ -1223,9 +1291,19 @@ Antigravity_Inversion_Evolutiva/
 
 ---
 
-*Documento actualizado el 2026-05-29 (Sesión 15 — auditoría estratégica completa: filtro HTF 1h, RSI momentum (cruce nivel 50), sesgo macro por tendencia HTF, range spike condicionado, 4 genes nuevos + migración 009, backtest walk-forward de validación). Commit `bea6a9f` pusheado a `origin/master`. Calmar Ratio: 0.151 → 1.508 (+901%) sobre 1 mes de datos.*
+*Documento actualizado el 2026-06-01 (Sesión 16 — auditoría extrema + rediseño evolutivo completo: Fase 0 realismo de mercado, Fase 1 integridad evolutiva, Fase 2 diversidad por especies + filtro de régimen ADX, Fase 3 backtest walk-forward + torneo de candidatos). Commits `83f08ef` → `29238c7` pusheados a `origin/master`.*
 
 ## Historial de cambios mayores
+
+- **2026-06-01 (Sesión 16 — auditoría extrema + rediseño evolutivo completo: Fases 0-3) · commits `83f08ef` → `29238c7` · en producción:**
+  - **Contexto:** auditoría cuantitativa reveló esperanza matemática estructuralmente negativa (−0.95%/op medida sobre 361 trades en 12 días). El día de la auditoría (01-jun) registró 9/9 operaciones cerradas en pérdida, todas exactamente en el Stop Loss. Causas identificadas: (1) stops de 5 pips barridos por ruido de velas de 1m; (2) trailing/EOD cortaban ganadores, perdedores corrían al SL completo (R:R real 0.67 vs 2.0 objetivo); (3) tres indicadores colineales (RSI-momentum + EMA + MACD) = un solo factor de momentum → selección adversa en rango; (4) 10 agentes 100% correlacionados = 1 apuesta repetida 10 veces; (5) simulador sin fricción sobreestimaba rendimiento.
+  - **Fase 0 — Realismo de mercado (commit `83f08ef`):** (1) Piso de Stop Loss 5 → **10 pips** (`MIN_SL_PIPS`, `sub_agent_risk.py`): el stop deja de morir por ruido de velas 1m. (2) **Fricción round-trip** `TRADE_FRICTION_PIPS=1.4` descontada del P&L en `close_operation()`: spread + slippage modelados. (3) **Trailing a +1R**: el trailing nunca activa antes de ganar una R completa; los ganadores no se recortan por debajo de break-even. Verificado: fricción consume 69% del ganador medio histórico — la verdad real que el simulador ocultaba.
+  - **Fase 1 — Integridad evolutiva (commit `eb3a0ff`):** (1) **Fitness por expectancy neta**: `fitness = (expectancy/trade / (max_drawdown+1)) × confianza_estadistica`. Expectancy = `win_rate × avg_win − loss_rate × avg_loss` (ya neta de fricción). (2) **Muestra mínima** `MIN_SAMPLE_TRADES=15`: agentes con menos de 15 trades cerrados son inmunes a eliminación, reproducción y Hall of Fame. (3) **Selección de padres por fitness** (no por ROI crudo). La evolución deja de premiar suerte reciente; exige edge estadísticamente validado.
+  - **Fase 2 — Diversidad real por especies + filtro de régimen ADX (commit `39e25ff`):** (1) **Migración 010** (`010_especies.sql`): columna `especie` en `agentes` (4 tendencia / 3 reversion / 3 ruptura). S2 configurados con `rsi_modo=reversion`, `htf_filter_enabled=0`. S3 con genes `breakout_lookback_bars=20`, `breakout_min_pips=5.0`. (2) **3 arquetipos decorrelacionados**: tendencia (momentum, ADX≥25), reversion (extremos RSI/OB/FVG, ADX<25), ruptura (breakout de estructura, ambos regímenes). Verificado: con ADX=17.7 (el del día de la auditoría), tendencia bloqueada, reversion habilitada → habrían ganado exactamente los mismos movimientos que perdieron los S1. (3) **Clasificador ADX** `calc_regime()` + `detect_breakout()` en `indicators.py`. `TechnicalSignals` extendido con `adx`, `regime_estado`, `breakout_activo`, `breakout_direccion`, `breakout_pips`. (4) **Gate de régimen** en `trade_monitor._evaluate_new_positions()`: agente bloqueado si su especie es incompatible con el régimen actual. (5) **Protección de diversidad**: evolución garantiza ≥ 2 agentes por especie; hijos heredan especie del eliminado (como-por-como); crossover preferentemente entre padres de la misma especie. (6) `SubAgentTechnical.analyze()` recibe `especie` y enruta el ensamble ponderado según el arquetipo. (7) `InvestorAgent` carga y propaga `especie` desde la DB.
+  - **Fase 3 — Backtest walk-forward + torneo de candidatos (commit `29238c7`):** (1) **`evolution/backtester.py`**: simula el pipeline completo (calc_signals → análisis por especie → SL/TP → fricción) sobre 60 días de historia. Walk-forward: 40d warmup / 20d OOS. Sin LLM (heurística determinista). ~3.5s por backtest. (2) **Torneo en `evolution_engine.run()`**: por cada slot vacante, se generan `N_CANDIDATE_CHILDREN=3` candidatos, se backtes-tean en OOS, se inserta el de mayor fitness. Si Yahoo Finance falla → fallback a crianza directa. 1 sola descarga de datos para todo el ciclo. Tiempo total estimado: ~53s (dentro del timeout de 12 min del workflow). (3) El motor evolutivo ahora tiene masa estadística para seleccionar: ~520 OOS candles por candidato vs. ~3 trades/día en vivo.
+  - **6 archivos modificados + 2 nuevos** en este conjunto de commits: `agents/sub_agent_risk.py`, `agents/investor_agent.py`, `agents/sub_agent_technical.py`, `cron/trade_monitor.py`, `data/indicators.py`, `data/alpha_vantage_client.py`, `evolution/evolution_engine.py`, `db/migrations/010_especies.sql` (nuevo), `evolution/backtester.py` (nuevo), `.env.example`.
+  - **Migración 010 aplicada en producción** (Supabase) durante la sesión, antes del commit. 10 agentes activos con especie asignada.
+  - **Tests:** 13/13 intrabar/trailing verdes tras cada fase.
 
 - **2026-05-29 (Sesión 15 — auditoría estratégica completa: filtro HTF + RSI momentum + sesgo macro + backtest) · commit `bea6a9f` · en producción:**
   - **Contexto:** todas las operaciones del 29-may cerraron en pérdida. Análisis de los gráficos (EUR/USD 15m y 1h) reveló tres problemas estructurales: (1) el RSI operaba en modo sobrecompra/sobreventa, comprando en tendencias bajistas; (2) la macro siempre devolvía HOLD plano cuando no había noticias, dejando la decisión solo al técnico con señales débiles; (3) los spikes de volatilidad amplificaban la confianza sin verificar si la vela confirmaba la dirección.
