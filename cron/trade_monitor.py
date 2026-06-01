@@ -156,16 +156,23 @@ def _apply_trailing_stop(op: dict, current_price: float) -> tuple[float, float]:
     El SL nunca empeora (solo se mueve a favor del trader).
     Retorna (nuevo_sl, nuevo_extremo_favorable).
     """
-    activation_pips = op.get("trailing_activation_pips") or 0.0
+    configured_act  = op.get("trailing_activation_pips") or 0.0
     sl_actual       = op["stop_loss"]
     precio_entrada  = op["precio_entrada"]
     extremo_actual  = op.get("precio_extremo_favorable") or precio_entrada
     accion          = op["accion"]
 
-    if activation_pips <= 0:
+    if configured_act <= 0:
         return sl_actual, extremo_actual
 
-    trailing_dist = (op.get("trailing_distance_pips") or 10.0) * 0.0001
+    # Fase 0 — payoff coherente: el trailing nunca se activa antes de +1R de
+    # ganancia (R = distancia original del SL). Así un ganador jamás se recorta
+    # por debajo de break-even. Si el gen pedía una activación menor que 1R, se
+    # eleva a 1R; la distancia se acota para que el profit bloqueado sea > 0.
+    r_pips = op.get("pips_sl") or (abs(precio_entrada - sl_actual) * 10_000)
+    activation_pips = max(configured_act, r_pips)
+    dist_pips = min(op.get("trailing_distance_pips") or 10.0, 0.7 * activation_pips)
+    trailing_dist = dist_pips * 0.0001
 
     # Actualizar extremo favorable
     if accion == "BUY":
@@ -447,6 +454,7 @@ def sync_once() -> dict:
                 o.timestamp_ultima_verificacion,
                 o.precio_entrada::float AS precio_entrada,
                 o.capital_usado::float  AS capital_usado,
+                o.pips_sl::float        AS pips_sl,
                 COALESCE(o.sl_dinamico,
                     (o.decision_riesgo->>'stop_loss')::float)           AS stop_loss,
                 (o.decision_riesgo->>'take_profit')::float              AS take_profit,

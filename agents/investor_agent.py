@@ -16,8 +16,15 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from datetime import datetime, timezone
 from typing import Any
+
+# Fricción de mercado (Fase 0 — realismo): costo round-trip en pips que agrupa
+# spread + slippage. Se descuenta del P&L de toda operación BUY/SELL al cerrar.
+# Sin esto el simulador es optimista y cualquier micro-edge parece rentable.
+# Default 1.4 pips ≈ 0.8 spread retail EUR/USD + 0.6 slippage en stops de mercado.
+_FRICTION_PIPS = float(os.getenv("TRADE_FRICTION_PIPS", "1.4"))
 
 from agents.sub_agent_macro import SubAgentMacro
 from agents.sub_agent_risk import RiskDecision, SubAgentRisk
@@ -366,6 +373,13 @@ class InvestorAgent:
                 pnl = round((precio_entrada - precio_salida) / precio_entrada * capital_usado, 4)
             else:
                 pnl = 0.0
+
+            # Fricción de mercado (spread + slippage) round-trip sobre el nocional.
+            # Se aplica a BUY/SELL ganadoras y perdedoras por igual: es el costo
+            # ineludible de entrar y salir del mercado en condiciones reales.
+            if accion in ("BUY", "SELL"):
+                friccion = round(_FRICTION_PIPS * 0.0001 / precio_entrada * capital_usado, 4)
+                pnl = round(pnl - friccion, 4)
 
         # pnl_pct = retorno sobre el capital del agente (cuánto movió la cuenta este trade)
         pnl_pct       = round(pnl / capital_disponible * 100, 4) if capital_disponible > 0 else 0.0

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from dataclasses import dataclass
 from agents.base_agent import BaseAgent
 
@@ -17,7 +18,12 @@ log = logging.getLogger(__name__)
 # Hard limits inmutables — nunca se mutan genéticamente
 _RISK_PCT_MIN  = 0.01    # mínimo 1% del equity en riesgo por operación
 _RISK_PCT_MAX  = 0.02    # máximo 2% del equity en riesgo por operación
-_MIN_SL_PIPS   = 5.0     # distancia mínima para considerar SL estructural válido
+# Piso de Stop Loss (Fase 0 — realismo): un SL por debajo de este umbral queda
+# dentro del ruido normal de las velas de 1m con que el monitor verifica los
+# niveles, por lo que es estadísticamente imposible que sobreviva. Subido de
+# 5→10 pips. No empeora el riesgo: position sizing escala inverso a sl_pips, así
+# que un SL mayor produce un nocional menor con el mismo 1–2% de riesgo.
+_MIN_SL_PIPS   = float(os.getenv("MIN_SL_PIPS", "10.0"))  # distancia mínima de SL válido
 _MAX_LEVERAGE  = 50.0    # techo de apalancamiento (nocional ≤ equity × 50)
 _UNITS_PER_LOT = 1000.0  # unidades EUR por lote micro (referencia pip_value)
 
@@ -151,8 +157,8 @@ class SubAgentRisk(BaseAgent):
             atr_factor = float(self.params_smc.get("atr_factor",
                                self.params.get("atr_factor", 1.5)))
             if atr > 0:
-                dist = max(atr * atr_factor, 0.0005)   # mín 5 pips
-                dist = min(dist, 0.0050)               # máx 50 pips
+                dist = max(atr * atr_factor, _MIN_SL_PIPS * 0.0001)  # piso = _MIN_SL_PIPS
+                dist = min(dist, 0.0050)                             # máx 50 pips
                 sl_precio = (
                     round(precio - dist, 5) if accion == "BUY"
                     else round(precio + dist, 5)
