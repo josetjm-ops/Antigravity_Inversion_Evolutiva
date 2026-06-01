@@ -1080,35 +1080,86 @@ class EvolutionEngine:
             # reproducir agentes que aún no han probado su rendimiento.
             parent_candidates = parent_pool
 
+            # ── Fase 3: descargar datos de backtest UNA VEZ para todos los hijos ──
+            # Si Yahoo Finance no está disponible, se degrada a crianza sin backtest.
+            backtest_data = None
+            use_backtest  = False
+            if eliminated:
+                try:
+                    from evolution.backtester import fetch_backtest_data, run_backtest, N_CANDIDATE_CHILDREN
+                    backtest_data = fetch_backtest_data()
+                    use_backtest  = True
+                    import logging as _lg
+                    _lg.getLogger(__name__).info(
+                        "[EvolutionEngine] Backtest habilitado: %d candidatos/slot.",
+                        N_CANDIDATE_CHILDREN,
+                    )
+                except Exception as _exc:
+                    import logging as _lg
+                    _lg.getLogger(__name__).warning(
+                        "[EvolutionEngine] Backtest no disponible (%s) — crianza sin preselección.",
+                        _exc,
+                    )
+
             for i, elim in enumerate(eliminated):
                 # El hijo hereda la especie del eliminado: sustituye como-por-como.
-                # Así la distribución de especies se mantiene ciclo a ciclo.
                 child_especie = str(elim.get("especie") or "tendencia")
 
                 # Prefiere padres de la misma especie para cruzar genes coherentes.
-                # Si no hay suficientes de la especie, usa todo el pool.
                 same_species = [a for a in parent_candidates
                                 if str(a.get("especie") or "tendencia") == child_especie]
                 pool = same_species if len(same_species) >= 2 else parent_candidates
 
-                # Selección por fitness (Fase 1): usa expectancy neta, no ROI crudo.
-                # Agentes con < MIN_SAMPLE_TRADES tienen fitness ≈ 0 → raramente seleccionados.
-                # max(0.0001, ...) evita pesos negativos de agentes con fitness negativo.
+                # Selección por fitness (Fase 1): expectancy neta, no ROI crudo.
                 scores = [max(float(a.get("fitness_score", 0) or 0), 0.0001) for a in pool]
                 total_score = sum(scores)
                 weights = [s / total_score for s in scores]
-                p1, p2 = random.choices(pool, weights=weights, k=2)
-                # Garantiza padres distintos si hay suficientes
-                if p1["id"] == p2["id"] and len(pool) > 1:
-                    others = [a for a in pool if a["id"] != p1["id"]]
-                    p2 = random.choice(others)
+
+                def _select_parents():
+                    p1_, p2_ = random.choices(pool, weights=weights, k=2)
+                    if p1_["id"] == p2_["id"] and len(pool) > 1:
+                        p2_ = random.choice([a for a in pool if a["id"] != p1_["id"]])
+                    return p1_, p2_
 
                 child_id = f"{self.today.strftime('%Y-%m-%d')}_{next_idx + i:02d}"
-                child = breed_agent(
-                    p1, p2, child_id, self.today, max_gen + 1,
-                    sigma_weights=sw, sigma_periods=sp, sigma_risk=sr,
-                    especie=child_especie,
-                )
+
+                if use_backtest and backtest_data is not None:
+                    # ── Torneo de N candidatos: criar N, desplegar el mejor OOS ──
+                    candidates: list[tuple[dict, dict]] = []
+                    for _c in range(N_CANDIDATE_CHILDREN):
+                        p1, p2 = _select_parents()
+                        candidate = breed_agent(
+                            p1, p2, child_id, self.today, max_gen + 1,
+                            sigma_weights=sw, sigma_periods=sp, sigma_risk=sr,
+                            especie=child_especie,
+                        )
+                        try:
+                            bt = run_backtest(backtest_data, candidate)
+                        except Exception as _e:
+                            import logging as _lg
+                            _lg.getLogger(__name__).warning(
+                                "[EvolutionEngine] Backtest candidato %s falló: %s", child_id, _e
+                            )
+                            bt = {"fitness": 0.0, "expectancy": 0.0, "n_trades": 0}
+                        candidates.append((candidate, bt))
+
+                    # Elegir el candidato con mayor fitness OOS
+                    child, best_bt = max(candidates, key=lambda x: x[1]["fitness"])
+                    import logging as _lg
+                    _lg.getLogger(__name__).info(
+                        "[EvolutionEngine] Slot %s (%s): %d candidatos → "
+                        "mejor OOS fitness=%.5f expectancy=%.5f n=%d",
+                        child_id, child_especie, len(candidates),
+                        best_bt["fitness"], best_bt["expectancy"], best_bt["n_trades"],
+                    )
+                else:
+                    p1, p2 = _select_parents()
+                    child = breed_agent(
+                        p1, p2, child_id, self.today, max_gen + 1,
+                        sigma_weights=sw, sigma_periods=sp, sigma_risk=sr,
+                        especie=child_especie,
+                    )
+
                 new_agents.append(child)
 
             result.new_agents = new_agents
