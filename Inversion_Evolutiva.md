@@ -25,7 +25,7 @@
 
 ## 1. Objetivo del sistema
 
-**Inversión Evolutiva** es un laboratorio de trading algorítmico que aplica algoritmos genéticos al mercado de divisas EUR/USD. El sistema mantiene una población de 10 agentes de software que compiten entre sí para determinar cuáles estrategias de trading son más rentables ajustadas al riesgo.
+**Inversión Evolutiva** es un laboratorio de trading algorítmico que aplica algoritmos genéticos al mercado de divisas EUR/USD. El sistema mantiene una población de **15 agentes** de software (5 por cada uno de los 3 arquetipos estratégicos) que compiten entre sí para determinar cuáles estrategias de trading son más rentables ajustadas al riesgo.
 
 Los agentes **no son configurados manualmente**: nacen con parámetros aleatorios o heredados, operan de forma autónoma durante el día y cada tarde son evaluados. Los peores son eliminados y los mejores reproducen descendencia con mutaciones estocásticas. Con el tiempo, la población converge hacia estrategias más eficientes sin intervención humana.
 
@@ -90,7 +90,7 @@ Los agentes **no son configurados manualmente**: nacen con parámetros aleatorio
 │  │  TradeMonitor    │       │  Agente Juez         │            │
 │  │  - Verifica SL/TP│       │  - Evalúa fitness    │            │
 │  │  - Trailing stop │       │  - Elimina bottom 5  │            │
-│  │  - Abre pos. new │       │  - Crea 5 hijos      │            │
+│  │  - Abre pos. new │       │  - Crea hasta 9 hijos│            │
 │  └────────┬─────────┘       │  - Redistribuye cap. │            │
 │           │                 │  - Razona con LLM    │            │
 │           │                 └──────────┬───────────┘            │
@@ -211,9 +211,9 @@ La especie es **inmutable por mutación gaussiana**: el hijo hereda siempre la e
 
 ### Capital
 
-- **Capital inicial:** $10 USD por agente ($100 USD total en el pool).
+- **Capital inicial:** $10 USD por agente en la Generación 1 ($100 USD total). Al expandir la población a 15 agentes (Sesión 16), el pool se redistribuyó: **$6.5757 por agente** (~$98.64 total).
 - **Capital actual:** fluctúa con el P&L de cada operación.
-- **Redistribución diaria:** al final de cada ciclo evolutivo el Juez suma el pool total y lo divide en partes iguales entre los 10 agentes activos. El mérito individual es lo único que determina la supervivencia, no el capital acumulado.
+- **Redistribución diaria:** al final de cada ciclo evolutivo el Juez suma el pool total y lo divide en partes iguales entre los 15 agentes activos. El mérito individual es lo único que determina la supervivencia, no el capital acumulado.
 
 ---
 
@@ -545,7 +545,7 @@ Para que esto funcione en la "ventana ciega" de 03:30 – 06:30 UTC (11pm – 1:
      - Se ordenan por (fitness ASC, fecha_nacimiento ASC, id ASC)
        → primeros candidatos son veteranos rezagados.
      - Solo eliminables los que tienen fitness_score <= 0.
-     - n_eliminate = min(N_ELIMINATE=5, len(eliminables))
+     - n_eliminate = min(N_ELIMINATE=9, len(eliminables))  ← máx. 3 por especie × 3 especies
 
    Protección de diversidad de especies (Fase 2): nunca se elimina un agente
    si hacerlo bajaría su especie (tendencia/reversion/ruptura) por debajo de
@@ -760,11 +760,13 @@ INSERT INTO agentes (
 
 ### Eliminación con cuota dinámica
 
-La cuota de eliminación deja de ser rígida (5 agentes fijos por día). Cada tarde el motor calcula cuántos agentes salen, **con un máximo de N_ELIMINATE (default 5) y un mínimo de 0**, aplicando dos salvaguardas:
+La cuota de eliminación no es rígida. Cada tarde el motor calcula cuántos agentes salen, **con un máximo de N_ELIMINATE (default 9 = 3 por especie × 3 especies) y un mínimo de 0**, aplicando tres salvaguardas:
 
-**Salvaguarda 1 — Periodo de Gracia Operativa:** los agentes con `operaciones_total == 0` y edad < `GRACE_PERIOD_DAYS` días hábiles quedan inmunes esa tarde.
+**Salvaguarda 1 — Periodo de Gracia / Muestra mínima:** los agentes con `operaciones_total == 0` y edad < `GRACE_PERIOD_DAYS` días hábiles, o con `n_trades < MIN_SAMPLE_TRADES` (15), quedan inmunes esa tarde.
 
 **Salvaguarda 2 — Protección de fitness positivo:** solo son eliminables los agentes elegibles con `fitness_score <= 0` (negativo o cero). Un veterano rentable nunca se elimina solo para cumplir la cuota.
+
+**Salvaguarda 3 — Diversidad de especies:** nunca se elimina un agente si hacerlo bajaría su especie por debajo de `MIN_AGENTS_PER_ESPECIE` (default 2). Con 5 agentes por especie, el máximo eliminable por especie es 3.
 
 **Orden de eliminación (desempate generalizado):** los candidatos elegibles se ordenan por `(fitness_score ASC, fecha_nacimiento ASC, id ASC)`. Eso significa que ante empate de fitness, los **veteranos rezagados** salen primero y los **agentes jóvenes** se preservan — un complemento simétrico al desempate del ranking de supervivencia.
 
@@ -772,8 +774,8 @@ La cuota de eliminación deja de ser rígida (5 agentes fijos por día). Cada ta
 
 | Escenario | Eliminados | Nacimientos | Razón |
 |---|---|---|---|
-| Día normal con veteranos negativos | 1 a 5 | igual número | Bottom por fitness, hasta el tope dinámico |
-| Día de HOLD generalizado | 0 | 0 | Todos los activos están en Periodo de Gracia |
+| Día normal con veteranos negativos | 1 a 9 | igual número | Bottom por fitness, respetando máx 3/especie |
+| Día de HOLD generalizado | 0 | 0 | Todos los activos están en inmunidad/gracia |
 | Veteranos rentables protegidos | 0 | 0 | Todos los elegibles tienen fitness > 0 |
 
 **SQL de la eliminación:**
@@ -962,7 +964,7 @@ Hall of Fame: parámetros de agentes que superaron el umbral `MIN_ROI_FOR_HALL_O
 
 | Pestaña | Contenido |
 |---|---|
-| **Poblacion** | Tabla de ranking en vivo, KPIs: ROI top, win rate, pool total |
+| **Poblacion** | Tabla de ranking en vivo, KPIs: ROI top, win rate, pool total. Toggle **"Por especie"** para ver los 15 agentes agrupados en 3 secciones (tendencia / reversión / ruptura) con stats de grupo. |
 | **Evolucion** | Curvas de supervivencia por generación, árbol genealógico, heatmap de fitness |
 | **Agente Juez** | Log diario del Juez: veredictos coloreados (eliminacion/nacimiento/supervivencia) |
 | **Operaciones** | Historial de trades: filtros por agente, distribución de P&L, win/loss |
@@ -1135,7 +1137,7 @@ Todas las variables se definen en `.env` local (desarrollo) o en **GitHub Secret
 | `JUDGE_RUN_TIME` | Hora de ejecución del Juez en zona local (default: `23:00`) |
 | `TRADING_START_TIME_UTC` | Hora UTC desde la que se permite abrir posiciones, formato HH:MM (default: `06:30` = 1:30 am Bogotá) |
 | `TRADING_CUTOFF_TIME_UTC` | Hora UTC límite para abrir posiciones, formato HH:MM (default: `04:00` = 11:00 pm Bogotá; ventana cruza la medianoche UTC) |
-| `AGENTS_ELIMINATE_PER_CYCLE` | Agentes eliminados por ciclo (default: `5`) |
+| `AGENTS_ELIMINATE_PER_CYCLE` | Agentes eliminados por ciclo. Default: `9` (3 por especie × 3 especies). Con `MIN_AGENTS_PER_ESPECIE=2` y 5 agentes/especie el cap real por especie es 3. |
 | `MUTATION_SIGMA_WEIGHTS` | Sigma de mutación para pesos (default: `0.05`) |
 | `MUTATION_SIGMA_PERIODS` | Sigma de mutación para períodos (default: `0.08`) |
 | `MUTATION_SIGMA_RISK` | Sigma de mutación para riesgo/SMC (default: `0.10`) |
@@ -1177,7 +1179,7 @@ Cada 15 min de 1:30am a 10:30pm:
              mercado (force-close-all). Buffer de 15 min hasta el Juez.
 
 11:00pm  ─── judge_daily continúa (paso 2):
-             1. Evaluación de fitness: Calmar Ratio Proxy para 10 agentes
+             1. Evaluación de fitness: Expectancy ajustada para 15 agentes
              2. Filtro de Periodo de Gracia: separar inmunes de elegibles
              3. Cuota dinámica: identificar elegibles con fitness <= 0
 
@@ -1222,15 +1224,17 @@ Carpeta con utilidades que se ejecutan de forma puntual (no automática). No se 
 
 | Script | Propósito | Cuándo usarlo |
 |---|---|---|
-| `seed_gen1.py` | Crea 10 agentes Generación 1 con parámetros por defecto y $10 c/u (pool inicial $100). | Una sola vez al migrar a una nueva BD vacía. Editar la constante `HOY` antes de ejecutar. |
-| `diversify_gen1.py` | Aplica mutación gaussiana individualizada a los 10 agentes activos para darles ADN propio (σ elevada). | Cuando los 10 agentes tienen params idénticos (típicamente justo después de un seed) y el motor evolutivo queda bloqueado por falta de fitness diferencial. |
+| `seed_gen1.py` | Crea 10 agentes Generación 1 con parámetros por defecto y $10 c/u (pool inicial $100). | Una sola vez al migrar a una nueva BD vacía. |
+| `seed_15_agents.py` | Expande la población de 10 a 15 agentes (5 por especie). Cría 5 nuevos usando `breed_agent()` con padres de la misma especie y redistribuye el pool entre los 15. Sincroniza Google Sheets. Soporta `--dry-run`. | Ejecutado el 2026-06-02 para pasar de 10 a 15 agentes activos. Usar si se hace un reset y hay que volver a 5/especie. |
+| `diversify_gen1.py` | Aplica mutación gaussiana individualizada a los agentes activos para darles ADN propio (σ elevada). | Cuando todos los agentes tienen params idénticos y el motor evolutivo queda bloqueado por falta de fitness diferencial. |
 | `recompute_pnl.py` | Recalcula `pnl`, `capital_usado` (nocional USD) y `pnl_porcentaje` para todas las ops cerradas que tenían `capital_usado` en lotes (convención anterior al commit `6572c11`). Reconstruye `capital_actual` y `roi_total` de los agentes. | **Ya ejecutado** el 2026-05-20. Solo necesario si se detectan operaciones históricas con `capital_usado` < 1.0 (indicativo de lotes en vez de USD). |
 | `backtest_estrategia.py` | Backtest determinista walk-forward sobre datos históricos de Yahoo Finance. Replica el pipeline Técnico → Macro → Riesgo vela por vela con el LLM neutralizado (ruta heurística pura). Calcula PnL, win-rate, drawdown y Calmar Ratio. Soporta genes reales desde DB (`--agent-id`), rango configurable (`--range`) y desglose por día (`--dia`). | Validar cambios de estrategia antes del deploy. Usar `--range 1mo` como referencia estándar. |
 
 Comando para ejecutar:
 ```bash
 python scripts/seed_gen1.py        # nueva BD vacía → 10 agentes Gen1
-python scripts/diversify_gen1.py   # diversifica ADN de los 10 activos
+python scripts/seed_15_agents.py   # expande 10 → 15 agentes (5/especie)
+python scripts/diversify_gen1.py   # diversifica ADN de los agentes activos
 ```
 
 Ambos requieren `.env` cargado con `DATABASE_URL` válido (Supabase Transaction Pooler).
@@ -1271,7 +1275,7 @@ Antigravity_Inversion_Evolutiva/
 │   ├── data.py
 │   └── logo.png
 ├── mobile-app/                  Next.js (app complementaria, Vercel)
-├── scripts/                     Utilidades manuales (seed_gen1, diversify_gen1, backtest_estrategia)
+├── scripts/                     Utilidades manuales (seed_gen1, seed_15_agents, diversify_gen1, backtest_estrategia)
 ├── tests/                       pytest (pipeline + evolution + intra-bar SL/TP)
 ├── utils/
 │   ├── sheets_logger.py         (gspread: trazabilidad en Google Sheets)
@@ -1291,9 +1295,15 @@ Antigravity_Inversion_Evolutiva/
 
 ---
 
-*Documento actualizado el 2026-06-01 (Sesión 16 — auditoría extrema + rediseño evolutivo completo: Fase 0 realismo de mercado, Fase 1 integridad evolutiva, Fase 2 diversidad por especies + filtro de régimen ADX, Fase 3 backtest walk-forward + torneo de candidatos). Commits `83f08ef` → `29238c7` pusheados a `origin/master`.*
+*Documento actualizado el 2026-06-02 (Sesión 16 completa — Fases 0-3 + 15 agentes 5/especie + N_ELIMINATE=9 + vista por especie en ambos dashboards). Commits `83f08ef` → `0b15d72` pusheados a `origin/master`.*
 
 ## Historial de cambios mayores
+
+- **2026-06-02 (Sesión 16 continuación — 15 agentes, cuota por especie, vista agrupada en dashboards) · commit `0b15d72` · en producción:**
+  - **Expansión de población a 15 agentes (5 por especie):** `scripts/seed_15_agents.py` cría 5 nuevos agentes (1 tendencia + 2 reversion + 2 ruptura) usando `breed_agent()` con los mejores padres de cada especie; redistribuye el pool de $98.64 entre los 15 activos ($6.5757/agente). Incluye `--dry-run` para validar antes de ejecutar. Google Sheets sincronizado. Resultado: distribución exacta 5/5/5.
+  - **N_ELIMINATE 5 → 9:** máximo 3 eliminaciones por especie × 3 especies = 9 total. Con `MIN_AGENTS_PER_ESPECIE=2` y 5 agentes/especie, la protección garantiza que nunca se eliminen más de 3 de ninguna especie en un ciclo.
+  - **Vista agrupada por especie — Streamlit (`dashboard/app.py`, `dashboard/data.py`):** `fetch_agents()` incluye columna `especie`. Toggle "Por especie" en tab Población: vista agrupada con header de color por especie (emoji, n agentes, fitness medio, ROI medio, capital medio) + tabla y vista plana con columna Especie visible.
+  - **Vista agrupada por especie — App móvil (`mobile-app/app/api/dashboard/route.js`, `mobile-app/app/page.js`):** query `activeAgents` incluye `COALESCE(a.especie,'tendencia')`. `RankingList` refactorizado en `AgentRow`, `AgentCard` y `SpeciesGroup` independientes. Botón toggle "Agrupar por especie" (inactivo por defecto). Vista plana con columna Especie con emoji y color. Deploy a Vercel forzado manualmente (`npx vercel --prod`) al no detectarse automáticamente el push del subdirectorio.
 
 - **2026-06-01 (Sesión 16 — auditoría extrema + rediseño evolutivo completo: Fases 0-3) · commits `83f08ef` → `29238c7` · en producción:**
   - **Contexto:** auditoría cuantitativa reveló esperanza matemática estructuralmente negativa (−0.95%/op medida sobre 361 trades en 12 días). El día de la auditoría (01-jun) registró 9/9 operaciones cerradas en pérdida, todas exactamente en el Stop Loss. Causas identificadas: (1) stops de 5 pips barridos por ruido de velas de 1m; (2) trailing/EOD cortaban ganadores, perdedores corrían al SL completo (R:R real 0.67 vs 2.0 objetivo); (3) tres indicadores colineales (RSI-momentum + EMA + MACD) = un solo factor de momentum → selección adversa en rango; (4) 10 agentes 100% correlacionados = 1 apuesta repetida 10 veces; (5) simulador sin fricción sobreestimaba rendimiento.

@@ -1187,17 +1187,18 @@ def _tab_instructions() -> None:
           💰 Pool de capital compartido — Igualdad de condiciones cada día
         </div>
         <div class="ins-body">
-          El sistema arrancó con <b>$100 USD virtuales</b> divididos en partes iguales:
-          <b>$10 por agente</b>. A partir del primer día, ese pool fluctúa únicamente por
-          las ganancias y pérdidas reales de trading — no se inyecta ni retira capital externo.<br><br>
+          El sistema arrancó con <b>$100 USD virtuales</b> divididos en 10 partes iguales.
+          Al expandirse a <b>15 agentes (5 por especie)</b> el pool se redistribuyó:
+          <b>≈$6.58 por agente</b>. A partir de ese momento, el pool fluctúa únicamente
+          por las ganancias y pérdidas reales de trading — no se inyecta ni retira capital externo.<br><br>
           Al cierre de cada jornada (<b>11:00 pm Bogotá, lunes a viernes</b>), tras el ciclo
-          evolutivo, el sistema suma el <code>capital_actual</code> de los 10 agentes activos
+          evolutivo, el sistema suma el <code>capital_actual</code> de los 15 agentes activos
           resultantes y lo divide en partes iguales. <b>Todos los agentes inician el día
-          siguiente con exactamente el mismo capital</b>, independientemente de si ganaron,
-          perdieron o fueron recién creados.<br><br>
+          siguiente con exactamente el mismo capital</b>, independientemente de su especie,
+          generación o si ganaron, perdieron o fueron recién creados.<br><br>
           Esto garantiza que la competencia sea <em>puramente estratégica</em>: ningún agente
-          llega al día siguiente con ventaja de capital por haber tenido suerte el día anterior.
-          El único mérito que importa es la calidad de la estrategia, medida día a día.
+          llega al día siguiente con ventaja de capital. El único mérito que importa
+          es la calidad de la estrategia.
         </div>
       </div>
     </div>
@@ -1354,9 +1355,10 @@ def _tab_instructions() -> None:
             <b>Cuota dinámica + muestra mínima + protección de especies</b> —
             Son <b>inmunes</b> (no elegibles para eliminación): agentes con &lt; 15 trades
             cerrados (muestra insuficiente) o recién nacidos sin operaciones.
-            Solo son eliminables los elegibles con <b>fitness ≤ 0</b>. Máximo 5 por día.
-            <b>Protección de diversidad:</b> nunca se elimina un agente si bajaría su
-            especie (tendencia/reversion/ruptura) por debajo de 2 agentes activos.
+            Solo son eliminables los elegibles con <b>fitness ≤ 0</b>.
+            Máximo <b>9 por día</b> (3 por especie × 3 especies).
+            <b>Protección de diversidad:</b> con 5 agentes por especie y mínimo 2,
+            el máximo real por especie es 3 — ninguna especie puede colapsar en un solo ciclo.
           </div>
         </div>
         <div class="ins-step">
@@ -1382,7 +1384,7 @@ def _tab_instructions() -> None:
           <div class="ins-step-num">5</div>
           <div class="ins-step-text">
             <b>Redistribución igualitaria de capital</b> — Se suma el <code>capital_actual</code>
-            de los 10 agentes activos resultantes y se divide en partes iguales.
+            de los 15 agentes activos resultantes y se divide en partes iguales.
             Todos inician el día siguiente con <b>exactamente el mismo capital</b>.
           </div>
         </div>
