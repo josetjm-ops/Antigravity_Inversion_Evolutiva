@@ -99,6 +99,7 @@ export async function GET() {
              a.capital_actual::float, a.roi_total::float,
              a.operaciones_total, a.operaciones_ganadoras,
              a.padre_1_id, a.padre_2_id,
+             COALESCE(a.especie, 'tendencia') AS especie,
              CASE WHEN a.operaciones_total > 0
                   THEN ROUND(a.operaciones_ganadoras::numeric / a.operaciones_total * 100, 2)::float
                   ELSE 0 END AS win_rate_pct,

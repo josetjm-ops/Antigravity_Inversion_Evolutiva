@@ -466,6 +466,13 @@ def _kpis(df_active: pd.DataFrame, df_all: pd.DataFrame) -> None:
 # ═══════════════════════════════════════════════════════════════════════════════
 # TAB 1 — POBLACIÓN
 # ═══════════════════════════════════════════════════════════════════════════════
+_ESPECIE_META = {
+    "tendencia": {"emoji": "📈", "color": "#d4af37", "label": "Tendencia"},
+    "reversion": {"emoji": "↔️",  "color": "#00c878", "label": "Reversión"},
+    "ruptura":   {"emoji": "💥", "color": "#e8a020", "label": "Ruptura"},
+}
+
+
 def _tab_population(df: pd.DataFrame) -> None:
     if df.empty:
         st.info("No hay agentes con los filtros seleccionados.")
@@ -476,36 +483,105 @@ def _tab_population(df: pd.DataFrame) -> None:
                     config={"displayModeBar": False})
 
     st.markdown("<br>", unsafe_allow_html=True)
-    st.markdown('<span class="ie-label">Rankings de Agentes</span>', unsafe_allow_html=True)
+
+    # ── Toggle de vista ──────────────────────────────────────────────────────
+    col_label, col_toggle = st.columns([4, 1])
+    with col_label:
+        st.markdown('<span class="ie-label">Rankings de Agentes</span>',
+                    unsafe_allow_html=True)
+    with col_toggle:
+        agrupar = st.toggle("Por especie", value=False, key="pop_group_by_especie")
 
     _fitness_col = ["fitness_score"] if "fitness_score" in df.columns else []
-    disp = df[[
-        "id", "generacion", "estado", *_fitness_col, "roi_total", "capital_actual",
-        "operaciones_total", "win_rate_pct", "padre_1_id", "fecha_nacimiento",
-    ]].copy()
-    disp.columns = [
-        "ID Agente", "Gen", "Estado", *( ["Fitness"] if _fitness_col else []),
-        "ROI %", "Capital ($)", "Ops", "Win Rate %", "Padre Principal", "Nacimiento",
-    ]
-    disp["ROI %"]       = disp["ROI %"].round(4)
-    disp["Capital ($)"] = disp["Capital ($)"].round(4)
-    if "Fitness" in disp.columns:
-        disp["Fitness"] = disp["Fitness"].round(4)
+    has_especie  = "especie" in df.columns
 
-    st.dataframe(
-        disp,
-        use_container_width=True,
-        height=min(400, len(disp) * 36 + 60),
-        column_config={
-            "Fitness":     st.column_config.NumberColumn(format="%.4f"),
-            "ROI %":       st.column_config.NumberColumn(format="%.4f %%"),
-            "Capital ($)": st.column_config.NumberColumn(format="$%.4f"),
-            "Win Rate %":  st.column_config.ProgressColumn(
-                format="%.1f %%", min_value=0, max_value=100,
-            ),
-        },
-        hide_index=True,
-    )
+    col_cfg = {
+        "Fitness":     st.column_config.NumberColumn(format="%.4f"),
+        "ROI %":       st.column_config.NumberColumn(format="%.4f %%"),
+        "Capital ($)": st.column_config.NumberColumn(format="$%.4f"),
+        "Win Rate %":  st.column_config.ProgressColumn(
+            format="%.1f %%", min_value=0, max_value=100),
+    }
+
+    if agrupar and has_especie:
+        # ── Vista agrupada por especie ────────────────────────────────────
+        for especie in ["tendencia", "reversion", "ruptura"]:
+            meta  = _ESPECIE_META.get(especie, {"emoji": "•", "color": GOLD, "label": especie})
+            grupo = df[df["especie"] == especie].copy()
+            if grupo.empty:
+                continue
+
+            n_ag   = len(grupo)
+            fit_m  = grupo["fitness_score"].mean() if "fitness_score" in grupo.columns else 0.0
+            roi_m  = grupo["roi_total"].mean()
+            cap_m  = grupo["capital_actual"].mean()
+
+            st.markdown(f"""
+            <div style="margin:18px 0 8px 0;padding:10px 16px;
+                        border-left:3px solid {meta['color']};
+                        background:rgba(255,255,255,0.03);border-radius:0 8px 8px 0;">
+              <span style="font-size:15px;font-weight:800;color:{meta['color']};
+                           letter-spacing:1px;">
+                {meta['emoji']} {meta['label'].upper()}
+              </span>
+              <span style="font-size:11px;color:{DIM};margin-left:14px;">
+                {n_ag} agentes &nbsp;·&nbsp;
+                Fitness medio: <b style="color:{meta['color']};">{fit_m:+.4f}</b> &nbsp;·&nbsp;
+                ROI medio: <b style="color:{meta['color']};">{roi_m:+.4f}%</b> &nbsp;·&nbsp;
+                Capital medio: <b style="color:{meta['color']};">${cap_m:.4f}</b>
+              </span>
+            </div>
+            """, unsafe_allow_html=True)
+
+            disp = grupo[[
+                "id", "generacion", "estado", *_fitness_col, "roi_total",
+                "capital_actual", "operaciones_total", "win_rate_pct",
+                "padre_1_id", "fecha_nacimiento",
+            ]].copy()
+            disp.columns = [
+                "ID Agente", "Gen", "Estado",
+                *(["Fitness"] if _fitness_col else []),
+                "ROI %", "Capital ($)", "Ops", "Win Rate %",
+                "Padre Principal", "Nacimiento",
+            ]
+            disp["ROI %"]       = disp["ROI %"].round(4)
+            disp["Capital ($)"] = disp["Capital ($)"].round(4)
+            if "Fitness" in disp.columns:
+                disp["Fitness"] = disp["Fitness"].round(4)
+
+            st.dataframe(disp, use_container_width=True,
+                         height=min(280, len(disp) * 36 + 60),
+                         column_config=col_cfg, hide_index=True)
+    else:
+        # ── Vista plana original ──────────────────────────────────────────
+        base_cols = ["id", "generacion", "estado", *_fitness_col,
+                     "roi_total", "capital_actual", "operaciones_total",
+                     "win_rate_pct", "padre_1_id", "fecha_nacimiento"]
+        if has_especie:
+            base_cols = ["id", "generacion", "especie", "estado", *_fitness_col,
+                         "roi_total", "capital_actual", "operaciones_total",
+                         "win_rate_pct", "padre_1_id", "fecha_nacimiento"]
+        disp = df[base_cols].copy()
+        disp.columns = [
+            "ID Agente", "Gen",
+            *( ["Especie"] if has_especie else []),
+            "Estado",
+            *(["Fitness"] if _fitness_col else []),
+            "ROI %", "Capital ($)", "Ops", "Win Rate %",
+            "Padre Principal", "Nacimiento",
+        ]
+        disp["ROI %"]       = disp["ROI %"].round(4)
+        disp["Capital ($)"] = disp["Capital ($)"].round(4)
+        if "Fitness" in disp.columns:
+            disp["Fitness"] = disp["Fitness"].round(4)
+
+        st.dataframe(
+            disp,
+            use_container_width=True,
+            height=min(600, len(disp) * 36 + 60),
+            column_config=col_cfg,
+            hide_index=True,
+        )
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

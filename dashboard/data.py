@@ -74,6 +74,7 @@ def fetch_agents(
             a.roi_total, a.operaciones_total, a.operaciones_ganadoras,
             a.padre_1_id, a.padre_2_id,
             a.fecha_eliminacion, a.razon_eliminacion,
+            COALESCE(a.especie, 'tendencia') AS especie,
             CASE WHEN a.operaciones_total > 0
                  THEN ROUND(a.operaciones_ganadoras::numeric / a.operaciones_total * 100, 2)
                  ELSE 0 END AS win_rate_pct,
@@ -102,6 +103,7 @@ def fetch_agents(
         "operaciones_total", "operaciones_ganadoras",
         "padre_1_id", "padre_2_id",
         "fecha_eliminacion", "razon_eliminacion",
+        "especie",
         "win_rate_pct", "created_at", "fitness_score",
     ]
     df = _coerce(pd.DataFrame(rows, columns=cols))

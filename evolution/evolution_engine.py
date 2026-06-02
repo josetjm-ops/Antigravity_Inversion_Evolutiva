@@ -30,7 +30,7 @@ from utils.sheets_logger import SheetsLogger
 load_dotenv()
 
 # ── Configuración desde .env ─────────────────────────────────────────────────
-N_ELIMINATE = int(os.getenv("AGENTS_ELIMINATE_PER_CYCLE", "5"))
+N_ELIMINATE = int(os.getenv("AGENTS_ELIMINATE_PER_CYCLE", "9"))  # 3 por especie × 3 especies
 
 SIGMA_WEIGHTS = float(os.getenv("MUTATION_SIGMA_WEIGHTS", "0.05"))
 SIGMA_PERIODS = float(os.getenv("MUTATION_SIGMA_PERIODS", "0.08"))

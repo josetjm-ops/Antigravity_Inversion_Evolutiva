@@ -288,80 +288,173 @@ function PriceChart({ market, operations }) {
   );
 }
 
-function RankingList({ agents }) {
-  if (!agents?.length) return <EmptyState>No hay agentes activos.</EmptyState>;
+// Metadatos por especie
+const ESPECIE_META = {
+  tendencia: { emoji: "📈", color: "#d4af37", label: "Tendencia" },
+  reversion: { emoji: "↔️",  color: "#00c878", label: "Reversión" },
+  ruptura:   { emoji: "💥", color: "#e8a020", label: "Ruptura"   },
+};
+
+function AgentRow({ agt, idx }) {
+  const positive = Number(agt.roi_total || 0) >= 0;
+  const winRate  = Number(agt.win_rate_pct || 0);
+  const meta     = ESPECIE_META[agt.especie] || { emoji: "•", color: "#888", label: agt.especie || "—" };
   return (
-    <div className="ranking-table-wrap">
+    <tr key={agt.id}>
+      <td className="mono strong">{agt.id}</td>
+      <td>{agt.generacion}</td>
+      <td>
+        <span style={{ color: meta.color, fontWeight: 700, fontSize: "11px" }}>
+          {meta.emoji} {meta.label}
+        </span>
+      </td>
+      <td><span className={`status-badge ${agt.estado}`}>{agt.estado}</span></td>
+      <td className="mono">{Number(agt.fitness_score || 0).toFixed(4)}</td>
+      <td className={positive ? "emerald mono" : "red mono"}>{positive ? "+" : ""}{Number(agt.roi_total || 0).toFixed(4)} %</td>
+      <td className="mono">{money(agt.capital_actual, 4)}</td>
+      <td className="mono">{agt.operaciones_total || 0}</td>
+      <td>
+        <div className="win-cell">
+          <div className="win-track">
+            <span style={{ width: `${Math.max(0, Math.min(100, winRate))}%` }} />
+          </div>
+          <strong className="mono">{winRate.toFixed(1)} %</strong>
+        </div>
+      </td>
+    </tr>
+  );
+}
+
+function AgentCard({ agt, idx }) {
+  const positive = Number(agt.roi_total || 0) >= 0;
+  const winRate  = Number(agt.win_rate_pct || 0);
+  const meta     = ESPECIE_META[agt.especie] || { emoji: "•", color: "#888", label: agt.especie || "—" };
+  return (
+    <article className="agent-card" key={agt.id}>
+      <div className="rank-pill">#{idx + 1}</div>
+      <div className="agent-info">
+        <div className="agent-gen">
+          GEN {agt.generacion}&nbsp;&nbsp;
+          <span style={{ color: meta.color, fontWeight: 700, fontSize: "10px" }}>
+            {meta.emoji} {meta.label}
+          </span>
+        </div>
+        <div className="agent-id">{agt.id}</div>
+        <div className="agent-stats">
+          <span className={`status-badge ${agt.estado}`}>{agt.estado}</span>
+          <span className={positive ? "emerald" : "red"}>{positive ? "+" : ""}{Number(agt.roi_total || 0).toFixed(4)} %</span>
+          <span>{money(agt.capital_actual, 4)}</span>
+          <span>Ops {agt.operaciones_total || 0}</span>
+          <span>WR {pct(winRate)}</span>
+        </div>
+        <div className="mobile-win">
+          <div className="win-track">
+            <span style={{ width: `${Math.max(0, Math.min(100, winRate))}%` }} />
+          </div>
+        </div>
+      </div>
+      <div className="agent-fitness">
+        <div className="fitness-label">Fitness</div>
+        <div className="fitness-value">{Number(agt.fitness_score || 0).toFixed(4)}</div>
+      </div>
+    </article>
+  );
+}
+
+function SpeciesGroup({ especie, agents }) {
+  const meta    = ESPECIE_META[especie] || { emoji: "•", color: "#888", label: especie };
+  const fitMean = agents.reduce((s, a) => s + Number(a.fitness_score || 0), 0) / agents.length;
+  const roiMean = agents.reduce((s, a) => s + Number(a.roi_total    || 0), 0) / agents.length;
+  const capMean = agents.reduce((s, a) => s + Number(a.capital_actual || 0), 0) / agents.length;
+  const fitPositive = fitMean >= 0;
+  return (
+    <div style={{ marginBottom: "20px" }}>
+      <div style={{
+        padding: "8px 14px", marginBottom: "8px",
+        borderLeft: `3px solid ${meta.color}`,
+        background: "rgba(255,255,255,0.03)", borderRadius: "0 8px 8px 0",
+        display: "flex", alignItems: "center", gap: "12px", flexWrap: "wrap",
+      }}>
+        <span style={{ fontSize: "14px", fontWeight: 800, color: meta.color, letterSpacing: "1px" }}>
+          {meta.emoji} {meta.label.toUpperCase()}
+        </span>
+        <span style={{ fontSize: "11px", color: "#666" }}>
+          {agents.length} agentes &nbsp;·&nbsp;
+          Fitness: <b style={{ color: fitPositive ? "#00c878" : "#e05252" }}>{fitMean >= 0 ? "+" : ""}{fitMean.toFixed(4)}</b>
+          &nbsp;·&nbsp; ROI: <b style={{ color: roiMean >= 0 ? "#00c878" : "#e05252" }}>{roiMean >= 0 ? "+" : ""}{roiMean.toFixed(4)}%</b>
+          &nbsp;·&nbsp; Capital: <b style={{ color: meta.color }}>${capMean.toFixed(4)}</b>
+        </span>
+      </div>
+      {/* Tabla (visible en desktop) */}
       <table className="ranking-table">
         <thead>
           <tr>
-            <th>ID Agente</th>
-            <th>Gen</th>
-            <th>Estado</th>
-            <th>Fitness</th>
-            <th>ROI %</th>
-            <th>Capital ($)</th>
-            <th>Ops</th>
-            <th>Win Rate %</th>
+            <th>ID Agente</th><th>Gen</th><th>Especie</th><th>Estado</th>
+            <th>Fitness</th><th>ROI %</th><th>Capital ($)</th><th>Ops</th><th>Win Rate %</th>
           </tr>
         </thead>
         <tbody>
-          {agents.map((agt) => {
-            const positive = Number(agt.roi_total || 0) >= 0;
-            const winRate = Number(agt.win_rate_pct || 0);
-            return (
-              <tr key={agt.id}>
-                <td className="mono strong">{agt.id}</td>
-                <td>{agt.generacion}</td>
-                <td><span className={`status-badge ${agt.estado}`}>{agt.estado}</span></td>
-                <td className="mono">{Number(agt.fitness_score || 0).toFixed(4)}</td>
-                <td className={positive ? "emerald mono" : "red mono"}>{positive ? "+" : ""}{Number(agt.roi_total || 0).toFixed(4)} %</td>
-                <td className="mono">{money(agt.capital_actual, 4)}</td>
-                <td className="mono">{agt.operaciones_total || 0}</td>
-                <td>
-                  <div className="win-cell">
-                    <div className="win-track">
-                      <span style={{ width: `${Math.max(0, Math.min(100, winRate))}%` }} />
-                    </div>
-                    <strong className="mono">{winRate.toFixed(1)} %</strong>
-                  </div>
-                </td>
-              </tr>
-            );
-          })}
+          {agents.map((agt, i) => <AgentRow key={agt.id} agt={agt} idx={i} />)}
         </tbody>
       </table>
+      {/* Cards (visible en móvil) */}
       <div className="agent-list compact-ranking">
-        {agents.map((agt, idx) => {
-        const positive = Number(agt.roi_total || 0) >= 0;
-        const winRate = Number(agt.win_rate_pct || 0);
-        return (
-          <article className="agent-card" key={agt.id}>
-            <div className="rank-pill">#{idx + 1}</div>
-            <div className="agent-info">
-              <div className="agent-gen">GEN {agt.generacion}</div>
-              <div className="agent-id">{agt.id}</div>
-              <div className="agent-stats">
-                <span className={`status-badge ${agt.estado}`}>{agt.estado}</span>
-                <span className={positive ? "emerald" : "red"}>{positive ? "+" : ""}{Number(agt.roi_total || 0).toFixed(4)} %</span>
-                <span>{money(agt.capital_actual, 4)}</span>
-                <span>Ops {agt.operaciones_total || 0}</span>
-                <span>WR {pct(winRate)}</span>
-              </div>
-              <div className="mobile-win">
-                <div className="win-track">
-                  <span style={{ width: `${Math.max(0, Math.min(100, winRate))}%` }} />
-                </div>
-              </div>
-            </div>
-            <div className="agent-fitness">
-              <div className="fitness-label">Fitness</div>
-              <div className="fitness-value">{Number(agt.fitness_score || 0).toFixed(4)}</div>
-            </div>
-          </article>
-        );
-        })}
+        {agents.map((agt, i) => <AgentCard key={agt.id} agt={agt} idx={i} />)}
       </div>
+    </div>
+  );
+}
+
+function RankingList({ agents }) {
+  const [groupByEspecie, setGroupByEspecie] = useState(false);
+  if (!agents?.length) return <EmptyState>No hay agentes activos.</EmptyState>;
+
+  return (
+    <div className="ranking-table-wrap">
+      {/* Toggle de agrupación */}
+      <div style={{ display: "flex", alignItems: "center", gap: "10px",
+                    marginBottom: "12px", justifyContent: "flex-end" }}>
+        <span style={{ fontSize: "11px", color: "#666" }}>Agrupar por especie</span>
+        <button
+          onClick={() => setGroupByEspecie(v => !v)}
+          style={{
+            padding: "4px 14px", borderRadius: "20px", border: "1px solid",
+            borderColor: groupByEspecie ? "#d4af37" : "#333",
+            background: groupByEspecie ? "rgba(212,175,55,0.15)" : "transparent",
+            color: groupByEspecie ? "#d4af37" : "#666",
+            fontSize: "11px", fontWeight: 700, cursor: "pointer", letterSpacing: "0.5px",
+          }}
+        >
+          {groupByEspecie ? "✓ Activo" : "Inactivo"}
+        </button>
+      </div>
+
+      {groupByEspecie ? (
+        /* ── Vista agrupada por especie ──────────────────────────── */
+        ["tendencia", "reversion", "ruptura"].map(esp => {
+          const grupo = agents.filter(a => (a.especie || "tendencia") === esp);
+          if (!grupo.length) return null;
+          return <SpeciesGroup key={esp} especie={esp} agents={grupo} />;
+        })
+      ) : (
+        /* ── Vista plana original ───────────────────────────────── */
+        <>
+          <table className="ranking-table">
+            <thead>
+              <tr>
+                <th>ID Agente</th><th>Gen</th><th>Especie</th><th>Estado</th>
+                <th>Fitness</th><th>ROI %</th><th>Capital ($)</th><th>Ops</th><th>Win Rate %</th>
+              </tr>
+            </thead>
+            <tbody>
+              {agents.map((agt, i) => <AgentRow key={agt.id} agt={agt} idx={i} />)}
+            </tbody>
+          </table>
+          <div className="agent-list compact-ranking">
+            {agents.map((agt, i) => <AgentCard key={agt.id} agt={agt} idx={i} />)}
+          </div>
+        </>
+      )}
     </div>
   );
 }
