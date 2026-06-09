@@ -150,6 +150,23 @@ _BOUNDS_SMC = {
 # El motor evolutivo no elimina un agente si hacerlo bajaría su especie de este umbral.
 _MIN_AGENTS_PER_ESPECIE = int(os.getenv("MIN_AGENTS_PER_ESPECIE", "2"))
 
+# ── Torneo con umbral de calidad (Fase 1 Sesión 17) ─────────────────────────
+# Fitness OOS mínimo (estrictamente mayor) para desplegar un hijo del torneo.
+TOURNAMENT_MIN_OOS_FITNESS = float(os.getenv("TOURNAMENT_MIN_OOS_FITNESS", "0.0"))
+# Trades OOS mínimos para desplegar un hijo del torneo.
+TOURNAMENT_MIN_OOS_TRADES = int(os.getenv("TOURNAMENT_MIN_OOS_TRADES", "5"))
+
+# ── Tope de pérdida a la inmunidad por muestra (Fase 3 Sesión 17) ────────────
+# Un agente inmune solo por muestra insuficiente pierde la inmunidad si su
+# roi_total (en %) cae por debajo de este umbral negativo.
+IMMUNITY_MAX_LOSS_PCT = float(os.getenv("IMMUNITY_MAX_LOSS_PCT", "8.0"))
+
+# ── Muestra mínima híbrida (Fase 4 Sesión 17) ────────────────────────────────
+# Un agente es elegible si n_trades >= MIN_SAMPLE_TRADES O edad >= MIN_SAMPLE_DAYS
+# días hábiles (lo que llegue primero). Evita que especies poco frecuentes
+# (p.ej. tendencia en régimen RANGO crónico) queden perpetuamente inmunes.
+MIN_SAMPLE_DAYS = int(os.getenv("MIN_SAMPLE_DAYS", "7"))
+
 
 # ── Fitness: Expectancy ajustada por riesgo (Fase 1) ────────────────────────
 #
@@ -523,6 +540,11 @@ class EvolutionResult:
     # Sigmas efectivamente utilizadas en este ciclo (para auditoría).
     sigma_used: dict = field(default_factory=dict)
 
+    # ── Torneo con umbral de calidad (Fase 1 Sesión 17) ───────────────────
+    # Slots que quedaron vacantes porque ningún candidato superó el umbral OOS.
+    # Cada elemento: {"id": child_id, "especie": especie, "razon": str}.
+    slots_vacantes: list[dict] = field(default_factory=list)
+
 
 class EvolutionEngine:
 
@@ -638,21 +660,24 @@ class EvolutionEngine:
           - immune: agentes NO elegibles para eliminación esta tarde.
           - eligible: agentes con muestra suficiente para evaluación.
 
-        Un agente es inmune si cumple CUALQUIERA de estas condiciones:
+        Condiciones de inmunidad (se requiere al menos una):
 
           A. Periodo de Gracia original (sin datos, recién nacido):
              ops_total == 0 Y edad < GRACE_PERIOD_DAYS días hábiles.
              Protege agentes que el broker no ha podido ni evaluar.
+             Esta inmunidad es INVIOLABLE (no la revoca el tope de pérdida).
 
-          B. Muestra mínima (Fase 1 — integridad estadística):
-             ops_cerradas < MIN_SAMPLE_TRADES
-             Con pocos trades el fitness es estadísticamente ruido.
-             La evolución no puede seleccionar habilidad de una muestra
-             de 3-5 operaciones; solo premia suerte reciente.
+          B. Muestra mínima híbrida (Fase 4 Sesión 17):
+             n_trades < MIN_SAMPLE_TRADES Y edad < MIN_SAMPLE_DAYS días hábiles.
+             Ambas condiciones deben cumplirse simultáneamente — si el agente
+             lleva >= MIN_SAMPLE_DAYS días en producción ya es evaluable aunque
+             tenga pocos trades (especie en régimen adverso, baja frecuencia).
 
-        La inmunidad B se aplica independientemente de la edad: un agente
-        puede llevar semanas pero si sólo cerró 5 ops (especie de ruptura
-        en régimen adverso) no hay base para evaluarlo.
+          Excepción (Fase 3 Sesión 17 — tope de pérdida):
+             Si B aplica pero roi_total <= -IMMUNITY_MAX_LOSS_PCT (%), la
+             inmunidad se revoca: el agente pasa a eligible con fitness negativo
+             y es candidato a eliminación. Documentado en razon_eliminacion.
+             No afecta la inmunidad A (Periodo de Gracia).
         """
         immune: list[dict] = []
         eligible: list[dict] = []
@@ -669,12 +694,30 @@ class EvolutionEngine:
                 _business_days_between(birth, self.today) if birth else 999
             )
 
-            immune_grace  = (ops_total == 0 and age_business_days < GRACE_PERIOD_DAYS)
-            immune_sample = (n_trades < MIN_SAMPLE_TRADES)
+            # A. Periodo de Gracia (inviolable)
+            immune_grace = (ops_total == 0 and age_business_days < GRACE_PERIOD_DAYS)
+
+            # B. Muestra mínima híbrida (Fase 4): elegible si trades O días suficientes
+            immune_sample = (
+                n_trades < MIN_SAMPLE_TRADES
+                and age_business_days < MIN_SAMPLE_DAYS
+            )
+
+            # Fase 3: tope de pérdida revoca inmunidad por muestra (no la de gracia)
+            immunity_revoked = False
+            if immune_sample and not immune_grace:
+                roi = float(a.get("roi_total", 0) or 0)
+                if roi <= -IMMUNITY_MAX_LOSS_PCT:
+                    immune_sample = False
+                    immunity_revoked = True
 
             if immune_grace or immune_sample:
                 immune.append(a)
             else:
+                # Propagar flag de revocación para documentarlo en razon_eliminacion
+                if immunity_revoked:
+                    a = dict(a)
+                    a["_immunity_revoked"] = True
                 eligible.append(a)
         return immune, eligible
 
@@ -743,19 +786,31 @@ class EvolutionEngine:
 
     # ── Escritura en DB ──────────────────────────────────────────────────────
 
-    def _eliminate_agents(self, conn, eliminated: list[dict], razon: str) -> None:
+    def _eliminate_agents(
+        self,
+        conn,
+        eliminated: list[dict],
+        razon_default: str,
+        razones_extra: dict[str, str] | None = None,
+    ) -> None:
+        """
+        Elimina los agentes en la lista. Si razones_extra contiene el id del agente,
+        usa esa razón (prefijada) en vez de razon_default. Esto permite documentar
+        casos especiales como 'inmunidad revocada por drawdown' por agente.
+        """
         cur = conn.cursor()
-        ids = [a["id"] for a in eliminated]
-        cur.execute(
-            """
-            UPDATE agentes
-            SET estado = 'eliminado',
-                fecha_eliminacion = %s,
-                razon_eliminacion = %s
-            WHERE id = ANY(%s)
-            """,
-            (self.today, razon, ids),
-        )
+        for a in eliminated:
+            razon = (razones_extra or {}).get(a["id"], razon_default)
+            cur.execute(
+                """
+                UPDATE agentes
+                SET estado = 'eliminado',
+                    fecha_eliminacion = %s,
+                    razon_eliminacion = %s
+                WHERE id = %s
+                """,
+                (self.today, razon, a["id"]),
+            )
         
         for agent in eliminated:
             try:
@@ -849,7 +904,16 @@ class EvolutionEngine:
         cur = conn.cursor()
         for agent in survivors:
             n_trades = int(agent.get("n_trades", 0) or 0)
-            if n_trades < MIN_SAMPLE_TRADES:
+            # Fase 4: muestra mínima híbrida — elegible si trades O días suficientes
+            birth = agent.get("fecha_nacimiento")
+            if isinstance(birth, str):
+                try:
+                    birth = date.fromisoformat(birth)
+                except ValueError:
+                    birth = None
+            age_bd = _business_days_between(birth, self.today) if birth else 999
+            has_enough_sample = (n_trades >= MIN_SAMPLE_TRADES or age_bd >= MIN_SAMPLE_DAYS)
+            if not has_enough_sample:
                 continue  # muestra insuficiente: no inscribir en Hall of Fame aún
             if float(agent.get("roi_total", 0)) >= MIN_ROI_HALL_OF_FAME:
                 ops = int(agent.get("operaciones_total", 0))
@@ -877,6 +941,60 @@ class EvolutionEngine:
                         agent["id"], self.today,
                     ),
                 )
+
+    # ── Hall of Fame: consulta para fallback del torneo (Fase 1 Sesión 17) ──────
+
+    def _get_hof_parents(self, especie: str | None = None) -> list[dict]:
+        """
+        Devuelve hasta 10 entradas del Hall of Fame como dicts de 'padre virtual',
+        con todos los parámetros necesarios para breed_agent.
+
+        Si se especifica especie, prioriza esa especie; si no hay suficientes
+        (< 2) retorna de cualquier especie como fallback.
+
+        Hace JOIN con agentes para recuperar params_smc y especie, ya que
+        estrategias_exitosas solo almacena params_tecnicos / macro / riesgo.
+        """
+        with get_conn() as conn:
+            cur = get_dict_cursor(conn)
+            if especie:
+                cur.execute(
+                    """
+                    SELECT e.agente_origen_id AS id,
+                           e.roi_que_genero   AS roi_total,
+                           e.params_tecnicos,
+                           e.params_macro,
+                           e.params_riesgo,
+                           a.params_smc,
+                           COALESCE(a.especie, 'tendencia') AS especie
+                    FROM estrategias_exitosas e
+                    JOIN agentes a ON e.agente_origen_id = a.id
+                    WHERE COALESCE(a.especie, 'tendencia') = %s
+                    ORDER BY e.roi_que_genero DESC
+                    LIMIT 10
+                    """,
+                    (especie,),
+                )
+                rows = [dict(r) for r in cur.fetchall()]
+                if len(rows) >= 2:
+                    return rows
+            # Fallback: cualquier especie
+            cur.execute(
+                """
+                SELECT e.agente_origen_id AS id,
+                       e.roi_que_genero   AS roi_total,
+                       e.params_tecnicos,
+                       e.params_macro,
+                       e.params_riesgo,
+                       a.params_smc,
+                       COALESCE(a.especie, 'tendencia') AS especie
+                FROM estrategias_exitosas e
+                JOIN agentes a ON e.agente_origen_id = a.id
+                ORDER BY e.roi_que_genero DESC
+                LIMIT 10
+                """
+            )
+            return [dict(r) for r in cur.fetchall()]
 
     # ── Redistribución de capital ────────────────────────────────────────────
 
@@ -1101,6 +1219,13 @@ class EvolutionEngine:
                         _exc,
                     )
 
+            # Fase 2: caché OOS de padres (evita re-backtestear el mismo padre por slot)
+            parent_bt_cache: dict[str, float] = {}
+            import logging as _lg_main
+            _log = _lg_main.getLogger(__name__)
+
+            slots_vacantes: list[dict] = []
+
             for i, elim in enumerate(eliminated):
                 # El hijo hereda la especie del eliminado: sustituye como-por-como.
                 child_especie = str(elim.get("especie") or "tendencia")
@@ -1110,15 +1235,42 @@ class EvolutionEngine:
                                 if str(a.get("especie") or "tendencia") == child_especie]
                 pool = same_species if len(same_species) >= 2 else parent_candidates
 
-                # Selección por fitness (Fase 1): expectancy neta, no ROI crudo.
-                scores = [max(float(a.get("fitness_score", 0) or 0), 0.0001) for a in pool]
+                # ── Fase 2: pesos OOS cuando todos los padres pierden ─────────
+                # Si TODO el pool tiene fitness_score <= 0 y hay backtest disponible,
+                # se pondera por fitness OOS en lugar del floor uniforme 0.0001.
+                all_pool_negative = all(
+                    float(a.get("fitness_score", 0) or 0) <= 0 for a in pool
+                )
+                if all_pool_negative and use_backtest and backtest_data is not None:
+                    oos_scores = []
+                    for _p in pool:
+                        _pid = _p["id"]
+                        if _pid not in parent_bt_cache:
+                            try:
+                                parent_bt_cache[_pid] = run_backtest(backtest_data, _p)["fitness"]
+                            except Exception:
+                                parent_bt_cache[_pid] = 0.0
+                        oos_scores.append(max(parent_bt_cache[_pid], 0.0001))
+                    scores = oos_scores
+                    _log.info(
+                        "[EvolutionEngine] Fase2: todos padres (%s) negativos — "
+                        "pesos OOS: %s",
+                        child_especie,
+                        [f"{s:.5f}" for s in scores],
+                    )
+                else:
+                    scores = [max(float(a.get("fitness_score", 0) or 0), 0.0001)
+                              for a in pool]
+
                 total_score = sum(scores)
                 weights = [s / total_score for s in scores]
 
-                def _select_parents():
-                    p1_, p2_ = random.choices(pool, weights=weights, k=2)
-                    if p1_["id"] == p2_["id"] and len(pool) > 1:
-                        p2_ = random.choice([a for a in pool if a["id"] != p1_["id"]])
+                def _select_parents(
+                    _pool=pool, _weights=weights
+                ):
+                    p1_, p2_ = random.choices(_pool, weights=_weights, k=2)
+                    if p1_["id"] == p2_["id"] and len(_pool) > 1:
+                        p2_ = random.choice([a for a in _pool if a["id"] != p1_["id"]])
                     return p1_, p2_
 
                 child_id = f"{self.today.strftime('%Y-%m-%d')}_{next_idx + i:02d}"
@@ -1136,22 +1288,96 @@ class EvolutionEngine:
                         try:
                             bt = run_backtest(backtest_data, candidate)
                         except Exception as _e:
-                            import logging as _lg
-                            _lg.getLogger(__name__).warning(
-                                "[EvolutionEngine] Backtest candidato %s falló: %s", child_id, _e
+                            _log.warning(
+                                "[EvolutionEngine] Backtest candidato %s falló: %s",
+                                child_id, _e,
                             )
                             bt = {"fitness": 0.0, "expectancy": 0.0, "n_trades": 0}
                         candidates.append((candidate, bt))
 
                     # Elegir el candidato con mayor fitness OOS
                     child, best_bt = max(candidates, key=lambda x: x[1]["fitness"])
-                    import logging as _lg
-                    _lg.getLogger(__name__).info(
+                    _log.info(
                         "[EvolutionEngine] Slot %s (%s): %d candidatos → "
                         "mejor OOS fitness=%.5f expectancy=%.5f n=%d",
                         child_id, child_especie, len(candidates),
                         best_bt["fitness"], best_bt["expectancy"], best_bt["n_trades"],
                     )
+
+                    # ── Fase 1: umbral de calidad ─────────────────────────────
+                    passes = (
+                        best_bt["fitness"] > TOURNAMENT_MIN_OOS_FITNESS
+                        and best_bt["n_trades"] >= TOURNAMENT_MIN_OOS_TRADES
+                    )
+                    if not passes:
+                        _log.warning(
+                            "[EvolutionEngine] Slot %s (%s) no superó umbral OOS "
+                            "(fitness=%.5f, n_trades=%d) — intentando HoF.",
+                            child_id, child_especie,
+                            best_bt["fitness"], best_bt["n_trades"],
+                        )
+                        # Fallback a: criar desde Hall of Fame
+                        try:
+                            hof_parents = self._get_hof_parents(child_especie)
+                        except Exception as _he:
+                            _log.warning("[EvolutionEngine] HoF query falló: %s", _he)
+                            hof_parents = []
+                        if len(hof_parents) >= 2:
+                            hof_scores = [max(float(p.get("roi_total", 0) or 0), 0.0001)
+                                          for p in hof_parents]
+                            hof_total  = sum(hof_scores)
+                            hof_w = [s / hof_total for s in hof_scores]
+                            hof_candidates: list[tuple[dict, dict]] = []
+                            for _hc in range(N_CANDIDATE_CHILDREN):
+                                hp1, hp2 = random.choices(hof_parents, weights=hof_w, k=2)
+                                if hp1["id"] == hp2["id"] and len(hof_parents) > 1:
+                                    hp2 = random.choice(
+                                        [p for p in hof_parents if p["id"] != hp1["id"]]
+                                    )
+                                hof_child = breed_agent(
+                                    hp1, hp2, child_id, self.today, max_gen + 1,
+                                    sigma_weights=sw, sigma_periods=sp, sigma_risk=sr,
+                                    especie=child_especie,
+                                )
+                                try:
+                                    hof_bt = run_backtest(backtest_data, hof_child)
+                                except Exception:
+                                    hof_bt = {"fitness": 0.0, "expectancy": 0.0, "n_trades": 0}
+                                hof_candidates.append((hof_child, hof_bt))
+                            hof_best, hof_best_bt = max(
+                                hof_candidates, key=lambda x: x[1]["fitness"]
+                            )
+                            passes = (
+                                hof_best_bt["fitness"] > TOURNAMENT_MIN_OOS_FITNESS
+                                and hof_best_bt["n_trades"] >= TOURNAMENT_MIN_OOS_TRADES
+                            )
+                            if passes:
+                                child = hof_best
+                                best_bt = hof_best_bt
+                                _log.info(
+                                    "[EvolutionEngine] Slot %s (%s) cubierto por HoF: "
+                                    "fitness=%.5f n=%d",
+                                    child_id, child_especie,
+                                    hof_best_bt["fitness"], hof_best_bt["n_trades"],
+                                )
+
+                    if passes:
+                        new_agents.append(child)
+                    else:
+                        razon_vac = (
+                            f"Ningún candidato superó umbral OOS "
+                            f"(mejor fitness={best_bt['fitness']:.5f}, "
+                            f"n_trades={best_bt['n_trades']})"
+                        )
+                        slots_vacantes.append({
+                            "id": child_id,
+                            "especie": child_especie,
+                            "razon": razon_vac,
+                        })
+                        _log.warning(
+                            "[EvolutionEngine] Slot %s (%s) VACANTE: %s",
+                            child_id, child_especie, razon_vac,
+                        )
                 else:
                     p1, p2 = _select_parents()
                     child = breed_agent(
@@ -1159,10 +1385,10 @@ class EvolutionEngine:
                         sigma_weights=sw, sigma_periods=sp, sigma_risk=sr,
                         especie=child_especie,
                     )
+                    new_agents.append(child)
 
-                new_agents.append(child)
-
-            result.new_agents = new_agents
+            result.new_agents    = new_agents
+            result.slots_vacantes = slots_vacantes
 
             # Pool real del día: suma de todos los agentes ANTES de eliminar/nacer ninguno.
             pool_total_eod = round(
@@ -1186,13 +1412,23 @@ class EvolutionEngine:
 
             # Escribir todo en una única transacción
             with get_conn() as conn:
-                razon_elim = (
+                razon_elim_base = (
                     f"Selección natural {self.today}: cuota dinámica = "
                     f"{len(eliminated)} (fitness <= 0). Desempate por veteranía "
                     f"(fecha_nacimiento ASC, id ASC). Inmunes en gracia: "
                     f"{len(immune)}."
                 )
-                self._eliminate_agents(conn, eliminated, razon_elim)
+                # Fase 3: razones individuales para agentes con inmunidad revocada
+                razones_extra: dict[str, str] = {}
+                for a in eliminated:
+                    if a.get("_immunity_revoked"):
+                        roi = float(a.get("roi_total", 0) or 0)
+                        razones_extra[a["id"]] = (
+                            f"Inmunidad revocada por drawdown "
+                            f"(roi={roi:.1f}% <= -{IMMUNITY_MAX_LOSS_PCT:.1f}%). "
+                            + razon_elim_base
+                        )
+                self._eliminate_agents(conn, eliminated, razon_elim_base, razones_extra)
                 for child in new_agents:
                     self._insert_new_agent(conn, child)
                 self._save_hall_of_fame(conn, survivors_eligible)
