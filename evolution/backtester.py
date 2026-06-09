@@ -36,6 +36,10 @@ BACKTEST_TRAIN_DAYS    = int(os.getenv("BACKTEST_TRAIN_DAYS",    "40"))
 BACKTEST_VALIDATE_DAYS = int(os.getenv("BACKTEST_VALIDATE_DAYS", "20"))
 N_CANDIDATE_CHILDREN   = int(os.getenv("N_CANDIDATE_CHILDREN",    "3"))
 
+# Fase 5 Sesión 17: ruptura bloqueada en RANGO (mismo gate que trade_monitor).
+# Coherencia entre backtest y producción es crítica para la validez del fitness OOS.
+_RUPTURA_SOLO_TENDENCIA = os.getenv("RUPTURA_SOLO_TENDENCIA", "true").lower() != "false"
+
 # Velas 15m por día de trading (≈6.5h × 4 velas/h)
 _CANDLES_PER_DAY = 26
 # Evaluar nueva posición cada N velas (= cadencia del cron de producción)
@@ -183,6 +187,8 @@ def run_backtest(data: dict, agent: dict) -> dict:
                 if especie == "tendencia" and r_estado == "RANGO":
                     continue
                 if especie == "reversion" and r_estado == "TENDENCIA":
+                    continue
+                if especie == "ruptura" and r_estado == "RANGO" and _RUPTURA_SOLO_TENDENCIA:
                     continue
 
             senal = sub_tec.analyze(signals, especie=especie)

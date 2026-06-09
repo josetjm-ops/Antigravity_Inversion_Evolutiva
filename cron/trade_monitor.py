@@ -65,6 +65,11 @@ if str(ROOT) not in sys.path:
 _POLL_SECONDS = int(os.getenv("TRADE_MONITOR_POLL_SECONDS", "60"))
 _MIN_CAPITAL  = float(os.getenv("MIN_CAPITAL_TO_TRADE", "2.0"))
 
+# Fase 5 Sesión 17: ruptura bloqueada en régimen RANGO.
+# Un breakout en mercado lateral tiene un WR muy bajo (~22% observado en prod).
+# En NEUTRAL sigue operando (régimen indefinido / sin datos de ADX).
+_RUPTURA_SOLO_TENDENCIA = os.getenv("RUPTURA_SOLO_TENDENCIA", "true").lower() != "false"
+
 
 def _parse_hhmm(value: str, fallback: str) -> dtime:
     """Parsea un string 'HH:MM' a datetime.time. Si falla, usa el fallback."""
@@ -606,10 +611,11 @@ def _evaluate_new_positions() -> dict:
         try:
             especie = str(agent_data.get("especie") or "tendencia")
 
-            # ── Gate de régimen (Fase 2) ──────────────────────────────────────
+            # ── Gate de régimen (Fase 2 + Fase 5 Sesión 17) ─────────────────
             # S1 tendencia : sólo opera en mercados con tendencia (ADX alto)
             # S2 reversion : sólo opera en mercados en rango (ADX bajo)
-            # S3 ruptura   : opera en ambos regímenes (busca la explosión)
+            # S3 ruptura   : sólo en TENDENCIA cuando RUPTURA_SOLO_TENDENCIA=true
+            #                (un breakout en rango lateral tiene WR ~22% en prod)
             # NEUTRAL : cualquier especie puede operar (régimen indefinido)
             regime_estado = regime["estado"]
             bloqueado_por_regimen = False
@@ -617,6 +623,9 @@ def _evaluate_new_positions() -> dict:
                 if especie == "tendencia" and regime_estado == "RANGO":
                     bloqueado_por_regimen = True
                 elif especie == "reversion" and regime_estado == "TENDENCIA":
+                    bloqueado_por_regimen = True
+                elif (especie == "ruptura" and regime_estado == "RANGO"
+                      and _RUPTURA_SOLO_TENDENCIA):
                     bloqueado_por_regimen = True
             if bloqueado_por_regimen:
                 log.info(
