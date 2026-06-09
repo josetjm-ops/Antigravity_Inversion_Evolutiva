@@ -529,14 +529,22 @@ Para que esto funcione en la "ventana ciega" de 03:30 – 06:30 UTC (11pm – 1:
 
 2. RANKING + FILTRO DE ELEGIBILIDAD (Muestra mínima + Periodo de Gracia)
    ──────────────────────────────────────────────────────────────────────
-   Ordenar 10 agentes por fitness DESC.
+   Ordenar agentes por fitness DESC.
    Desempate: fecha_nacimiento DESC, id DESC.
 
    Filtrar agentes INMUNES (no elegibles para eliminación esa tarde):
-     A. GRACIA: operaciones_total == 0 Y edad < GRACE_PERIOD_DAYS días HÁBILES
-     B. MUESTRA INSUFICIENTE: n_trades_cerradas < MIN_SAMPLE_TRADES (default 15)
-        → Con pocos trades el fitness es ruido. La evolución no puede seleccionar
-          habilidad de una muestra de 3-5 operaciones.
+     A. GRACIA (inviolable): operaciones_total == 0 Y edad < GRACE_PERIOD_DAYS días HÁBILES
+     B. MUESTRA MÍNIMA HÍBRIDA (Fase 4, Sesión 17):
+        n_trades < MIN_SAMPLE_TRADES  Y  edad < MIN_SAMPLE_DAYS días hábiles.
+        Ambas condiciones simultáneas — si el agente lleva ≥ MIN_SAMPLE_DAYS días
+        en producción ya es evaluable aunque tenga pocos trades (especie en régimen
+        adverso, baja frecuencia de señales).
+
+        Excepción — tope de pérdida (Fase 3, Sesión 17):
+        Si B aplica pero roi_total ≤ −IMMUNITY_MAX_LOSS_PCT (default 8 %), la
+        inmunidad se revoca: el agente pasa a eligible con flag _immunity_revoked
+        y es candidato a eliminación. Documentado como "Inmunidad revocada por
+        drawdown" en razon_eliminacion. No afecta la inmunidad A.
    Los inmunes mantienen estado 'activo' automáticamente.
 
 3. CUOTA DINÁMICA + PROTECCIÓN DE ESPECIES
@@ -560,25 +568,36 @@ Para que esto funcione en la "ventana ciega" de 03:30 – 06:30 UTC (11pm – 1:
    ───────────────────────────────
    CV < DIVERSITY_VARIANCE_THRESHOLD → sigmas × SIGMA_BOOST_FACTOR (default 2.0).
 
-6. REPRODUCCIÓN CON TORNEO DE CANDIDATOS (Fase 3, desde Sesión 16)
-   ──────────────────────────────────────────────────────────────────
+6. REPRODUCCIÓN CON TORNEO DE CANDIDATOS + UMBRAL DE CALIDAD (Fases 3/1, desde Sesión 16/17)
+   ─────────────────────────────────────────────────────────────────────────────────────────────
    Para cada cupo vacante:
      a. Descargar datos históricos: fetch_backtest_data() — 1 request compartido
         para todos los hijos del ciclo: 60d/15m + 3mo/1h de Yahoo Finance.
      b. Generar N_CANDIDATE_CHILDREN candidatos (default 3), cada uno con padres
         distintos (selección fitness-proporcional, preferentemente misma especie).
      c. Ejecutar run_backtest() en cada candidato: walk-forward OOS 20 días,
-        mismo pipeline de producción (señales + régimen ADX + SL/TP + fricción),
-        sin LLM (heurística pura, determinista).
-     d. Insertar el candidato con mayor fitness OOS.
-        Si Yahoo Finance falla → fallback a crianza directa sin backtest.
-     e. El hijo hereda la especie del eliminado (como-por-como).
-     f. S2 hijos: rsi_modo=reversion, htf_filter_enabled=0 forzados post-crossover.
-     g. INSERT en agentes con columna especie. capital_inicial = cuota del pool.
+        mismo pipeline de producción (señales + régimen ADX + ruptura-en-RANGO
+        gate + SL/TP + fricción), sin LLM (heurística pura, determinista).
+     d. Umbral de calidad (Fase 1, Sesión 17): el mejor candidato solo se despliega
+        si fitness OOS > TOURNAMENT_MIN_OOS_FITNESS (default 0.0, estrictamente mayor)
+        Y n_trades OOS >= TOURNAMENT_MIN_OOS_TRADES (default 5).
+        - Si no pasa: fallback al Hall of Fame — se generan 3 hijos de padres HoF
+          (misma especie primero; cualquier especie si no hay suficientes) y se
+          aplica el mismo umbral.
+        - Si tampoco pasa: el slot queda vacante (registrado en logs_juez como
+          "slot_vacante"). El pool continúa con un agente menos hasta el próximo ciclo.
+     e. Si Yahoo Finance falla → fallback a crianza directa sin backtest (sin umbral).
+     f. El hijo hereda la especie del eliminado (como-por-como).
+     g. S2 hijos: rsi_modo=reversion, htf_filter_enabled=0 forzados post-crossover.
+     h. INSERT en agentes con columna especie. capital_inicial = cuota del pool.
 
-   Selección de padres: probabilidad proporcional a fitness_score (Fase 1),
-   no al ROI crudo. Agentes con < MIN_SAMPLE_TRADES tienen fitness ≈ 0 →
-   raramente seleccionados como padres.
+   Selección de padres: probabilidad proporcional a fitness_score.
+     - Caso especial (Fase 2, Sesión 17): si todos los agentes del pool tienen
+       fitness_score ≤ 0 (pool completamente negativo), los pesos se recalculan
+       usando el fitness OOS del backtest (corrida una vez por agente y cacheada
+       por ciclo). Esto evita selección aleatoria uniforme cuando el pool está en
+       crisis — se prefieren los que el OOS sugiere que son mejores.
+   Agentes con < MIN_SAMPLE_TRADES tienen fitness ≈ 0 → raramente seleccionados.
 
 7. RAZONAMIENTO LLM (solo si el ciclo NO está suspendido)
 
@@ -762,7 +781,10 @@ INSERT INTO agentes (
 
 La cuota de eliminación no es rígida. Cada tarde el motor calcula cuántos agentes salen, **con un máximo de N_ELIMINATE (default 9 = 3 por especie × 3 especies) y un mínimo de 0**, aplicando tres salvaguardas:
 
-**Salvaguarda 1 — Periodo de Gracia / Muestra mínima:** los agentes con `operaciones_total == 0` y edad < `GRACE_PERIOD_DAYS` días hábiles, o con `n_trades < MIN_SAMPLE_TRADES` (15), quedan inmunes esa tarde.
+**Salvaguarda 1 — Periodo de Gracia / Muestra mínima híbrida (Fases 3-4, Sesión 17):**
+- **Periodo de Gracia (inviolable):** `operaciones_total == 0` y edad < `GRACE_PERIOD_DAYS` días hábiles.
+- **Muestra mínima híbrida:** `n_trades < MIN_SAMPLE_TRADES` (15) **Y** `edad < MIN_SAMPLE_DAYS` (7 días hábiles). Si el agente cumple una sola condición ya es elegible, evitando inmunidad perpetua en especies de baja frecuencia.
+- **Tope de pérdida revoca inmunidad por muestra:** si el agente está protegido solo por muestra insuficiente (no por Gracia) y su `roi_total ≤ −IMMUNITY_MAX_LOSS_PCT` (default 8 %), la inmunidad se revoca y pasa a eligible. Documentado en `razon_eliminacion` como "Inmunidad revocada por drawdown".
 
 **Salvaguarda 2 — Protección de fitness positivo:** solo son eliminables los agentes elegibles con `fitness_score <= 0` (negativo o cero). Un veterano rentable nunca se elimina solo para cumplir la cuota.
 
@@ -1152,6 +1174,11 @@ Todas las variables se definen en `.env` local (desarrollo) o en **GitHub Secret
 | `BACKTEST_TRAIN_DAYS` | Días de warmup del backtester (ignorados en la evaluación). Default: `40`. **Fase 3, desde Sesión 16.** |
 | `BACKTEST_VALIDATE_DAYS` | Días OOS del backtester (out-of-sample, define el fitness). Default: `20`. **Fase 3, desde Sesión 16.** |
 | `N_CANDIDATE_CHILDREN` | Candidatos generados por slot vacante en el torneo de reproducción. Default: `3`. **Fase 3, desde Sesión 16.** |
+| `TOURNAMENT_MIN_OOS_FITNESS` | Fitness OOS mínimo (estrictamente mayor) para desplegar un hijo del torneo. Default: `0.0` (cualquier fitness positivo pasa). **Fase 1, desde Sesión 17.** |
+| `TOURNAMENT_MIN_OOS_TRADES` | Trades OOS mínimos para desplegar un hijo del torneo. Default: `5`. **Fase 1, desde Sesión 17.** |
+| `IMMUNITY_MAX_LOSS_PCT` | Revoca la inmunidad por muestra insuficiente si `roi_total ≤ −IMMUNITY_MAX_LOSS_PCT` (%). Default: `8.0`. No afecta el Periodo de Gracia. **Fase 3, desde Sesión 17.** |
+| `MIN_SAMPLE_DAYS` | Días hábiles mínimos alternativos a `MIN_SAMPLE_TRADES` (condición híbrida OR). Default: `7`. **Fase 4, desde Sesión 17.** |
+| `RUPTURA_SOLO_TENDENCIA` | Si `true`, la especie `ruptura` no abre posiciones en régimen `RANGO` (ni en el monitor de producción ni en el backtester OOS). NEUTRAL siempre opera. Default: `true`. **Fase 5, desde Sesión 17.** |
 | `LOG_LEVEL` | Nivel de logs (default: `INFO`) |
 | `ENVIRONMENT` | Ambiente (`production` / `development`) |
 
@@ -1295,9 +1322,19 @@ Antigravity_Inversion_Evolutiva/
 
 ---
 
-*Documento actualizado el 2026-06-02 (Sesión 16 completa — Fases 0-3 + 15 agentes 5/especie + N_ELIMINATE=9 + vista por especie en ambos dashboards). Commits `83f08ef` → `0b15d72` pusheados a `origin/master`.*
+*Documento actualizado el 2026-06-09 (Sesión 17 — Fases 1-5: torneo con umbral OOS, selección por OOS cuando pool negativo, inmunidad revocable por drawdown, elegibilidad híbrida por días, ruptura bloqueada en RANGO).*
 
 ## Historial de cambios mayores
+
+- **2026-06-09 (Sesión 17 — 5 mejoras evolutivas: Fases 1-5) · commits `feat(sesion-17-fase-1..5)` · en producción:**
+  - **Contexto:** pool con caída de −0.86 % identificó tres causas raíz: (1) torneo sin umbral de calidad desplegaba hijos con fitness OOS ≤ 0; (2) selección de padres uniforme cuando todo el pool es negativo; (3) inmunidad por muestra insuficiente sin tope de pérdida permitía agentes con drawdown severo sobrevivir indefinidamente.
+  - **Fase 1 — Torneo con umbral de calidad (`evolution_engine.py`):** el hijo del torneo se despliega solo si `fitness OOS > TOURNAMENT_MIN_OOS_FITNESS` (0.0, estrictamente) Y `n_trades OOS ≥ TOURNAMENT_MIN_OOS_TRADES` (5). Fallback: se generan 3 hijos de padres del Hall of Fame (misma especie primero) y se aplica el mismo umbral. Si tampoco pasan: slot vacante (registrado en `logs_juez`, campo `slots_vacantes` en `EvolutionResult`).
+  - **Fase 2 — Selección de padres por OOS cuando pool negativo (`evolution_engine.py`):** si todos los agentes activos tienen `fitness_score ≤ 0`, los pesos de selección se calculan usando el fitness OOS del backtester (corrido una vez por agente, cacheado por ciclo) en vez de floor 0.0001. Evita selección aleatoria uniforme en crisis.
+  - **Fase 3 — Inmunidad revocable por drawdown (`evolution_engine.py`):** un agente protegido solo por muestra insuficiente pierde la inmunidad si `roi_total ≤ −IMMUNITY_MAX_LOSS_PCT` (default 8 %). El Periodo de Gracia Operativa (ops=0, joven) es inviolable. Documentado en `razon_eliminacion`.
+  - **Fase 4 — Elegibilidad híbrida por días hábiles (`evolution_engine.py`, `backtester.py`):** la muestra mínima pasa de condición única a condición OR: elegible si `n_trades ≥ MIN_SAMPLE_TRADES` **O** `edad ≥ MIN_SAMPLE_DAYS` (7 días hábiles). Aplica en eliminación, reproducción y Hall of Fame.
+  - **Fase 5 — Ruptura bloqueada en régimen RANGO (`trade_monitor.py`, `backtester.py`):** especie `ruptura` no abre posiciones cuando `regime_estado == "RANGO"` y `RUPTURA_SOLO_TENDENCIA=true` (default). Replicado en el backtester para coherencia entre fitness OOS y producción. NEUTRAL sigue operando sin restricción.
+  - **Fase 6 — Tests, docs, env vars y workflow:** 6 tests unitarios nuevos en `tests/test_sesion17_fases.py` (umbral torneo, inmunidad revocada, elegibilidad híbrida, gate ruptura x2, constantes). 5 nuevas env vars en `.env.example` y `judge_daily.yml`. `AGENTS_ELIMINATE_PER_CYCLE` corregido de "5" a "9" en el workflow. Secciones 8, 10 y 15 de este documento actualizadas.
+  - **Tests:** 13/13 intrabar/trailing verdes · 6/6 nuevos tests de Sesión 17 verdes.
 
 - **2026-06-02 (Sesión 16 continuación — 15 agentes, cuota por especie, vista agrupada en dashboards) · commit `0b15d72` · en producción:**
   - **Expansión de población a 15 agentes (5 por especie):** `scripts/seed_15_agents.py` cría 5 nuevos agentes (1 tendencia + 2 reversion + 2 ruptura) usando `breed_agent()` con los mejores padres de cada especie; redistribuye el pool de $98.64 entre los 15 activos ($6.5757/agente). Incluye `--dry-run` para validar antes de ejecutar. Google Sheets sincronizado. Resultado: distribución exacta 5/5/5.

@@ -53,7 +53,7 @@ jobs:
       GOOGLE_CREDENTIALS_JSON:     ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
       JUDGE_TIMEZONE:              "America/Bogota"
       JUDGE_RUN_TIME:              "23:00"
-      AGENTS_ELIMINATE_PER_CYCLE:  "5"
+      AGENTS_ELIMINATE_PER_CYCLE:  "9"   # 3 por especie × 3 especies
       MUTATION_SIGMA_WEIGHTS:      "0.05"
       MUTATION_SIGMA_PERIODS:      "0.08"
       MUTATION_SIGMA_RISK:         "0.10"
@@ -65,6 +65,16 @@ jobs:
       # las sigmas de mutación se multiplican por SIGMA_BOOST_FACTOR.
       DIVERSITY_VARIANCE_THRESHOLD: "0.01"
       SIGMA_BOOST_FACTOR:          "2.0"
+      # ── Sesión 17: Torneo con umbral OOS + Inmunidad revocable + Híbrido + Ruptura ─
+      # Fitness OOS estrictamente mayor para desplegar hijo. 0.0 = solo positivos pasan.
+      TOURNAMENT_MIN_OOS_FITNESS:  "0.0"
+      TOURNAMENT_MIN_OOS_TRADES:   "5"
+      # Revoca inmunidad por muestra si roi_total <= -IMMUNITY_MAX_LOSS_PCT %
+      IMMUNITY_MAX_LOSS_PCT:       "8.0"
+      # Elegible si trades >= MIN o edad_dias_habiles >= MIN_SAMPLE_DAYS
+      MIN_SAMPLE_DAYS:             "7"
+      # Bloquear especie ruptura en régimen RANGO (coherencia backtest ↔ prod)
+      RUPTURA_SOLO_TENDENCIA:      "true"
       LOG_LEVEL:                   "INFO"
       ENVIRONMENT:                 "production"
 
