@@ -204,6 +204,11 @@ class JudgeAgent(BaseAgent):
                     f"{len(result.survivors) + len(result.new_agents)} agentes "
                     f"= ${result.capital_por_agente:.4f} c/u."
                 )
+                if result.slots_vacantes:
+                    descripcion += (
+                        f" Slots vacantes: {len(result.slots_vacantes)} "
+                        f"(ningún candidato superó el umbral OOS)."
+                    )
 
             self._log(
                 conn,
@@ -224,6 +229,7 @@ class JudgeAgent(BaseAgent):
                     "sigma_used":           result.sigma_used,
                     "capital_pool_total":   result.capital_pool_total,
                     "capital_por_agente":   result.capital_por_agente,
+                    "slots_vacantes":       result.slots_vacantes,
                     "insight_mercado":      insight,
                     "recomendacion_parametros": rec_params,
                 },

@@ -909,6 +909,7 @@ Audit trail completo del Agente Juez.
 | `sigma_used` | object | `{weights, periods, risk}` efectivamente aplicadas |
 | `capital_pool_total` | float | Pool total en USD |
 | `capital_por_agente` | float | Cuota individual tras redistribución |
+| `slots_vacantes` | array | Slots no cubiertos en la reproducción (Fase 1, Sesión 17): `[{id, especie, razon}]`. Vacío si todos los cupos se llenaron. |
 | `insight_mercado` | string | Comentario del LLM (vacío en días suspendidos) |
 | `recomendacion_parametros` | string | Sugerencias del LLM para próximas generaciones |
 
