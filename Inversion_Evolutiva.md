@@ -25,7 +25,7 @@
 
 ## 1. Objetivo del sistema
 
-**Inversión Evolutiva** es un laboratorio de trading algorítmico que aplica algoritmos genéticos al mercado de divisas EUR/USD. El sistema mantiene una población de **15 agentes** de software (5 por cada uno de los 3 arquetipos estratégicos) que compiten entre sí para determinar cuáles estrategias de trading son más rentables ajustadas al riesgo. Desde la Sesión 17 la población puede quedar temporalmente por debajo de 15: si en la reproducción ningún candidato supera el umbral de calidad OOS (ni con fallback al Hall of Fame), el cupo queda vacante y el pool de capital se redistribuye entre los agentes realmente activos.
+**Inversión Evolutiva** es un laboratorio de trading algorítmico que aplica algoritmos genéticos al mercado de divisas EUR/USD. El sistema mantiene una población de **15 agentes** de software (5 por cada uno de los 3 arquetipos estratégicos) que compiten entre sí para determinar cuáles estrategias de trading son más rentables ajustadas al riesgo. El sistema **garantiza siempre 15 agentes activos** (Sesión 19): si tras la reproducción normal quedan cupos vacantes, el motor los llena mediante hasta 8 rondas de torneo con umbral OOS y, como último recurso, clona el mejor agente del Hall of Fame. La única excepción es que Yahoo Finance esté completamente caído, en cuyo caso la recuperación se omite y se completa en el siguiente ciclo con datos.
 
 Los agentes **no son configurados manualmente**: nacen con parámetros aleatorios o heredados, operan de forma autónoma durante el día y cada tarde son evaluados. Los peores son eliminados y los mejores reproducen descendencia con mutaciones estocásticas. Con el tiempo, la población converge hacia estrategias más eficientes sin intervención humana.
 
@@ -1136,6 +1136,9 @@ Parámetros de evolución (env vars):
   IMMUNITY_MAX_LOSS_PCT        = 8.0   (Sesión 17)
   MIN_SAMPLE_DAYS              = 7     (Sesión 17)
   RUPTURA_SOLO_TENDENCIA       = true  (Sesión 17)
+  TARGET_AGENTS_PER_ESPECIE    = 5     (Sesión 18/19)
+  REPOPULATION_MAX_PER_CYCLE   = 3     (Sesión 18, deprecado en Sesión 19)
+  REPOPULATION_MAX_ATTEMPTS_PER_SLOT = 8  (Sesión 19)
 
 En caso de fallo: crea GitHub Issue con alerta.
 
@@ -1374,7 +1377,7 @@ Antigravity_Inversion_Evolutiva/
 
 ## Historial de cambios mayores
 
-- **2026-06-10 (Sesión 19 — garantía de población de 15 agentes) · commit `feat(sesion-19): garantizar poblacion de 15 agentes en el ciclo evolutivo` · pendiente deploy:**
+- **2026-06-10 (Sesión 19 — garantía de población de 15 agentes) · commit `84d1574` (squash PR #10) · en producción:**
   - **Contexto:** la recuperación de cupos de Sesión 18 tenía dos límites de diseño que impedían garantizar los 15 agentes: el tope `REPOPULATION_MAX_PER_CYCLE` (máx 3/ciclo) y el umbral OOS que dejaba cupos vacantes si ningún candidato pasaba. El usuario solicitó que **siempre existan 15 agentes**.
   - **Sin tope por ciclo (`evolution/evolution_engine.py`):** `_try_repopulate()` ahora intenta llenar TODOS los cupos faltantes en un solo ciclo (`REPOPULATION_MAX_PER_CYCLE` queda deprecado, sin efecto).
   - **Reintentos por cupo:** hasta `REPOPULATION_MAX_ATTEMPTS_PER_SLOT` rondas (default 8) de (torneo → umbral OOS) seguido de (HoF → umbral OOS), deteniéndose al primer candidato que pasa. Sube fuertemente la probabilidad de cubrir el cupo respetando el filtro de calidad.
@@ -1384,7 +1387,7 @@ Antigravity_Inversion_Evolutiva/
   - **Tests:** `tests/test_sesion18_repopulacion.py` actualizado — 6 tests: llenado completo sin tope (4 cupos), llenado de los 15, omisión sin backtest, fallback HoF, clon forzado HoF, clon forzado pool. Suite: 45 no-DB verdes (3 fallos de BD esperados sin `DATABASE_URL`).
   - **Nuevas env vars:** `REPOPULATION_MAX_ATTEMPTS_PER_SLOT=8` en `.env.example` y `judge_daily.yml`.
 
-- **2026-06-09 (Sesión 18 — recuperación de cupos vacantes) · commit `feat(sesion-18): recuperacion de cupos vacantes en el ciclo evolutivo` · pendiente deploy:**
+- **2026-06-09 (Sesión 18 — recuperación de cupos vacantes) · commit `b6ef177` · en producción:**
   - **Contexto:** la Fase 1 de Sesión 17 introdujo el umbral OOS, lo que puede dejar slots vacantes cuando ningún candidato pasa el filtro de calidad. Con el tiempo, la población puede quedar por debajo de `TARGET_AGENTS_PER_ESPECIE` sin mecanismo de recuperación automática.
   - **Implementación (`evolution/evolution_engine.py`):** nuevo método `_try_repopulate()` que calcula el déficit por especie (`TARGET_AGENTS_PER_ESPECIE − activos`) y, para cada cupo faltante (hasta `REPOPULATION_MAX_PER_CYCLE` intentos), aplica el mismo pipeline de calidad: torneo de N candidatos → umbral OOS → fallback HoF → slot vacante (nunca forzado). Reutiliza los datos de backtest ya descargados en el ciclo.
   - **Ciclo activo:** la recuperación se ejecuta después de la reproducción normal (paso 7) y antes de la redistribución de capital. Los agentes recuperados se incluyen en la redistribución.
