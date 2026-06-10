@@ -48,7 +48,7 @@ def _agent(id_: str, especie: str, fitness: float = 0.05) -> dict:
 # ─── (1) Recuperación normal: déficit detectado y slot cubierto ───────────────
 
 def test_repopulation_fills_deficit():
-    """Con déficit y backtest OK, _try_repopulate devuelve un agente recuperado."""
+    """Con déficit y backtest OK, _try_repopulate llena TODOS los cupos (sin tope)."""
     from evolution.evolution_engine import EvolutionEngine
 
     today = date(2026, 6, 9)
@@ -73,7 +73,6 @@ def test_repopulation_fills_deficit():
          patch("evolution.backtester.run_backtest", return_value=fake_bt), \
          patch.object(engine, "_get_hof_parents", return_value=[]):
 
-        from evolution.backtester import run_backtest as _rt
         recovered, slots_rec_log, deficit_restante = engine._try_repopulate(
             current_population=current,
             parent_pool=parents,
@@ -83,13 +82,13 @@ def test_repopulation_fills_deficit():
             sw=0.05, sp=0.08, sr=0.10,
         )
 
-    # Debe recuperar al menos 1 (cap = REPOPULATION_MAX_PER_CYCLE=3, déficit=4)
-    assert len(recovered) >= 1, f"Se esperaba >= 1 recuperado, obtuvo {len(recovered)}"
+    # Sesión 19: sin tope → se llenan los 4 cupos de tendencia.
+    assert len(recovered) == 4, f"Se esperaban 4 recuperados, obtuvo {len(recovered)}"
     assert all(r.get("especie") == "tendencia" for r in recovered)
     assert len(slots_rec_log) == len(recovered)
     assert all(s["origen"] in ("torneo", "hall_of_fame") for s in slots_rec_log)
-    # déficit restante > 0 porque el cap (3) < déficit (4)
-    assert deficit_restante.get("tendencia", 0) >= 1
+    # Sin déficit restante: todos los cupos se cubrieron.
+    assert deficit_restante == {}
 
 
 # ─── (2) Sin backtest → repopulación omitida silenciosamente ─────────────────
@@ -116,14 +115,14 @@ def test_repopulation_skips_without_backtest():
     assert deficit_restante.get("tendencia", 0) == 3
 
 
-# ─── (3) Cap REPOPULATION_MAX_PER_CYCLE se respeta ───────────────────────────
+# ─── (3) Sin tope: se llenan TODOS los cupos hasta la población objetivo ──────
 
-def test_repopulation_respects_max_per_cycle():
-    """Nunca se intentan más de REPOPULATION_MAX_PER_CYCLE slots."""
-    from evolution.evolution_engine import EvolutionEngine, REPOPULATION_MAX_PER_CYCLE
+def test_repopulation_fills_all_deficits_no_cap():
+    """Sesión 19: sin tope por ciclo, se llenan los 15 cupos (5 por especie)."""
+    from evolution.evolution_engine import EvolutionEngine
 
     engine = EvolutionEngine(date(2026, 6, 9))
-    # Déficit muy grande: 0 agentes en cada especie → 5+5+5=15 slots vacantes
+    # Déficit máximo: 0 agentes en cada especie → 5+5+5=15 slots vacantes
     current: list[dict] = []
     parents = [_agent(f"X_{i}", "tendencia") for i in range(3)]
 
@@ -136,7 +135,7 @@ def test_repopulation_respects_max_per_cycle():
          patch("evolution.backtester.run_backtest", return_value=fake_bt), \
          patch.object(engine, "_get_hof_parents", return_value=[]):
 
-        recovered, _, _ = engine._try_repopulate(
+        recovered, slots_rec_log, deficit_restante = engine._try_repopulate(
             current_population=current,
             parent_pool=parents,
             backtest_data={"df_15m": None, "df_1h": None},
@@ -145,10 +144,11 @@ def test_repopulation_respects_max_per_cycle():
             sw=0.05, sp=0.08, sr=0.10,
         )
 
-    assert len(recovered) <= REPOPULATION_MAX_PER_CYCLE, (
-        f"No debe superar REPOPULATION_MAX_PER_CYCLE={REPOPULATION_MAX_PER_CYCLE}, "
-        f"obtuvo {len(recovered)}"
+    assert len(recovered) == 15, (
+        f"Sin tope debe llenar los 15 cupos, obtuvo {len(recovered)}"
     )
+    assert len(slots_rec_log) == 15
+    assert deficit_restante == {}
 
 
 # ─── (4) Fallback a Hall of Fame ──────────────────────────────────────────────
@@ -229,21 +229,27 @@ def test_repopulation_hof_fallback():
     assert deficit_restante == {}
 
 
-# ─── (5) Nunca se fuerza un agente que no pasa el umbral OOS ─────────────────
+# ─── (5) Clon forzado del HoF garantiza el cupo cuando nadie pasa el OOS ──────
 
-def test_repopulation_no_force_insert():
-    """Si ni torneo ni HoF superan el umbral, el slot queda vacante."""
+def test_repopulation_forced_clone_guarantees_slot():
+    """Sesión 19: si tras todas las rondas nadie pasa OOS, se clona el mejor
+    del Hall of Fame (origen='forzado_hof') para garantizar el cupo."""
     from evolution.evolution_engine import EvolutionEngine
 
     engine = EvolutionEngine(date(2026, 6, 9))
-    current = [_agent(f"T_{i}", "tendencia") for i in range(4)]  # déficit de 1
+    # Solo falta 1 tendencia; las otras especies están completas.
+    current = (
+        [_agent(f"T_{i}", "tendencia")  for i in range(4)]  # déficit de 1
+        + [_agent(f"R_{i}", "reversion") for i in range(5)]  # completo
+        + [_agent(f"B_{i}", "ruptura")   for i in range(5)]  # completo
+    )
 
-    bad_bt = {"fitness": 0.0, "n_trades": 3}  # nunca supera umbral
+    bad_bt = {"fitness": 0.0, "n_trades": 3}  # nadie supera el umbral nunca
 
     def _mock_breed(p1, p2, child_id, today, gen, **kw):
         return _agent(child_id, kw.get("especie", "tendencia"))
 
-    hof_pool = [_agent(f"HOF_{i}", "tendencia") for i in range(2)]
+    hof_pool = [_agent(f"HOF_{i}", "tendencia", fitness=0.10) for i in range(2)]
 
     with patch("evolution.evolution_engine.breed_agent", side_effect=_mock_breed), \
          patch("evolution.backtester.run_backtest", return_value=bad_bt), \
@@ -258,10 +264,49 @@ def test_repopulation_no_force_insert():
             sw=0.05, sp=0.08, sr=0.10,
         )
 
-    assert recovered == [], (
-        "Nunca debe insertar un agente que no superó el umbral OOS"
+    assert len(recovered) == 1, (
+        f"El clon forzado debe garantizar el cupo, obtuvo {len(recovered)}"
     )
-    assert slots_rec_log == []
-    assert deficit_restante.get("tendencia", 0) == 1, (
-        "El déficit debe reportarse como restante"
+    assert slots_rec_log[0]["origen"] == "forzado_hof", (
+        f"Origen esperado 'forzado_hof', obtuvo '{slots_rec_log[0]['origen']}'"
     )
+    assert deficit_restante == {}, "No debe quedar déficit con el clon forzado"
+
+
+# ─── (6) Sin HoF, el clon forzado usa el mejor del pool de torneo ────────────
+
+def test_repopulation_forced_clone_from_pool_without_hof():
+    """Si no hay HoF y nadie pasa OOS, se clona el mejor del pool
+    (origen='forzado_pool')."""
+    from evolution.evolution_engine import EvolutionEngine
+
+    engine = EvolutionEngine(date(2026, 6, 9))
+    # Solo falta 1 tendencia; las otras especies están completas.
+    current = (
+        [_agent(f"T_{i}", "tendencia")  for i in range(4)]  # déficit de 1
+        + [_agent(f"R_{i}", "reversion") for i in range(5)]  # completo
+        + [_agent(f"B_{i}", "ruptura")   for i in range(5)]  # completo
+    )
+    parents = [a for a in current if a["especie"] == "tendencia"]
+
+    bad_bt = {"fitness": 0.0, "n_trades": 3}
+
+    def _mock_breed(p1, p2, child_id, today, gen, **kw):
+        return _agent(child_id, kw.get("especie", "tendencia"))
+
+    with patch("evolution.evolution_engine.breed_agent", side_effect=_mock_breed), \
+         patch("evolution.backtester.run_backtest", return_value=bad_bt), \
+         patch.object(engine, "_get_hof_parents", return_value=[]):
+
+        recovered, slots_rec_log, deficit_restante = engine._try_repopulate(
+            current_population=current,
+            parent_pool=parents,
+            backtest_data={"df_15m": None, "df_1h": None},
+            start_idx=10,
+            max_gen=1,
+            sw=0.05, sp=0.08, sr=0.10,
+        )
+
+    assert len(recovered) == 1
+    assert slots_rec_log[0]["origen"] == "forzado_pool"
+    assert deficit_restante == {}

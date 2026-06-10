@@ -601,15 +601,22 @@ Para que esto funcione en la "ventana ciega" de 03:30 – 06:30 UTC (11pm – 1:
        crisis — se prefieren los que el OOS sugiere que son mejores.
    Agentes con < MIN_SAMPLE_TRADES tienen fitness ≈ 0 → raramente seleccionados.
 
-7. RECUPERACIÓN DE CUPOS VACANTES (Sesión 18)
-   ────────────────────────────────────────────
+7. RECUPERACIÓN DE CUPOS VACANTES — GARANTÍA DE 15 (Sesión 18 / 19)
+   ────────────────────────────────────────────────────────────────────
    Después de la reproducción (o en ciclo suspendido), el motor calcula el déficit
-   por especie: TARGET_AGENTS_PER_ESPECIE − n_activos_especie.
-   Para cada cupo faltante (hasta REPOPULATION_MAX_PER_CYCLE intentos por ciclo):
+   por especie: TARGET_AGENTS_PER_ESPECIE − n_activos_especie y llena TODOS los
+   cupos faltantes (Sesión 19: sin tope por ciclo). Para cada cupo:
      a. Usar los mismos datos de backtest ya descargados (sin nueva descarga de red).
-     b. Aplicar el mismo pipeline de calidad: torneo de N candidatos → umbral OOS →
-        fallback HoF → slot vacante si ninguno pasa (nunca se fuerza).
-     c. Si Yahoo Finance no está disponible → omitir silenciosamente.
+     b. Hasta REPOPULATION_MAX_ATTEMPTS_PER_SLOT rondas (default 8) de
+        (torneo N candidatos → umbral OOS) seguido de (HoF N candidatos → umbral OOS).
+        Se detiene en cuanto un candidato supera el umbral.
+     c. ÚLTIMO RECURSO (Sesión 19): si tras agotar las rondas nadie pasa el OOS, se
+        CLONA el mejor agente del Hall of Fame (genética probada, origen='forzado_hof';
+        si no hay HoF, el mejor del pool de torneo → 'forzado_pool'). Esto garantiza
+        llenar el cupo sin insertar genética aleatoria. El clon entra sin superar el
+        OOS de hoy, pero queda marcado para trazabilidad.
+     d. Si Yahoo Finance no está disponible (sin datos de mercado) → omitir
+        silenciosamente: no hay base ni para validar ni para clonar (fallback sin Yahoo).
    Los agentes recuperados se insertan en la misma transacción DB y reciben capital
    de la redistribución de ese mismo ciclo.
    Trazabilidad: `slots_recuperados` y `deficit_restante` en `logs_juez.datos_json`.
@@ -774,7 +781,7 @@ El valor de `genetic_variance_cv` y el flag `sigma_boost_applied` quedan registr
 | **Inicio del sistema** | Script manual de siembra con parámetros fijos o copiados de agentes previos |
 | **Reproducción diaria** | El Juez selecciona 2 padres del pool de supervivientes elegibles (fitness-proporcional; pesos OOS si todos pierden) y los cruza con mutación. Torneo de 3 candidatos backtesteados OOS — solo se despliega el mejor si supera el umbral de calidad (Sesión 17) |
 | **Fallback Hall of Fame** | Si ningún candidato del torneo supera el umbral OOS, se crían 3 candidatos con genes del Hall of Fame (misma especie primero) y se aplica el mismo umbral. Si tampoco pasan: slot vacante (Sesión 17) |
-| **Recuperación de cupos (Sesión 18)** | En cada ciclo, el motor detecta el déficit por especie (`TARGET_AGENTS_PER_ESPECIE − activos`). Para cada cupo faltante (hasta `REPOPULATION_MAX_PER_CYCLE`) aplica el mismo pipeline de calidad (torneo → HoF → vacante). Nunca fuerza un agente que no supera el umbral OOS. |
+| **Recuperación de cupos — garantía de 15 (Sesión 18 / 19)** | En cada ciclo el motor detecta el déficit por especie (`TARGET_AGENTS_PER_ESPECIE − activos`) y llena TODOS los cupos (sin tope). Por cupo: hasta `REPOPULATION_MAX_ATTEMPTS_PER_SLOT` rondas de torneo→HoF con umbral OOS; si nadie pasa, **clon forzado del mejor del Hall of Fame** (`origen='forzado_hof'`) para garantizar los 15. Solo se omite si Yahoo Finance está caído. |
 | **Reset manual** | Limpieza total de la DB e inserción de nueva generación semilla |
 | **Registro en Hall of Fame** | `estrategias_exitosas` captura los genes de agentes con ROI > 0.05% para herencia futura |
 
@@ -816,9 +823,10 @@ La cuota de eliminación no es rígida. Cada tarde el motor calcula cuántos age
 
 | Escenario | Eliminados | Nacimientos | Razón |
 |---|---|---|---|
-| Día normal con veteranos negativos | 1 a 9 | 0 al mismo número (reproducción) + 0 a `REPOPULATION_MAX_PER_CYCLE` (recuperación de déficit previo) | Bottom por fitness, respetando máx 3/especie |
-| Día de HOLD generalizado | 0 | 0 a `REPOPULATION_MAX_PER_CYCLE` (solo recuperación, si hay déficit y Yahoo disponible) | Todos los activos están en inmunidad/gracia |
-| Veteranos rentables protegidos | 0 | 0 a `REPOPULATION_MAX_PER_CYCLE` (solo recuperación) | Todos los elegibles tienen fitness > 0 |
+| Día normal con veteranos negativos | 1 a 9 | 0 al mismo número (reproducción) + recuperación de TODO el déficit hasta 15 (clon forzado si nadie pasa OOS) | Bottom por fitness, respetando máx 3/especie |
+| Día de HOLD generalizado | 0 | recuperación de TODO el déficit hasta 15, si Yahoo disponible | Todos los activos están en inmunidad/gracia |
+| Veteranos rentables protegidos | 0 | recuperación de TODO el déficit hasta 15, si Yahoo disponible | Todos los elegibles tienen fitness > 0 |
+| Yahoo Finance caído | 0 a 9 | sin recuperación (no hay datos para validar ni clonar) | Población puede quedar < 15 ese día; se recupera al siguiente ciclo con datos |
 
 **SQL de la eliminación:**
 
@@ -930,7 +938,7 @@ Audit trail completo del Agente Juez.
 | `capital_pool_total` | float | Pool total en USD |
 | `capital_por_agente` | float | Cuota individual tras redistribución |
 | `slots_vacantes` | array | Slots no cubiertos en la reproducción (Fase 1, Sesión 17): `[{id, especie, razon}]`. Vacío si todos los cupos se llenaron. |
-| `slots_recuperados` | array | Cupos recuperados en este ciclo (Sesión 18): `[{id, especie, fitness_oos, origen}]` donde `origen` es `"torneo"` o `"hall_of_fame"`. Vacío si no hubo recuperación. |
+| `slots_recuperados` | array | Cupos recuperados en este ciclo (Sesión 18 / 19): `[{id, especie, fitness_oos, origen}]` donde `origen` ∈ `{"torneo", "hall_of_fame", "forzado_hof", "forzado_pool"}`. Los `forzado_*` (Sesión 19) son clones del mejor histórico cuando nadie superó el OOS, para garantizar los 15. Vacío si no hubo recuperación. |
 | `deficit_restante` | object | Déficit por especie no cubierto tras la recuperación (Sesión 18): `{especie: n}`. Vacío si no quedó déficit. |
 | `insight_mercado` | string | Comentario del LLM (vacío en días suspendidos sin recuperación) |
 | `recomendacion_parametros` | string | Sugerencias del LLM para próximas generaciones |
@@ -1207,8 +1215,9 @@ Todas las variables se definen en `.env` local (desarrollo) o en **GitHub Secret
 | `IMMUNITY_MAX_LOSS_PCT` | Revoca la inmunidad por muestra insuficiente si `roi_total ≤ −IMMUNITY_MAX_LOSS_PCT` (%). Default: `8.0`. No afecta el Periodo de Gracia. **Fase 3, desde Sesión 17.** |
 | `MIN_SAMPLE_DAYS` | Días hábiles mínimos alternativos a `MIN_SAMPLE_TRADES` (condición híbrida OR). Default: `7`. **Fase 4, desde Sesión 17.** |
 | `RUPTURA_SOLO_TENDENCIA` | Si `true`, la especie `ruptura` no abre posiciones en régimen `RANGO` (ni en el monitor de producción ni en el backtester OOS). NEUTRAL siempre opera. Default: `true`. **Fase 5, desde Sesión 17.** |
-| `TARGET_AGENTS_PER_ESPECIE` | Objetivo de agentes activos por especie. El motor intenta recuperar el déficit en cada ciclo. Default: `5`. **Sesión 18.** |
-| `REPOPULATION_MAX_PER_CYCLE` | Máximo de cupos vacantes que se intentan recuperar en un solo ciclo. Default: `3`. **Sesión 18.** |
+| `TARGET_AGENTS_PER_ESPECIE` | Objetivo de agentes activos por especie. El motor llena TODO el déficit cada ciclo (3 × 5 = 15 garantizados). Default: `5`. **Sesión 18 / 19.** |
+| `REPOPULATION_MAX_PER_CYCLE` | **DEPRECADO (Sesión 19).** El tope por ciclo se eliminó para garantizar los 15. Default: `3` (sin efecto). **Sesión 18.** |
+| `REPOPULATION_MAX_ATTEMPTS_PER_SLOT` | Rondas de reintento (torneo→HoF) por cupo antes del clon forzado del Hall of Fame. Acota el costo de backtests del cron. Default: `8`. **Sesión 19.** |
 | `LOG_LEVEL` | Nivel de logs (default: `INFO`) |
 | `ENVIRONMENT` | Ambiente (`production` / `development`) |
 
@@ -1260,9 +1269,9 @@ Cada 15 min de 1:30am a 10:30pm:
              ║         con backtest OOS + umbral de calidad;        ║
              ║         fallback Hall of Fame; slot vacante si       ║
              ║         ningún candidato pasa (Sesión 17).           ║
-             ║      7. Recuperación de cupos vacantes (Sesión 18):  ║
-             ║         rellena déficit por especie con mismo        ║
-             ║         pipeline OOS (hasta REPOPULATION_MAX).       ║
+             ║      7. Recuperar TODO el déficit hasta los 15       ║
+             ║         (Sesión 18/19): torneo→HoF ×8 rondas;        ║
+             ║         clon forzado del HoF si nadie pasa el OOS.   ║
              ║      8. Razonamiento LLM: veredicto y expectativas.  ║
              ║      9. Registro detallado en logs_juez.             ║
              ║     10. Redistribución de capital: pool ÷ activos    ║
@@ -1361,9 +1370,19 @@ Antigravity_Inversion_Evolutiva/
 
 ---
 
-*Documento actualizado el 2026-06-09 (Sesión 18 — recuperación de cupos vacantes: método `_try_repopulate`, constantes `TARGET_AGENTS_PER_ESPECIE`/`REPOPULATION_MAX_PER_CYCLE`, ciclo activo y suspendido, trazabilidad en `logs_juez.datos_json`, tests unitarios).*
+*Documento actualizado el 2026-06-10 (Sesión 19 — garantía de 15 agentes: sin tope por ciclo, reintentos por cupo y clon forzado del Hall of Fame como último recurso).*
 
 ## Historial de cambios mayores
+
+- **2026-06-10 (Sesión 19 — garantía de población de 15 agentes) · commit `feat(sesion-19): garantizar poblacion de 15 agentes en el ciclo evolutivo` · pendiente deploy:**
+  - **Contexto:** la recuperación de cupos de Sesión 18 tenía dos límites de diseño que impedían garantizar los 15 agentes: el tope `REPOPULATION_MAX_PER_CYCLE` (máx 3/ciclo) y el umbral OOS que dejaba cupos vacantes si ningún candidato pasaba. El usuario solicitó que **siempre existan 15 agentes**.
+  - **Sin tope por ciclo (`evolution/evolution_engine.py`):** `_try_repopulate()` ahora intenta llenar TODOS los cupos faltantes en un solo ciclo (`REPOPULATION_MAX_PER_CYCLE` queda deprecado, sin efecto).
+  - **Reintentos por cupo:** hasta `REPOPULATION_MAX_ATTEMPTS_PER_SLOT` rondas (default 8) de (torneo → umbral OOS) seguido de (HoF → umbral OOS), deteniéndose al primer candidato que pasa. Sube fuertemente la probabilidad de cubrir el cupo respetando el filtro de calidad.
+  - **Clon forzado como último recurso:** si tras agotar las rondas nadie supera el OOS, se clona el mejor agente del Hall of Fame (`origen='forzado_hof'`; si no hay HoF, el mejor del pool → `'forzado_pool'`). Genética probada, no aleatoria. Esto **garantiza los 15** en cualquier día con datos de mercado. El clon entra sin pasar el OOS de hoy, marcado para trazabilidad.
+  - **Fallback sin Yahoo Finance (preservado):** si no hay datos de mercado, la recuperación se omite por completo — no hay base para validar ni para clonar. Ese día la población puede quedar < 15 y se recupera al siguiente ciclo con datos.
+  - **Trazabilidad:** `origen` en `slots_recuperados` admite ahora `forzado_hof`/`forzado_pool`; `judge_agent.py` reporta en la descripción cuántos cupos se llenaron por clon forzado.
+  - **Tests:** `tests/test_sesion18_repopulacion.py` actualizado — 6 tests: llenado completo sin tope (4 cupos), llenado de los 15, omisión sin backtest, fallback HoF, clon forzado HoF, clon forzado pool. Suite: 45 no-DB verdes (3 fallos de BD esperados sin `DATABASE_URL`).
+  - **Nuevas env vars:** `REPOPULATION_MAX_ATTEMPTS_PER_SLOT=8` en `.env.example` y `judge_daily.yml`.
 
 - **2026-06-09 (Sesión 18 — recuperación de cupos vacantes) · commit `feat(sesion-18): recuperacion de cupos vacantes en el ciclo evolutivo` · pendiente deploy:**
   - **Contexto:** la Fase 1 de Sesión 17 introdujo el umbral OOS, lo que puede dejar slots vacantes cuando ningún candidato pasa el filtro de calidad. Con el tiempo, la población puede quedar por debajo de `TARGET_AGENTS_PER_ESPECIE` sin mecanismo de recuperación automática.

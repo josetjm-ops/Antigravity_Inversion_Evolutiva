@@ -167,11 +167,18 @@ IMMUNITY_MAX_LOSS_PCT = float(os.getenv("IMMUNITY_MAX_LOSS_PCT", "8.0"))
 # (p.ej. tendencia en régimen RANGO crónico) queden perpetuamente inmunes.
 MIN_SAMPLE_DAYS = int(os.getenv("MIN_SAMPLE_DAYS", "7"))
 
-# ── Recuperación de cupos vacantes (Sesión 18) ────────────────────────────────
-# Objetivo de agentes activos por especie; el motor intenta recuperar el déficit.
+# ── Recuperación de cupos vacantes (Sesión 18 / 19) ──────────────────────────
+# Objetivo de agentes activos por especie; el motor SIEMPRE intenta llenar todos
+# los cupos faltantes (3 especies × 5 = población objetivo de 15 agentes).
 TARGET_AGENTS_PER_ESPECIE  = int(os.getenv("TARGET_AGENTS_PER_ESPECIE",  "5"))
-# Máximo de cupos vacantes que se intentan recuperar por ciclo.
+# DEPRECADO (Sesión 19): el tope por ciclo se eliminó para garantizar los 15.
+# Se conserva el símbolo por compatibilidad con .env / imports antiguos.
 REPOPULATION_MAX_PER_CYCLE = int(os.getenv("REPOPULATION_MAX_PER_CYCLE", "3"))
+# Sesión 19: rondas de reintento (torneo → HoF) por cupo antes de recurrir al
+# clon forzado del Hall of Fame. Acota el costo de backtests para no colgar el cron.
+REPOPULATION_MAX_ATTEMPTS_PER_SLOT = int(
+    os.getenv("REPOPULATION_MAX_ATTEMPTS_PER_SLOT", "8")
+)
 
 
 # ── Fitness: Expectancy ajustada por riesgo (Fase 1) ────────────────────────
@@ -1104,19 +1111,30 @@ class EvolutionEngine:
         sr: float,
     ) -> tuple[list[dict], list[dict], dict]:
         """
-        Intenta recuperar cupos vacantes por especie.
+        Recupera TODOS los cupos vacantes por especie hasta la población objetivo
+        (Sesión 19: garantía de 15 agentes activos).
 
-        Usa el mismo pipeline de calidad que la reproducción normal:
-          torneo N candidatos → umbral OOS → fallback HoF → vacante (nunca forzado).
+        Pipeline por cupo:
+          1. Hasta REPOPULATION_MAX_ATTEMPTS_PER_SLOT rondas de
+             (torneo N candidatos → umbral OOS) seguido de (HoF N candidatos → OOS).
+             Se detiene en cuanto un candidato supera el umbral.
+          2. Si tras agotar las rondas nadie pasa → CLON FORZADO del mejor agente
+             del Hall of Fame (genética probada, origen='forzado_hof'); si no hay
+             HoF, del mejor del pool de torneo (origen='forzado_pool'). Esto
+             garantiza llenar el cupo sin insertar genética aleatoria.
 
-        Si backtest_data es None se omite silenciosamente (sin backtest no hay control
-        de calidad).
+        Sin tope por ciclo: se intentan todos los cupos faltantes.
+
+        Si backtest_data es None se omite silenciosamente (sin datos de mercado no
+        hay control de calidad ni base para clonar — respeta el fallback sin Yahoo).
 
         Returns:
           (recovered, slots_rec_log, deficit_restante)
-          - recovered: agentes que pasaron OOS (listos para insertar en DB).
+          - recovered: agentes listos para insertar en DB.
           - slots_rec_log: [{id, especie, fitness_oos, origen}] para trazabilidad.
-          - deficit_restante: {especie: n} cupos que no pudieron cubrirse.
+            origen ∈ {torneo, hall_of_fame, forzado_hof, forzado_pool}.
+          - deficit_restante: {especie: n} cupos que no pudieron cubrirse (solo en
+            casos degenerados sin pool ni HoF).
         """
         import logging
         _log = logging.getLogger(__name__)
@@ -1147,130 +1165,143 @@ class EvolutionEngine:
 
         from evolution.backtester import run_backtest, N_CANDIDATE_CHILDREN
 
+        def _passes_oos(bt: dict) -> bool:
+            return (
+                bt["fitness"] > TOURNAMENT_MIN_OOS_FITNESS
+                and bt["n_trades"] >= TOURNAMENT_MIN_OOS_TRADES
+            )
+
+        def _best_from_pool(pool: list[dict], esp_: str, cid: str) -> tuple[dict, dict]:
+            """Cría N_CANDIDATE_CHILDREN ponderados por aptitud y devuelve
+            (mejor_hijo, su_backtest). El pool debe tener >= 2 agentes."""
+            scores = [
+                max(float(a.get("fitness_score", a.get("roi_total", 0)) or 0), 0.0001)
+                for a in pool
+            ]
+            total_score = sum(scores)
+            weights = [s / total_score for s in scores]
+            candidates: list[tuple[dict, dict]] = []
+            for _c in range(N_CANDIDATE_CHILDREN):
+                p1, p2 = random.choices(pool, weights=weights, k=2)
+                if p1["id"] == p2["id"] and len(pool) > 1:
+                    p2 = random.choice([a for a in pool if a["id"] != p1["id"]])
+                candidate = breed_agent(
+                    p1, p2, cid, self.today, max_gen + 1,
+                    sigma_weights=sw, sigma_periods=sp, sigma_risk=sr,
+                    especie=esp_,
+                )
+                try:
+                    bt = run_backtest(backtest_data, candidate)
+                except Exception:
+                    bt = {"fitness": 0.0, "n_trades": 0}
+                candidates.append((candidate, bt))
+            return max(candidates, key=lambda x: x[1]["fitness"])
+
         recovered: list[dict] = []
         slots_rec_log: list[dict] = []
-        slots_tried = 0
         repop_idx = start_idx
 
+        # Sesión 19: SIN tope por ciclo — se intentan TODOS los cupos faltantes.
         for esp in ESPECIES:
             deficit = deficit_by_especie[esp]
             if deficit == 0:
                 continue
-            for _ in range(deficit):
-                if slots_tried >= REPOPULATION_MAX_PER_CYCLE:
-                    break
-                slots_tried += 1
 
+            same_species = [
+                a for a in parent_pool
+                if str(a.get("especie") or "tendencia") == esp
+            ]
+            tourn_pool = same_species if len(same_species) >= 2 else parent_pool
+
+            # HoF de la especie: se consulta una vez por especie (no por cupo).
+            try:
+                hof_parents = self._get_hof_parents(esp)
+            except Exception as _he:
+                _log.warning(
+                    "[EvolutionEngine] HoF query falló en repopulación: %s", _he
+                )
+                hof_parents = []
+
+            for _ in range(deficit):
                 child_id = f"{self.today.strftime('%Y-%m-%d')}_{repop_idx:02d}"
                 repop_idx += 1
 
-                same_species = [
-                    a for a in parent_pool
-                    if str(a.get("especie") or "tendencia") == esp
-                ]
-                pool = same_species if len(same_species) >= 2 else parent_pool
-                if len(pool) < 2:
+                child: dict | None = None
+                best_bt: dict | None = None
+                origen = ""
+
+                # ── Reintentos torneo → HoF hasta MAX_ATTEMPTS rondas ──────────
+                for _attempt in range(REPOPULATION_MAX_ATTEMPTS_PER_SLOT):
+                    if len(tourn_pool) >= 2:
+                        cand, bt = _best_from_pool(tourn_pool, esp, child_id)
+                        if _passes_oos(bt):
+                            child, best_bt, origen = cand, bt, "torneo"
+                            break
+                    if len(hof_parents) >= 2:
+                        cand, bt = _best_from_pool(hof_parents, esp, child_id)
+                        if _passes_oos(bt):
+                            child, best_bt, origen = cand, bt, "hall_of_fame"
+                            break
+
+                # ── Último recurso: CLON FORZADO del mejor histórico ───────────
+                # Garantiza el cupo. Genética probada (no aleatoria), pero entra
+                # sin superar el OOS de hoy. Se marca origen='forzado_*' para
+                # trazabilidad y se backtestea solo para registrar su fitness.
+                if child is None:
+                    forced_source = None
+                    forced_origen = ""
+                    if hof_parents:
+                        forced_source = max(
+                            hof_parents,
+                            key=lambda p: float(p.get("roi_total", 0) or 0),
+                        )
+                        forced_origen = "forzado_hof"
+                    elif tourn_pool:
+                        forced_source = max(
+                            tourn_pool,
+                            key=lambda p: float(p.get("fitness_score", 0) or 0),
+                        )
+                        forced_origen = "forzado_pool"
+
+                    if forced_source is not None:
+                        child = breed_agent(
+                            forced_source, forced_source, child_id, self.today,
+                            max_gen + 1, sigma_weights=sw, sigma_periods=sp,
+                            sigma_risk=sr, especie=esp,
+                        )
+                        try:
+                            best_bt = run_backtest(backtest_data, child)
+                        except Exception:
+                            best_bt = {"fitness": 0.0, "n_trades": 0}
+                        origen = forced_origen
+                        _log.warning(
+                            "[EvolutionEngine] Repopulación %s (%s): sin candidato OOS "
+                            "tras %d rondas → CLON FORZADO de %s (origen=%s).",
+                            child_id, esp, REPOPULATION_MAX_ATTEMPTS_PER_SLOT,
+                            forced_source["id"], origen,
+                        )
+
+                if child is None:
+                    # Degenerado: ni pool de torneo ni HoF disponibles.
                     _log.warning(
-                        "[EvolutionEngine] Repopulación %s (%s): pool insuficiente (%d).",
-                        child_id, esp, len(pool),
+                        "[EvolutionEngine] Repopulación %s (%s): sin pool ni HoF; "
+                        "cupo queda vacante.", child_id, esp,
                     )
                     continue
 
-                scores = [max(float(a.get("fitness_score", 0) or 0), 0.0001)
-                          for a in pool]
-                total_score = sum(scores)
-                weights = [s / total_score for s in scores]
-
-                candidates: list[tuple[dict, dict]] = []
-                for _c in range(N_CANDIDATE_CHILDREN):
-                    p1, p2 = random.choices(pool, weights=weights, k=2)
-                    if p1["id"] == p2["id"] and len(pool) > 1:
-                        p2 = random.choice([a for a in pool if a["id"] != p1["id"]])
-                    candidate = breed_agent(
-                        p1, p2, child_id, self.today, max_gen + 1,
-                        sigma_weights=sw, sigma_periods=sp, sigma_risk=sr,
-                        especie=esp,
-                    )
-                    try:
-                        bt = run_backtest(backtest_data, candidate)
-                    except Exception:
-                        bt = {"fitness": 0.0, "n_trades": 0}
-                    candidates.append((candidate, bt))
-
-                child, best_bt = max(candidates, key=lambda x: x[1]["fitness"])
-                passes = (
-                    best_bt["fitness"] > TOURNAMENT_MIN_OOS_FITNESS
-                    and best_bt["n_trades"] >= TOURNAMENT_MIN_OOS_TRADES
+                recovered.append(child)
+                slots_rec_log.append({
+                    "id":          child["id"],
+                    "especie":     esp,
+                    "fitness_oos": round(best_bt["fitness"], 6),
+                    "origen":      origen,
+                })
+                _log.info(
+                    "[EvolutionEngine] Repopulación %s (%s): cubierto via %s "
+                    "(fitness=%.5f, n=%d).",
+                    child["id"], esp, origen,
+                    best_bt["fitness"], best_bt["n_trades"],
                 )
-                origen = "torneo"
-
-                if not passes:
-                    try:
-                        hof_parents = self._get_hof_parents(esp)
-                    except Exception as _he:
-                        _log.warning(
-                            "[EvolutionEngine] HoF query falló en repopulación: %s", _he
-                        )
-                        hof_parents = []
-                    if len(hof_parents) >= 2:
-                        hof_scores = [
-                            max(float(p.get("roi_total", 0) or 0), 0.0001)
-                            for p in hof_parents
-                        ]
-                        hof_total = sum(hof_scores)
-                        hof_w = [s / hof_total for s in hof_scores]
-                        hof_candidates: list[tuple[dict, dict]] = []
-                        for _hc in range(N_CANDIDATE_CHILDREN):
-                            hp1, hp2 = random.choices(hof_parents, weights=hof_w, k=2)
-                            if hp1["id"] == hp2["id"] and len(hof_parents) > 1:
-                                hp2 = random.choice(
-                                    [p for p in hof_parents if p["id"] != hp1["id"]]
-                                )
-                            hof_child = breed_agent(
-                                hp1, hp2, child_id, self.today, max_gen + 1,
-                                sigma_weights=sw, sigma_periods=sp, sigma_risk=sr,
-                                especie=esp,
-                            )
-                            try:
-                                hof_bt = run_backtest(backtest_data, hof_child)
-                            except Exception:
-                                hof_bt = {"fitness": 0.0, "n_trades": 0}
-                            hof_candidates.append((hof_child, hof_bt))
-                        hof_best, hof_best_bt = max(
-                            hof_candidates, key=lambda x: x[1]["fitness"]
-                        )
-                        passes = (
-                            hof_best_bt["fitness"] > TOURNAMENT_MIN_OOS_FITNESS
-                            and hof_best_bt["n_trades"] >= TOURNAMENT_MIN_OOS_TRADES
-                        )
-                        if passes:
-                            child = hof_best
-                            best_bt = hof_best_bt
-                            origen = "hall_of_fame"
-
-                if passes:
-                    recovered.append(child)
-                    slots_rec_log.append({
-                        "id":          child["id"],
-                        "especie":     esp,
-                        "fitness_oos": round(best_bt["fitness"], 6),
-                        "origen":      origen,
-                    })
-                    _log.info(
-                        "[EvolutionEngine] Repopulación %s (%s): recuperado via %s "
-                        "(fitness=%.5f, n=%d).",
-                        child["id"], esp, origen,
-                        best_bt["fitness"], best_bt["n_trades"],
-                    )
-                else:
-                    _log.warning(
-                        "[EvolutionEngine] Repopulación %s (%s): ningún candidato superó "
-                        "umbral OOS (mejor fitness=%.5f, n=%d).",
-                        child_id, esp, best_bt["fitness"], best_bt["n_trades"],
-                    )
-
-            if slots_tried >= REPOPULATION_MAX_PER_CYCLE:
-                break
 
         recovered_by_esp: dict[str, int] = {esp: 0 for esp in ESPECIES}
         for r in slots_rec_log:

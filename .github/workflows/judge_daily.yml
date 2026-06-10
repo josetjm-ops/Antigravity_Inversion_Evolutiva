@@ -75,9 +75,10 @@ jobs:
       MIN_SAMPLE_DAYS:             "7"
       # Bloquear especie ruptura en régimen RANGO (coherencia backtest ↔ prod)
       RUPTURA_SOLO_TENDENCIA:      "true"
-      # ── Sesión 18: Recuperación de cupos vacantes ─────────────────────────
-      TARGET_AGENTS_PER_ESPECIE:   "5"
-      REPOPULATION_MAX_PER_CYCLE:  "3"
+      # ── Sesión 18 / 19: Recuperación de cupos vacantes (garantía de 15) ──
+      TARGET_AGENTS_PER_ESPECIE:        "5"
+      REPOPULATION_MAX_PER_CYCLE:       "3"   # deprecado (Sesión 19)
+      REPOPULATION_MAX_ATTEMPTS_PER_SLOT: "8"
       LOG_LEVEL:                   "INFO"
       ENVIRONMENT:                 "production"
 
