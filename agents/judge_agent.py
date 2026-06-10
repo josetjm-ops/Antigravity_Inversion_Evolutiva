@@ -209,6 +209,10 @@ class JudgeAgent(BaseAgent):
                         f" Slots vacantes: {len(result.slots_vacantes)} "
                         f"(ningún candidato superó el umbral OOS)."
                     )
+                if result.slots_recuperados:
+                    descripcion += (
+                        f" Cupos recuperados: {len(result.slots_recuperados)}."
+                    )
 
             self._log(
                 conn,
@@ -230,6 +234,8 @@ class JudgeAgent(BaseAgent):
                     "capital_pool_total":   result.capital_pool_total,
                     "capital_por_agente":   result.capital_por_agente,
                     "slots_vacantes":       result.slots_vacantes,
+                    "slots_recuperados":    result.slots_recuperados,
+                    "deficit_restante":     result.deficit_restante,
                     "insight_mercado":      insight,
                     "recomendacion_parametros": rec_params,
                 },
@@ -239,8 +245,9 @@ class JudgeAgent(BaseAgent):
                 ),
             )
 
-            # En días suspendidos no hay eliminaciones ni nuevos agentes que registrar.
-            if result.cycle_suspended:
+            # En días suspendidos no hay eliminaciones ni nuevos agentes que registrar,
+            # a menos que la repopulación haya creado nuevos agentes.
+            if result.cycle_suspended and not result.new_agents:
                 return
 
             # Log por cada eliminado — incluye fitness_score del ciclo

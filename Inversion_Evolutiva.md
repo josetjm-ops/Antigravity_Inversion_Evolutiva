@@ -562,7 +562,9 @@ Para que esto funcione en la "ventana ciega" de 03:30 – 06:30 UTC (11pm – 1:
 
 4. ¿CICLO SUSPENDIDO?
    ───────────────────
-   Si cuota dinámica = 0: ciclo suspendido, sin eliminación/reproducción/redistribución.
+   Si cuota dinámica = 0: ciclo suspendido, sin eliminación/reproducción normal.
+   La recuperación de cupos vacantes (paso 7) aún se intenta si hay déficit de población
+   y los datos de Yahoo Finance están disponibles.
 
 5. FORZADO DE DIVERSIDAD GENÉTICA
    ───────────────────────────────
@@ -599,12 +601,27 @@ Para que esto funcione en la "ventana ciega" de 03:30 – 06:30 UTC (11pm – 1:
        crisis — se prefieren los que el OOS sugiere que son mejores.
    Agentes con < MIN_SAMPLE_TRADES tienen fitness ≈ 0 → raramente seleccionados.
 
-7. RAZONAMIENTO LLM (solo si el ciclo NO está suspendido)
+7. RECUPERACIÓN DE CUPOS VACANTES (Sesión 18)
+   ────────────────────────────────────────────
+   Después de la reproducción (o en ciclo suspendido), el motor calcula el déficit
+   por especie: TARGET_AGENTS_PER_ESPECIE − n_activos_especie.
+   Para cada cupo faltante (hasta REPOPULATION_MAX_PER_CYCLE intentos por ciclo):
+     a. Usar los mismos datos de backtest ya descargados (sin nueva descarga de red).
+     b. Aplicar el mismo pipeline de calidad: torneo de N candidatos → umbral OOS →
+        fallback HoF → slot vacante si ninguno pasa (nunca se fuerza).
+     c. Si Yahoo Finance no está disponible → omitir silenciosamente.
+   Los agentes recuperados se insertan en la misma transacción DB y reciben capital
+   de la redistribución de ese mismo ciclo.
+   Trazabilidad: `slots_recuperados` y `deficit_restante` en `logs_juez.datos_json`.
+   Ciclo suspendido: si hay recuperados → la redistribución de capital sí se ejecuta.
 
-8. PERSISTENCIA EN LOGS (logs_juez: evaluacion_diaria, eliminacion, nuevo_agente)
+8. RAZONAMIENTO LLM (solo si el ciclo NO está suspendido, o si hubo recuperados)
 
-9. REDISTRIBUCIÓN DE CAPITAL
-   pool_total / n_agentes_activos → todos inician el día siguiente igualados.
+9. PERSISTENCIA EN LOGS (logs_juez: evaluacion_diaria, eliminacion, nuevo_agente)
+
+10. REDISTRIBUCIÓN DE CAPITAL
+    pool_total / n_agentes_activos → todos inician el día siguiente igualados.
+    Incluye agentes recuperados en el paso 7.
 ```
 
 ### Cálculo del Fitness — Expectancy ajustada (Fase 1)
@@ -757,6 +774,7 @@ El valor de `genetic_variance_cv` y el flag `sigma_boost_applied` quedan registr
 | **Inicio del sistema** | Script manual de siembra con parámetros fijos o copiados de agentes previos |
 | **Reproducción diaria** | El Juez selecciona 2 padres del pool de supervivientes elegibles (fitness-proporcional; pesos OOS si todos pierden) y los cruza con mutación. Torneo de 3 candidatos backtesteados OOS — solo se despliega el mejor si supera el umbral de calidad (Sesión 17) |
 | **Fallback Hall of Fame** | Si ningún candidato del torneo supera el umbral OOS, se crían 3 candidatos con genes del Hall of Fame (misma especie primero) y se aplica el mismo umbral. Si tampoco pasan: slot vacante (Sesión 17) |
+| **Recuperación de cupos (Sesión 18)** | En cada ciclo, el motor detecta el déficit por especie (`TARGET_AGENTS_PER_ESPECIE − activos`). Para cada cupo faltante (hasta `REPOPULATION_MAX_PER_CYCLE`) aplica el mismo pipeline de calidad (torneo → HoF → vacante). Nunca fuerza un agente que no supera el umbral OOS. |
 | **Reset manual** | Limpieza total de la DB e inserción de nueva generación semilla |
 | **Registro en Hall of Fame** | `estrategias_exitosas` captura los genes de agentes con ROI > 0.05% para herencia futura |
 
@@ -798,9 +816,9 @@ La cuota de eliminación no es rígida. Cada tarde el motor calcula cuántos age
 
 | Escenario | Eliminados | Nacimientos | Razón |
 |---|---|---|---|
-| Día normal con veteranos negativos | 1 a 9 | 0 al mismo número — un cupo queda vacante si ningún candidato supera el umbral OOS (Sesión 17) | Bottom por fitness, respetando máx 3/especie |
-| Día de HOLD generalizado | 0 | 0 | Todos los activos están en inmunidad/gracia |
-| Veteranos rentables protegidos | 0 | 0 | Todos los elegibles tienen fitness > 0 |
+| Día normal con veteranos negativos | 1 a 9 | 0 al mismo número (reproducción) + 0 a `REPOPULATION_MAX_PER_CYCLE` (recuperación de déficit previo) | Bottom por fitness, respetando máx 3/especie |
+| Día de HOLD generalizado | 0 | 0 a `REPOPULATION_MAX_PER_CYCLE` (solo recuperación, si hay déficit y Yahoo disponible) | Todos los activos están en inmunidad/gracia |
+| Veteranos rentables protegidos | 0 | 0 a `REPOPULATION_MAX_PER_CYCLE` (solo recuperación) | Todos los elegibles tienen fitness > 0 |
 
 **SQL de la eliminación:**
 
@@ -912,7 +930,9 @@ Audit trail completo del Agente Juez.
 | `capital_pool_total` | float | Pool total en USD |
 | `capital_por_agente` | float | Cuota individual tras redistribución |
 | `slots_vacantes` | array | Slots no cubiertos en la reproducción (Fase 1, Sesión 17): `[{id, especie, razon}]`. Vacío si todos los cupos se llenaron. |
-| `insight_mercado` | string | Comentario del LLM (vacío en días suspendidos) |
+| `slots_recuperados` | array | Cupos recuperados en este ciclo (Sesión 18): `[{id, especie, fitness_oos, origen}]` donde `origen` es `"torneo"` o `"hall_of_fame"`. Vacío si no hubo recuperación. |
+| `deficit_restante` | object | Déficit por especie no cubierto tras la recuperación (Sesión 18): `{especie: n}`. Vacío si no quedó déficit. |
+| `insight_mercado` | string | Comentario del LLM (vacío en días suspendidos sin recuperación) |
 | `recomendacion_parametros` | string | Sugerencias del LLM para próximas generaciones |
 
 Estos campos permiten al Dashboard Streamlit (y a cualquier consulta SQL ad-hoc en Supabase) reconstruir con total trazabilidad qué pasó cada día y por qué.
@@ -1187,6 +1207,8 @@ Todas las variables se definen en `.env` local (desarrollo) o en **GitHub Secret
 | `IMMUNITY_MAX_LOSS_PCT` | Revoca la inmunidad por muestra insuficiente si `roi_total ≤ −IMMUNITY_MAX_LOSS_PCT` (%). Default: `8.0`. No afecta el Periodo de Gracia. **Fase 3, desde Sesión 17.** |
 | `MIN_SAMPLE_DAYS` | Días hábiles mínimos alternativos a `MIN_SAMPLE_TRADES` (condición híbrida OR). Default: `7`. **Fase 4, desde Sesión 17.** |
 | `RUPTURA_SOLO_TENDENCIA` | Si `true`, la especie `ruptura` no abre posiciones en régimen `RANGO` (ni en el monitor de producción ni en el backtester OOS). NEUTRAL siempre opera. Default: `true`. **Fase 5, desde Sesión 17.** |
+| `TARGET_AGENTS_PER_ESPECIE` | Objetivo de agentes activos por especie. El motor intenta recuperar el déficit en cada ciclo. Default: `5`. **Sesión 18.** |
+| `REPOPULATION_MAX_PER_CYCLE` | Máximo de cupos vacantes que se intentan recuperar en un solo ciclo. Default: `3`. **Sesión 18.** |
 | `LOG_LEVEL` | Nivel de logs (default: `INFO`) |
 | `ENVIRONMENT` | Ambiente (`production` / `development`) |
 
@@ -1222,11 +1244,13 @@ Cada 15 min de 1:30am a 10:30pm:
              ║  ¿Cuota = 0?                                         ║
              ╠══════════════════════════════════════════════════════╣
              ║  SÍ → CICLO SUSPENDIDO                               ║
-             ║      - No se elimina, no se reproduce, no se         ║
-             ║        redistribuye capital.                         ║
-             ║      - Log único 'evaluacion_diaria' con             ║
+             ║      - No se elimina ni se reproduce normalmente.    ║
+             ║      - 7. Recuperación de cupos: si hay déficit y   ║
+             ║           Yahoo disponible, se intenta rellenar      ║
+             ║           (con redistribución si hay recuperados).  ║
+             ║      - Log 'evaluacion_diaria' con                   ║
              ║        cycle_suspended=true.                         ║
-             ║      - No se invoca al LLM (ahorro de tokens).       ║
+             ║      - LLM omitido salvo que haya recuperados.       ║
              ║                                                      ║
              ║  NO → CICLO ACTIVO                                   ║
              ║      4. Forzado de diversidad: si CV bajo,           ║
@@ -1236,9 +1260,13 @@ Cada 15 min de 1:30am a 10:30pm:
              ║         con backtest OOS + umbral de calidad;        ║
              ║         fallback Hall of Fame; slot vacante si       ║
              ║         ningún candidato pasa (Sesión 17).           ║
-             ║      7. Razonamiento LLM: veredicto y expectativas.  ║
-             ║      8. Registro detallado en logs_juez.             ║
-             ║      9. Redistribución de capital: pool ÷ activos.   ║
+             ║      7. Recuperación de cupos vacantes (Sesión 18):  ║
+             ║         rellena déficit por especie con mismo        ║
+             ║         pipeline OOS (hasta REPOPULATION_MAX).       ║
+             ║      8. Razonamiento LLM: veredicto y expectativas.  ║
+             ║      9. Registro detallado en logs_juez.             ║
+             ║     10. Redistribución de capital: pool ÷ activos    ║
+             ║         (incluye agentes recuperados en paso 7).     ║
              ╚══════════════════════════════════════════════════════╝
 
 11:05pm  ─── Sistema queda en reposo hasta el día siguiente (1:30am)
@@ -1333,9 +1361,20 @@ Antigravity_Inversion_Evolutiva/
 
 ---
 
-*Documento actualizado el 2026-06-09 (Sesión 17 — Fases 1-5: torneo con umbral OOS, selección por OOS cuando pool negativo, inmunidad revocable por drawdown, elegibilidad híbrida por días, ruptura bloqueada en RANGO. Incluye auditoría completa del documento contra el código en producción: diagrama de arquitectura, tabla de especies, clasificador ADX, flujo diario, escenarios de creación/eliminación y parámetros del workflow alineados con el comportamiento actual).*
+*Documento actualizado el 2026-06-09 (Sesión 18 — recuperación de cupos vacantes: método `_try_repopulate`, constantes `TARGET_AGENTS_PER_ESPECIE`/`REPOPULATION_MAX_PER_CYCLE`, ciclo activo y suspendido, trazabilidad en `logs_juez.datos_json`, tests unitarios).*
 
 ## Historial de cambios mayores
+
+- **2026-06-09 (Sesión 18 — recuperación de cupos vacantes) · commit `feat(sesion-18): recuperacion de cupos vacantes en el ciclo evolutivo` · pendiente deploy:**
+  - **Contexto:** la Fase 1 de Sesión 17 introdujo el umbral OOS, lo que puede dejar slots vacantes cuando ningún candidato pasa el filtro de calidad. Con el tiempo, la población puede quedar por debajo de `TARGET_AGENTS_PER_ESPECIE` sin mecanismo de recuperación automática.
+  - **Implementación (`evolution/evolution_engine.py`):** nuevo método `_try_repopulate()` que calcula el déficit por especie (`TARGET_AGENTS_PER_ESPECIE − activos`) y, para cada cupo faltante (hasta `REPOPULATION_MAX_PER_CYCLE` intentos), aplica el mismo pipeline de calidad: torneo de N candidatos → umbral OOS → fallback HoF → slot vacante (nunca forzado). Reutiliza los datos de backtest ya descargados en el ciclo.
+  - **Ciclo activo:** la recuperación se ejecuta después de la reproducción normal (paso 7) y antes de la redistribución de capital. Los agentes recuperados se incluyen en la redistribución.
+  - **Ciclo suspendido:** la recuperación aún se intenta si hay déficit; descarga datos de Yahoo si no los tiene. Si la recuperación tiene éxito, la redistribución de capital se ejecuta (antes no se redistribuía en ciclos suspendidos).
+  - **Invariante de calidad:** el control OOS es innegociable. Un agente que no supera `TOURNAMENT_MIN_OOS_FITNESS` / `TOURNAMENT_MIN_OOS_TRADES` nunca se inserta, ni en recuperación ni en reproducción normal.
+  - **Fallback sin Yahoo Finance:** si `fetch_backtest_data()` falla → repopulación omitida silenciosamente (el déficit se reporta en `deficit_restante` pero ningún agente se inserta sin control de calidad).
+  - **Trazabilidad:** `slots_recuperados: [{id, especie, fitness_oos, origen}]` y `deficit_restante: {especie: n}` añadidos a `EvolutionResult` y a `logs_juez.datos_json` del evento `evaluacion_diaria`. Los hijos recuperados también generan su evento `nuevo_agente` normal en `judge_agent.py`.
+  - **Nuevas env vars:** `TARGET_AGENTS_PER_ESPECIE=5`, `REPOPULATION_MAX_PER_CYCLE=3` en `.env.example` y `judge_daily.yml`.
+  - **Tests:** 5 tests unitarios nuevos en `tests/test_sesion18_repopulacion.py` (sin DB ni red): déficit detectado y cubierto, omisión sin backtest, respeto de cap `REPOPULATION_MAX_PER_CYCLE`, fallback HoF, control de calidad estricto (no forzar). Suite completa: 44/44 no-DB + 5 nuevos = 49 tests verdes (3 fallos de BD esperados sin `DATABASE_URL`).
 
 - **2026-06-09 (Sesión 17 — 5 mejoras evolutivas: Fases 1-5) · commits `feat(sesion-17-fase-1..5)` · en producción:**
   - **Contexto:** pool con caída de −0.86 % identificó tres causas raíz: (1) torneo sin umbral de calidad desplegaba hijos con fitness OOS ≤ 0; (2) selección de padres uniforme cuando todo el pool es negativo; (3) inmunidad por muestra insuficiente sin tope de pérdida permitía agentes con drawdown severo sobrevivir indefinidamente.

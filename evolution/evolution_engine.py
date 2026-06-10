@@ -167,6 +167,12 @@ IMMUNITY_MAX_LOSS_PCT = float(os.getenv("IMMUNITY_MAX_LOSS_PCT", "8.0"))
 # (p.ej. tendencia en régimen RANGO crónico) queden perpetuamente inmunes.
 MIN_SAMPLE_DAYS = int(os.getenv("MIN_SAMPLE_DAYS", "7"))
 
+# ── Recuperación de cupos vacantes (Sesión 18) ────────────────────────────────
+# Objetivo de agentes activos por especie; el motor intenta recuperar el déficit.
+TARGET_AGENTS_PER_ESPECIE  = int(os.getenv("TARGET_AGENTS_PER_ESPECIE",  "5"))
+# Máximo de cupos vacantes que se intentan recuperar por ciclo.
+REPOPULATION_MAX_PER_CYCLE = int(os.getenv("REPOPULATION_MAX_PER_CYCLE", "3"))
+
 
 # ── Fitness: Expectancy ajustada por riesgo (Fase 1) ────────────────────────
 #
@@ -544,6 +550,12 @@ class EvolutionResult:
     # Slots que quedaron vacantes porque ningún candidato superó el umbral OOS.
     # Cada elemento: {"id": child_id, "especie": especie, "razon": str}.
     slots_vacantes: list[dict] = field(default_factory=list)
+
+    # ── Recuperación de cupos vacantes (Sesión 18) ─────────────────────────
+    # Cupos recuperados este ciclo: [{id, especie, fitness_oos, origen}].
+    slots_recuperados: list[dict] = field(default_factory=list)
+    # Déficit residual por especie que no pudo cubrirse: {especie: int}.
+    deficit_restante: dict = field(default_factory=dict)
 
 
 class EvolutionEngine:
@@ -1078,6 +1090,199 @@ class EvolutionEngine:
 
         return pool_total, capital_por_agente
 
+    # ── Recuperación de cupos vacantes (Sesión 18) ───────────────────────────
+
+    def _try_repopulate(
+        self,
+        current_population: list[dict],
+        parent_pool: list[dict],
+        backtest_data,
+        start_idx: int,
+        max_gen: int,
+        sw: float,
+        sp: float,
+        sr: float,
+    ) -> tuple[list[dict], list[dict], dict]:
+        """
+        Intenta recuperar cupos vacantes por especie.
+
+        Usa el mismo pipeline de calidad que la reproducción normal:
+          torneo N candidatos → umbral OOS → fallback HoF → vacante (nunca forzado).
+
+        Si backtest_data es None se omite silenciosamente (sin backtest no hay control
+        de calidad).
+
+        Returns:
+          (recovered, slots_rec_log, deficit_restante)
+          - recovered: agentes que pasaron OOS (listos para insertar en DB).
+          - slots_rec_log: [{id, especie, fitness_oos, origen}] para trazabilidad.
+          - deficit_restante: {especie: n} cupos que no pudieron cubrirse.
+        """
+        import logging
+        _log = logging.getLogger(__name__)
+
+        ESPECIES = ("tendencia", "reversion", "ruptura")
+
+        count_by_especie: dict[str, int] = {esp: 0 for esp in ESPECIES}
+        for a in current_population:
+            esp = str(a.get("especie") or "tendencia")
+            if esp in count_by_especie:
+                count_by_especie[esp] += 1
+
+        deficit_by_especie: dict[str, int] = {
+            esp: max(0, TARGET_AGENTS_PER_ESPECIE - count_by_especie[esp])
+            for esp in ESPECIES
+        }
+        total_deficit = sum(deficit_by_especie.values())
+
+        if total_deficit == 0:
+            return [], [], {}
+
+        if backtest_data is None:
+            _log.info(
+                "[EvolutionEngine] Repopulación omitida: backtest no disponible. "
+                "Déficit: %s", deficit_by_especie,
+            )
+            return [], [], {esp: d for esp, d in deficit_by_especie.items() if d > 0}
+
+        from evolution.backtester import run_backtest, N_CANDIDATE_CHILDREN
+
+        recovered: list[dict] = []
+        slots_rec_log: list[dict] = []
+        slots_tried = 0
+        repop_idx = start_idx
+
+        for esp in ESPECIES:
+            deficit = deficit_by_especie[esp]
+            if deficit == 0:
+                continue
+            for _ in range(deficit):
+                if slots_tried >= REPOPULATION_MAX_PER_CYCLE:
+                    break
+                slots_tried += 1
+
+                child_id = f"{self.today.strftime('%Y-%m-%d')}_{repop_idx:02d}"
+                repop_idx += 1
+
+                same_species = [
+                    a for a in parent_pool
+                    if str(a.get("especie") or "tendencia") == esp
+                ]
+                pool = same_species if len(same_species) >= 2 else parent_pool
+                if len(pool) < 2:
+                    _log.warning(
+                        "[EvolutionEngine] Repopulación %s (%s): pool insuficiente (%d).",
+                        child_id, esp, len(pool),
+                    )
+                    continue
+
+                scores = [max(float(a.get("fitness_score", 0) or 0), 0.0001)
+                          for a in pool]
+                total_score = sum(scores)
+                weights = [s / total_score for s in scores]
+
+                candidates: list[tuple[dict, dict]] = []
+                for _c in range(N_CANDIDATE_CHILDREN):
+                    p1, p2 = random.choices(pool, weights=weights, k=2)
+                    if p1["id"] == p2["id"] and len(pool) > 1:
+                        p2 = random.choice([a for a in pool if a["id"] != p1["id"]])
+                    candidate = breed_agent(
+                        p1, p2, child_id, self.today, max_gen + 1,
+                        sigma_weights=sw, sigma_periods=sp, sigma_risk=sr,
+                        especie=esp,
+                    )
+                    try:
+                        bt = run_backtest(backtest_data, candidate)
+                    except Exception:
+                        bt = {"fitness": 0.0, "n_trades": 0}
+                    candidates.append((candidate, bt))
+
+                child, best_bt = max(candidates, key=lambda x: x[1]["fitness"])
+                passes = (
+                    best_bt["fitness"] > TOURNAMENT_MIN_OOS_FITNESS
+                    and best_bt["n_trades"] >= TOURNAMENT_MIN_OOS_TRADES
+                )
+                origen = "torneo"
+
+                if not passes:
+                    try:
+                        hof_parents = self._get_hof_parents(esp)
+                    except Exception as _he:
+                        _log.warning(
+                            "[EvolutionEngine] HoF query falló en repopulación: %s", _he
+                        )
+                        hof_parents = []
+                    if len(hof_parents) >= 2:
+                        hof_scores = [
+                            max(float(p.get("roi_total", 0) or 0), 0.0001)
+                            for p in hof_parents
+                        ]
+                        hof_total = sum(hof_scores)
+                        hof_w = [s / hof_total for s in hof_scores]
+                        hof_candidates: list[tuple[dict, dict]] = []
+                        for _hc in range(N_CANDIDATE_CHILDREN):
+                            hp1, hp2 = random.choices(hof_parents, weights=hof_w, k=2)
+                            if hp1["id"] == hp2["id"] and len(hof_parents) > 1:
+                                hp2 = random.choice(
+                                    [p for p in hof_parents if p["id"] != hp1["id"]]
+                                )
+                            hof_child = breed_agent(
+                                hp1, hp2, child_id, self.today, max_gen + 1,
+                                sigma_weights=sw, sigma_periods=sp, sigma_risk=sr,
+                                especie=esp,
+                            )
+                            try:
+                                hof_bt = run_backtest(backtest_data, hof_child)
+                            except Exception:
+                                hof_bt = {"fitness": 0.0, "n_trades": 0}
+                            hof_candidates.append((hof_child, hof_bt))
+                        hof_best, hof_best_bt = max(
+                            hof_candidates, key=lambda x: x[1]["fitness"]
+                        )
+                        passes = (
+                            hof_best_bt["fitness"] > TOURNAMENT_MIN_OOS_FITNESS
+                            and hof_best_bt["n_trades"] >= TOURNAMENT_MIN_OOS_TRADES
+                        )
+                        if passes:
+                            child = hof_best
+                            best_bt = hof_best_bt
+                            origen = "hall_of_fame"
+
+                if passes:
+                    recovered.append(child)
+                    slots_rec_log.append({
+                        "id":          child["id"],
+                        "especie":     esp,
+                        "fitness_oos": round(best_bt["fitness"], 6),
+                        "origen":      origen,
+                    })
+                    _log.info(
+                        "[EvolutionEngine] Repopulación %s (%s): recuperado via %s "
+                        "(fitness=%.5f, n=%d).",
+                        child["id"], esp, origen,
+                        best_bt["fitness"], best_bt["n_trades"],
+                    )
+                else:
+                    _log.warning(
+                        "[EvolutionEngine] Repopulación %s (%s): ningún candidato superó "
+                        "umbral OOS (mejor fitness=%.5f, n=%d).",
+                        child_id, esp, best_bt["fitness"], best_bt["n_trades"],
+                    )
+
+            if slots_tried >= REPOPULATION_MAX_PER_CYCLE:
+                break
+
+        recovered_by_esp: dict[str, int] = {esp: 0 for esp in ESPECIES}
+        for r in slots_rec_log:
+            recovered_by_esp[r["especie"]] += 1
+        deficit_restante = {
+            esp: deficit_by_especie[esp] - recovered_by_esp[esp]
+            for esp in ESPECIES
+            if deficit_by_especie[esp] - recovered_by_esp[esp] > 0
+        }
+
+        return recovered, slots_rec_log, deficit_restante
+
     # ── Ciclo evolutivo completo ──────────────────────────────────────────────
 
     def run(self) -> EvolutionResult:
@@ -1142,22 +1347,63 @@ class EvolutionEngine:
                 result.eliminated = []
                 result.new_agents = []
 
-                # Snapshot de ranking para auditoría diaria (sin redistribuir capital).
+                # ── Sesión 18: intentar recuperación de cupos en ciclo suspendido ──
+                _susp_bt_data = None
+                try:
+                    from evolution.backtester import fetch_backtest_data as _fetch_bt
+                    _susp_bt_data = _fetch_bt()
+                except Exception as _susp_exc:
+                    import logging as _lg_susp
+                    _lg_susp.getLogger(__name__).warning(
+                        "[EvolutionEngine] Ciclo suspendido: backtest no disponible "
+                        "(%s) — repopulación omitida.", _susp_exc,
+                    )
+                _susp_next_idx = self._get_next_agent_index()
+                _susp_max_gen  = max((int(a["generacion"]) for a in agents), default=0)
+                _recovered_s, _slots_rec_s, _deficit_rest_s = self._try_repopulate(
+                    current_population=agents,
+                    parent_pool=agents,
+                    backtest_data=_susp_bt_data,
+                    start_idx=_susp_next_idx,
+                    max_gen=_susp_max_gen,
+                    sw=SIGMA_WEIGHTS, sp=SIGMA_PERIODS, sr=SIGMA_RISK,
+                )
+                if _recovered_s:
+                    result.new_agents = _recovered_s
+                result.slots_recuperados = _slots_rec_s
+                result.deficit_restante  = _deficit_rest_s
+                # ──────────────────────────────────────────────────────────────
+
+                # Snapshot de ranking para auditoría diaria (sin redistribuir capital
+                # salvo que la repopulación haya tenido éxito).
                 # NOTA: el CHECK constraint de ranking_historico.evento solo acepta
                 # 'supervivencia', 'eliminacion', 'nacimiento', 'evaluacion'. La
-                # distincion entre supervivencia normal y supervivencia por gracia
-                # queda registrada en logs_juez.datos_json (immune_agents,
-                # cycle_suspended, suspension_reason).
+                # distincion entre supervivencia normal y suspensión queda en
+                # logs_juez.datos_json (immune_agents, cycle_suspended, suspension_reason).
                 evento_map = {a["id"]: "supervivencia" for a in agents}
+                for _ra in _recovered_s:
+                    evento_map[_ra["id"]] = "nacimiento"
                 with get_conn() as conn:
                     self._snapshot_ranking(conn, agents, evento_map)
-                    # Pool informativo: suma del capital actual sin redistribuir.
-                    pool_total = round(
-                        sum(float(a.get("capital_actual", 10.0)) for a in agents), 4
-                    )
-                    n_active = len(agents) or 1
-                    result.capital_pool_total = pool_total
-                    result.capital_por_agente = round(pool_total / n_active, 4)
+                    for _ra in _recovered_s:
+                        self._insert_new_agent(conn, _ra)
+                    if _recovered_s:
+                        self._snapshot_ranking(conn, _recovered_s, evento_map)
+                        _pool_s = round(
+                            sum(float(a.get("capital_actual", 10.0)) for a in agents), 4
+                        )
+                        pool_total, _cap_s = self._redistribute_capital(
+                            conn, [a["id"] for a in _recovered_s], pool_override=_pool_s
+                        )
+                        result.capital_pool_total = pool_total
+                        result.capital_por_agente = _cap_s
+                    else:
+                        pool_total = round(
+                            sum(float(a.get("capital_actual", 10.0)) for a in agents), 4
+                        )
+                        n_active = len(agents) or 1
+                        result.capital_pool_total = pool_total
+                        result.capital_por_agente = round(pool_total / n_active, 4)
 
                 result.ranking_snapshot = [
                     {"id": a["id"], "posicion": i + 1, "roi": a.get("roi_total", 0)}
@@ -1389,6 +1635,21 @@ class EvolutionEngine:
 
             result.new_agents    = new_agents
             result.slots_vacantes = slots_vacantes
+
+            # ── Sesión 18: Recuperar cupos vacantes ───────────────────────────
+            _recovered, _slots_rec_log, _deficit_rest = self._try_repopulate(
+                current_population=survivors_all + new_agents,
+                parent_pool=survivors_all,
+                backtest_data=backtest_data if use_backtest else None,
+                start_idx=next_idx + len(eliminated),
+                max_gen=max_gen,
+                sw=sw, sp=sp, sr=sr,
+            )
+            if _recovered:
+                new_agents.extend(_recovered)
+                result.new_agents = new_agents
+            result.slots_recuperados = _slots_rec_log
+            result.deficit_restante  = _deficit_rest
 
             # Pool real del día: suma de todos los agentes ANTES de eliminar/nacer ninguno.
             pool_total_eod = round(
