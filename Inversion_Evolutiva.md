@@ -25,7 +25,7 @@
 
 ## 1. Objetivo del sistema
 
-**Inversión Evolutiva** es un laboratorio de trading algorítmico que aplica algoritmos genéticos al mercado de divisas EUR/USD. El sistema mantiene una población de **15 agentes** de software (5 por cada uno de los 3 arquetipos estratégicos) que compiten entre sí para determinar cuáles estrategias de trading son más rentables ajustadas al riesgo.
+**Inversión Evolutiva** es un laboratorio de trading algorítmico que aplica algoritmos genéticos al mercado de divisas EUR/USD. El sistema mantiene una población de **15 agentes** de software (5 por cada uno de los 3 arquetipos estratégicos) que compiten entre sí para determinar cuáles estrategias de trading son más rentables ajustadas al riesgo. Desde la Sesión 17 la población puede quedar temporalmente por debajo de 15: si en la reproducción ningún candidato supera el umbral de calidad OOS (ni con fallback al Hall of Fame), el cupo queda vacante y el pool de capital se redistribuye entre los agentes realmente activos.
 
 Los agentes **no son configurados manualmente**: nacen con parámetros aleatorios o heredados, operan de forma autónoma durante el día y cada tarde son evaluados. Los peores son eliminados y los mejores reproducen descendencia con mutaciones estocásticas. Con el tiempo, la población converge hacia estrategias más eficientes sin intervención humana.
 
@@ -89,7 +89,7 @@ Los agentes **no son configurados manualmente**: nacen con parámetros aleatorio
 │  ┌──────────────────┐       ┌──────────────────────┐            │
 │  │  TradeMonitor    │       │  Agente Juez         │            │
 │  │  - Verifica SL/TP│       │  - Evalúa fitness    │            │
-│  │  - Trailing stop │       │  - Elimina bottom 5  │            │
+│  │  - Trailing stop │       │  - Elimina hasta 9   │            │
 │  │  - Abre pos. new │       │  - Crea hasta 9 hijos│            │
 │  └────────┬─────────┘       │  - Redistribuye cap. │            │
 │           │                 │  - Razona con LLM    │            │
@@ -205,7 +205,7 @@ Cada agente lleva cuatro diccionarios JSON que constituyen su "ADN". Estos pará
 |---|---|---|---|
 | `tendencia` | Momentum multi-timeframe: RSI cruce 50 + EMA + MACD alineados con tendencia 1h | ADX ≥ 25 (mercado con dirección clara) | Activo (veta señales contra-tendencia) |
 | `reversion` | Mean-reversion en extremos RSI + OB/FVG estructural en mercado lateral | ADX < 25 (mercado en rango) | Desactivado (opera deliberadamente contra-tendencia) |
-| `ruptura` | Breakout de estructura (cierre fuera del rango N velas) confirmado por range_spike | Ambos regímenes | Activo |
+| `ruptura` | Breakout de estructura (cierre fuera del rango N velas) confirmado por range_spike | ADX ≥ 25 o NEUTRAL — bloqueada en RANGO desde Sesión 17 (`RUPTURA_SOLO_TENDENCIA=true`) | Activo |
 
 La especie es **inmutable por mutación gaussiana**: el hijo hereda siempre la especie del agente eliminado que reemplaza (reproducción como-por-como), preservando la distribución de arquetipos. Solo cambia si la evolución decide que una especie no merece representación (pero el motor garantiza mínimo 2 agentes por especie activos).
 
@@ -275,7 +275,7 @@ Yahoo Finance
 **Clasificador de régimen ADX (compartido, calculado una vez por ciclo):**
 `calc_regime()` calcula el ADX(14) sobre las velas de 15m y clasifica:
 - ADX ≥ 25 → `TENDENCIA` (S1 y S3 habilitados; S2 bloqueado)
-- ADX < 25 → `RANGO` (S2 habilitado; S1 bloqueado)
+- ADX < 25 → `RANGO` (S2 habilitado; S1 bloqueado; S3 también bloqueado desde Sesión 17 cuando `RUPTURA_SOLO_TENDENCIA=true`, el default)
 - Sin datos → `NEUTRAL` (todas las especies pueden operar)
 
 Este gate se aplica en `trade_monitor._evaluate_new_positions()` **antes** del pipeline A→B→C. Un agente bloqueado por régimen incompatible cuenta como evaluado pero no genera señal.
@@ -632,7 +632,8 @@ Walk-forward split:
 
 Dentro del período OOS, la simulación replica producción exactamente:
   - calc_signals() con los mismos genes del candidato
-  - Clasificador ADX: S1 bloqueado en RANGO, S2 bloqueado en TENDENCIA
+  - Clasificador ADX: S1 bloqueado en RANGO, S2 bloqueado en TENDENCIA,
+    S3 bloqueado en RANGO si RUPTURA_SOLO_TENDENCIA=true (Sesión 17)
   - SubAgentTechnical.analyze(especie=...) — ensamble por arquetipo
   - SubAgentRisk._compute_levels() — SL ≥ 10 pips, R:R objetivo
   - check_sl_tp_intrabar() sobre cada vela 15m: SL/TP exactos
@@ -749,12 +750,13 @@ El valor de `genetic_variance_cv` y el flag `sigma_boost_applied` quedan registr
 
 ## 10. Creación y eliminación de agentes
 
-### Creación — cuatro escenarios
+### Creación — cinco escenarios
 
 | Escenario | Mecanismo |
 |---|---|
 | **Inicio del sistema** | Script manual de siembra con parámetros fijos o copiados de agentes previos |
-| **Reproducción diaria** | El Juez selecciona 2 padres del pool de supervivientes y los cruza con mutación |
+| **Reproducción diaria** | El Juez selecciona 2 padres del pool de supervivientes elegibles (fitness-proporcional; pesos OOS si todos pierden) y los cruza con mutación. Torneo de 3 candidatos backtesteados OOS — solo se despliega el mejor si supera el umbral de calidad (Sesión 17) |
+| **Fallback Hall of Fame** | Si ningún candidato del torneo supera el umbral OOS, se crían 3 candidatos con genes del Hall of Fame (misma especie primero) y se aplica el mismo umbral. Si tampoco pasan: slot vacante (Sesión 17) |
 | **Reset manual** | Limpieza total de la DB e inserción de nueva generación semilla |
 | **Registro en Hall of Fame** | `estrategias_exitosas` captura los genes de agentes con ROI > 0.05% para herencia futura |
 
@@ -796,7 +798,7 @@ La cuota de eliminación no es rígida. Cada tarde el motor calcula cuántos age
 
 | Escenario | Eliminados | Nacimientos | Razón |
 |---|---|---|---|
-| Día normal con veteranos negativos | 1 a 9 | igual número | Bottom por fitness, respetando máx 3/especie |
+| Día normal con veteranos negativos | 1 a 9 | 0 al mismo número — un cupo queda vacante si ningún candidato supera el umbral OOS (Sesión 17) | Bottom por fitness, respetando máx 3/especie |
 | Día de HOLD generalizado | 0 | 0 | Todos los activos están en inmunidad/gracia |
 | Veteranos rentables protegidos | 0 | 0 | Todos los elegibles tienen fitness > 0 |
 
@@ -1093,7 +1095,7 @@ Recuperación de ciclos perdidos: workflow_dispatch sin dry_run (la guardia
 de ventana segura se omite, permitiendo correr el Juez en cualquier hora).
 
 Parámetros de evolución (env vars):
-  AGENTS_ELIMINATE_PER_CYCLE   = 5
+  AGENTS_ELIMINATE_PER_CYCLE   = 9     (3 por especie × 3 especies)
   MUTATION_SIGMA_WEIGHTS       = 0.05
   MUTATION_SIGMA_PERIODS       = 0.08
   MUTATION_SIGMA_RISK          = 0.10
@@ -1101,6 +1103,11 @@ Parámetros de evolución (env vars):
   GRACE_PERIOD_DAYS            = 2
   DIVERSITY_VARIANCE_THRESHOLD = 0.01
   SIGMA_BOOST_FACTOR           = 2.0
+  TOURNAMENT_MIN_OOS_FITNESS   = 0.0   (Sesión 17)
+  TOURNAMENT_MIN_OOS_TRADES    = 5     (Sesión 17)
+  IMMUNITY_MAX_LOSS_PCT        = 8.0   (Sesión 17)
+  MIN_SAMPLE_DAYS              = 7     (Sesión 17)
+  RUPTURA_SOLO_TENDENCIA       = true  (Sesión 17)
 
 En caso de fallo: crea GitHub Issue con alerta.
 
@@ -1207,7 +1214,7 @@ Cada 15 min de 1:30am a 10:30pm:
              mercado (force-close-all). Buffer de 15 min hasta el Juez.
 
 11:00pm  ─── judge_daily continúa (paso 2):
-             1. Evaluación de fitness: Expectancy ajustada para 15 agentes
+             1. Evaluación de fitness: Expectancy ajustada para los agentes activos
              2. Filtro de Periodo de Gracia: separar inmunes de elegibles
              3. Cuota dinámica: identificar elegibles con fitness <= 0
 
@@ -1224,8 +1231,11 @@ Cada 15 min de 1:30am a 10:30pm:
              ║  NO → CICLO ACTIVO                                   ║
              ║      4. Forzado de diversidad: si CV bajo,           ║
              ║         duplica las sigmas de mutación.              ║
-             ║      5. Eliminar N agentes (1 a 5, fitness<=0).      ║
-             ║      6. Reproducir N hijos (crossover + mutación).   ║
+             ║      5. Eliminar N agentes (1 a 9, fitness<=0).      ║
+             ║      6. Reproducir hijos: torneo de 3 candidatos     ║
+             ║         con backtest OOS + umbral de calidad;        ║
+             ║         fallback Hall of Fame; slot vacante si       ║
+             ║         ningún candidato pasa (Sesión 17).           ║
              ║      7. Razonamiento LLM: veredicto y expectativas.  ║
              ║      8. Registro detallado en logs_juez.             ║
              ║      9. Redistribución de capital: pool ÷ activos.   ║
@@ -1323,7 +1333,7 @@ Antigravity_Inversion_Evolutiva/
 
 ---
 
-*Documento actualizado el 2026-06-09 (Sesión 17 — Fases 1-5: torneo con umbral OOS, selección por OOS cuando pool negativo, inmunidad revocable por drawdown, elegibilidad híbrida por días, ruptura bloqueada en RANGO).*
+*Documento actualizado el 2026-06-09 (Sesión 17 — Fases 1-5: torneo con umbral OOS, selección por OOS cuando pool negativo, inmunidad revocable por drawdown, elegibilidad híbrida por días, ruptura bloqueada en RANGO. Incluye auditoría completa del documento contra el código en producción: diagrama de arquitectura, tabla de especies, clasificador ADX, flujo diario, escenarios de creación/eliminación y parámetros del workflow alineados con el comportamiento actual).*
 
 ## Historial de cambios mayores
 
