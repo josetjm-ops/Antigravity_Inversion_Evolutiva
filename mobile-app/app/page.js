@@ -129,7 +129,7 @@ function CapitalChart({ history, currentCapital }) {
   );
 }
 
-function PriceChart({ market, operations }) {
+function PriceChart({ market, operations, activeAgents }) {
   const [range, setRange] = useState("5d");
   const [agentId, setAgentId] = useState("");
   const rangeOptions = [
@@ -139,12 +139,15 @@ function PriceChart({ market, operations }) {
   ];
   const candles = market?.ranges?.[range] || market?.candles || [];
   const agentOptions = useMemo(() => {
+    if (activeAgents?.length) {
+      return [...activeAgents].map((a) => a.id).filter(Boolean).sort();
+    }
     return [...new Set((operations || [])
       .filter((op) => ["BUY", "SELL"].includes(op.accion))
       .map((op) => op.agente_id)
       .filter(Boolean))]
       .sort();
-  }, [operations]);
+  }, [activeAgents, operations]);
   const selectedOps = (operations || [])
     .filter((op) => agentId && op.agente_id === agentId && op.precio_entrada && op.timestamp_entrada && ["BUY", "SELL"].includes(op.accion))
     .slice()
@@ -176,8 +179,20 @@ function PriceChart({ market, operations }) {
   const endTs = Date.parse(candles.at(-1).timestamp);
   const plotW = W - pad.l - pad.r;
   const plotH = H - pad.t - pad.b;
-  const xAtTime = (ts) => pad.l + ((Date.parse(ts) - startTs) / Math.max(endTs - startTs, 1)) * plotW;
   const xAtIndex = (i) => pad.l + (i / Math.max(candles.length - 1, 1)) * plotW;
+  // Snap a timestamp to the nearest candle index so markers align with candles,
+  // not with wall-clock time (which has weekend/overnight gaps).
+  const candleTs = candles.map((c) => Date.parse(c.timestamp));
+  const xAtTs = (ts) => {
+    const t = Date.parse(ts);
+    let lo = 0, hi = candleTs.length - 1;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (candleTs[mid] < t) lo = mid + 1; else hi = mid;
+    }
+    if (lo > 0 && Math.abs(candleTs[lo - 1] - t) < Math.abs(candleTs[lo] - t)) lo--;
+    return xAtIndex(lo);
+  };
   const y = (v) => pad.t + plotH - ((Number(v) - min) / priceRange) * plotH;
   const candleWidth = Math.max(2, Math.min(10, (plotW / candles.length) * 0.64));
   const spanMs = endTs - startTs;
@@ -225,6 +240,11 @@ function PriceChart({ market, operations }) {
         </label>
       </div>
       <svg viewBox={`0 0 ${W} ${H}`} className="wide-chart" role="img" aria-label="Precio EUR/USD y operaciones de agentes">
+        <defs>
+          <clipPath id="price-chart-clip">
+            <rect x={pad.l} y={pad.t} width={plotW} height={plotH} />
+          </clipPath>
+        </defs>
         {[0, 0.5, 1].map((t) => {
           const yy = pad.t + t * plotH;
           const val = max - t * priceRange;
@@ -254,25 +274,27 @@ function PriceChart({ market, operations }) {
             </g>
           );
         })}
-        {visibleOps.map((op) => {
-          const entryX = xAtTime(op.timestamp_entrada);
-          const entryY = y(op.precio_entrada);
-          const exitTs = op.timestamp_salida ? Date.parse(op.timestamp_salida) : null;
-          const hasExit = op.timestamp_salida && op.precio_salida && exitTs >= startTs && exitTs <= endTs;
-          const exitX = hasExit ? xAtTime(op.timestamp_salida) : null;
-          const exitY = hasExit ? y(op.precio_salida) : null;
-          const won = Number(op.pnl || 0) > 0;
-          const lost = Number(op.pnl || 0) < 0;
-          const tone = won ? "won" : lost ? "lost" : "flat";
-          return (
-            <g key={op.id} className={`agent-trade ${tone}`}>
-              {hasExit ? <line x1={entryX} x2={exitX} y1={entryY} y2={exitY} className="trade-path" /> : null}
-              <path d={`M${entryX},${entryY - 8} L${entryX - 7},${entryY + 6} L${entryX + 7},${entryY + 6} Z`} className={`trade-entry ${op.accion?.toLowerCase()}`} />
-              {hasExit ? <circle cx={exitX} cy={exitY} r="6" className="trade-exit" /> : null}
-              <title>{`#${op.id} ${op.accion} ${op.agente_id} entrada ${fmtPrice(op.precio_entrada)} salida ${fmtPrice(op.precio_salida)} P&G ${money(op.pnl, 4)}`}</title>
-            </g>
-          );
-        })}
+        <g clipPath="url(#price-chart-clip)">
+          {visibleOps.map((op) => {
+            const entryX = xAtTs(op.timestamp_entrada);
+            const entryY = y(op.precio_entrada);
+            const exitTs = op.timestamp_salida ? Date.parse(op.timestamp_salida) : null;
+            const hasExit = op.timestamp_salida && op.precio_salida && exitTs >= startTs && exitTs <= endTs;
+            const exitX = hasExit ? xAtTs(op.timestamp_salida) : null;
+            const exitY = hasExit ? y(op.precio_salida) : null;
+            const won = Number(op.pnl || 0) > 0;
+            const lost = Number(op.pnl || 0) < 0;
+            const tone = won ? "won" : lost ? "lost" : "flat";
+            return (
+              <g key={op.id} className={`agent-trade ${tone}`}>
+                {hasExit ? <line x1={entryX} x2={exitX} y1={entryY} y2={exitY} className="trade-path" /> : null}
+                <path d={`M${entryX},${entryY - 8} L${entryX - 7},${entryY + 6} L${entryX + 7},${entryY + 6} Z`} className={`trade-entry ${op.accion?.toLowerCase()}`} />
+                {hasExit ? <circle cx={exitX} cy={exitY} r="6" className="trade-exit" /> : null}
+                <title>{`#${op.id} ${op.accion} ${op.agente_id} entrada ${fmtPrice(op.precio_entrada)} salida ${fmtPrice(op.precio_salida)} P&G ${money(op.pnl, 4)}`}</title>
+              </g>
+            );
+          })}
+        </g>
         {xAxisTicks.map(({ ts, x: xPos, label, anchor }) => (
           <text key={`xlabel-${ts}`} x={xPos} y={H - 8} textAnchor={anchor} className="axis-label">{label}</text>
         ))}
@@ -923,7 +945,7 @@ function AgentesView({ data }) {
 function MercadoView({ data }) {
   return (
     <main className="view fade-in">
-      <PriceChart market={data.market} operations={data.operations} />
+      <PriceChart market={data.market} operations={data.operations} activeAgents={data.activeAgents} />
       <section className="panel">
         <div className="panel-head">
           <div>
