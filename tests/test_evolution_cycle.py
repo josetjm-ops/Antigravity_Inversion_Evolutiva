@@ -96,21 +96,39 @@ def test_mutation_respects_constraints():
     base = {
         "id": "2026-05-03_01", "roi_total": 0.05, "generacion": 1,
         "params_tecnicos": {
+            # Genes originales
             "rsi_periodo": 14, "rsi_sobrecompra": 70, "rsi_sobreventa": 30,
             "ema_rapida": 9, "ema_lenta": 21,
             "macd_rapida": 12, "macd_lenta": 26, "macd_senal": 9,
             "peso_rsi": 0.35, "peso_ema": 0.35, "peso_macd": 0.30,
+            # Genes Sesión 15 Fase 2: banda neutral RSI momentum
+            "rsi_zona_muerta": 5.0,
         },
         "params_macro": {
             "peso_noticias_alto": 0.60, "peso_noticias_medio": 0.25,
             "peso_noticias_bajo": 0.10, "umbral_sentimiento_compra": 0.65,
             "umbral_sentimiento_venta": 0.35, "ventana_noticias_horas": 4,
             "peso_total_macro": 0.40,
+            # Gen Sesión 15 Fase 3: sesgo de tendencia HTF
+            "peso_sesgo_tendencia": 0.40,
         },
         "params_riesgo": {
             "stop_loss_pct": 0.02, "take_profit_pct": 0.04,
             "max_drawdown_diario_pct": 0.10, "capital_por_operacion_pct": 0.50,
             "umbral_confianza_minima": 0.60, "peso_tecnico_vs_macro": 0.55,
+        },
+        # Genes SMC completos (Sesiones 4, 6, 15, 16)
+        "params_smc": {
+            "fvg_min_pips": 5.0, "ob_impulse_pips": 10.0,
+            "range_spike_multiplier": 1.5, "risk_reward_target": 2.0,
+            "macro_quarantine_minutes": 60, "risk_pct_per_trade": 0.015,
+            "peso_fvg": 0.15, "peso_ob": 0.15,
+            "atr_factor": 1.5, "trailing_activation_pips": 15.0,
+            "trailing_distance_pips": 10.0, "atr_period": 14,
+            "htf_filter_enabled": 1,
+            "breakout_lookback_bars": 20, "breakout_min_pips": 5.0,
+            "peso_breakout": 0.40,
+            "adx_period": 14, "adx_threshold": 25.0,
         },
     }
 
@@ -297,32 +315,57 @@ def test_business_days_calculation():
 
 
 def test_classify_eligibility_grace_period():
-    """Agentes con ops=0 y edad<2 días hábiles son inmunes."""
-    from evolution.evolution_engine import EvolutionEngine
+    """Semántica de eligibilidad tras Sesión 17 Fases 3-4:
+    - Grace inviolable (ops=0, edad < GRACE_PERIOD_DAYS)
+    - Muestra mínima híbrida: inmune si trades<MIN Y días<MIN_SAMPLE_DAYS
+    - Elegible por días: trades<MIN pero edad>=MIN_SAMPLE_DAYS
+    - Elegible por trades: trades>=MIN (cualquier edad)
+    - Inmunidad revocada por drawdown (roi <= -IMMUNITY_MAX_LOSS_PCT)
+    """
+    from evolution.evolution_engine import EvolutionEngine, IMMUNITY_MAX_LOSS_PCT
 
     today = date(2026, 5, 14)  # jueves
+    # Días hábiles desde las fechas usadas abajo hasta hoy (exclusive):
+    #   date(2026, 5, 13) Wed → 1 bd
+    #   date(2026, 5, 11) Mon → 3 bd  (lun, mar, mié)
+    #   date(2026, 5,  5) Tue → 7 bd  (mar…mié, excl. fin de semana)
     engine = EvolutionEngine(today)
 
     agents = [
-        # Inmune: ops=0 y nació el miércoles (1 día hábil de edad)
-        {"id": "A_IMMUNE", "operaciones_total": 0,
-         "fecha_nacimiento": date(2026, 5, 13)},
-        # NO inmune: ops=0 pero nació el lunes (3 días hábiles → > 2)
-        {"id": "A_OLD_NO_OPS", "operaciones_total": 0,
-         "fecha_nacimiento": date(2026, 5, 11)},
-        # NO inmune: ops>0 aunque sea joven
-        {"id": "A_YOUNG_TRADER", "operaciones_total": 1,
-         "fecha_nacimiento": date(2026, 5, 13)},
-        # NO inmune: veterano clásico
-        {"id": "A_VETERAN", "operaciones_total": 30,
-         "fecha_nacimiento": date(2026, 4, 1)},
+        # A. Periodo de Gracia (inviolable): ops=0, age=1bd < GRACE_PERIOD_DAYS=2
+        {"id": "A_GRACE",
+         "operaciones_total": 0, "fecha_nacimiento": date(2026, 5, 13),
+         "roi_total": 0},
+        # B. Muestra mínima híbrida: ops=5<15 AND age=3bd<MIN_SAMPLE_DAYS=7 → inmune
+        {"id": "A_SAMPLE",
+         "operaciones_total": 5, "fecha_nacimiento": date(2026, 5, 11),
+         "roi_total": 0},
+        # C. Elegible por días: ops=5<15 PERO age=7bd >= MIN_SAMPLE_DAYS=7 → elegible
+        {"id": "A_ELIGIBLE_DAYS",
+         "operaciones_total": 5, "fecha_nacimiento": date(2026, 5, 5),
+         "roi_total": 0},
+        # D. Elegible por trades: ops=20>=15, age=1bd<7 → elegible (OR cumplida por trades)
+        {"id": "A_ELIGIBLE_TRADES",
+         "operaciones_total": 20, "fecha_nacimiento": date(2026, 5, 13),
+         "roi_total": 0},
+        # E. Inmunidad revocada: ops=5<15, age=3bd<7, roi=-10 <= -IMMUNITY_MAX_LOSS_PCT
+        {"id": "A_REVOKED",
+         "operaciones_total": 5, "fecha_nacimiento": date(2026, 5, 11),
+         "roi_total": -(IMMUNITY_MAX_LOSS_PCT + 2.0)},  # −10.0 %
     ]
-    immune, eligible = engine._classify_eligibility(agents)
 
-    assert [a["id"] for a in immune] == ["A_IMMUNE"], \
-        f"Solo A_IMMUNE debería ser inmune, recibí: {[a['id'] for a in immune]}"
-    assert {a["id"] for a in eligible} == {"A_OLD_NO_OPS", "A_YOUNG_TRADER", "A_VETERAN"}
-    print("  [PASS] _classify_eligibility identifica correctamente los inmunes.")
+    immune, eligible = engine._classify_eligibility(agents)
+    immune_ids   = {a["id"] for a in immune}
+    eligible_ids = {a["id"] for a in eligible}
+
+    assert immune_ids == {"A_GRACE", "A_SAMPLE"}, \
+        f"Inmunes esperados: A_GRACE, A_SAMPLE. Recibí: {immune_ids}"
+    assert "A_ELIGIBLE_DAYS"   in eligible_ids, "A_ELIGIBLE_DAYS debe ser elegible (días >= MIN)"
+    assert "A_ELIGIBLE_TRADES" in eligible_ids, "A_ELIGIBLE_TRADES debe ser elegible (trades >= MIN)"
+    assert "A_REVOKED"         in eligible_ids, "A_REVOKED debe ser elegible (inmunidad revocada)"
+    revoked = next(a for a in eligible if a["id"] == "A_REVOKED")
+    assert revoked.get("_immunity_revoked") is True, "A_REVOKED debe tener flag _immunity_revoked=True"
+    print("  [PASS] _classify_eligibility: gracia, muestra híbrida, elegible días/trades, revocado.")
 
 
 def test_dynamic_quota_protects_profitable_veterans():

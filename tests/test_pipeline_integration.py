@@ -43,9 +43,12 @@ PARAMS_RIESGO = {
 
 
 def make_bullish_signals():
-    """Señales técnicas claramente alcistas: RSI sobrevendido, EMA cruzada, MACD positivo."""
+    """Señales técnicas claramente alcistas para modo RSI momentum (Sesión 15).
+    RSI cruza 50 hacia arriba (rsi_prev<50, rsi>50) + EMA rápida > lenta + MACD positivo.
+    """
     return TechnicalSignals(
-        rsi=25.0,
+        rsi=55.0,
+        rsi_prev=48.0,          # cruce alcista: prev<50 → actual>50
         ema_rapida=1.0855,
         ema_lenta=1.0830,
         macd=0.0005,
@@ -57,9 +60,12 @@ def make_bullish_signals():
 
 
 def make_bearish_signals():
-    """Señales técnicas claramente bajistas: RSI sobrecomprado, EMA descendente, MACD negativo."""
+    """Señales técnicas claramente bajistas para modo RSI momentum (Sesión 15).
+    RSI cruza 50 hacia abajo (rsi_prev>50, rsi<50) + EMA rápida < lenta + MACD negativo.
+    """
     return TechnicalSignals(
-        rsi=78.0,
+        rsi=45.0,
+        rsi_prev=53.0,          # cruce bajista: prev>50 → actual<50
         ema_rapida=1.0820,
         ema_lenta=1.0845,
         macd=-0.0004,
@@ -112,7 +118,7 @@ def test_technical_buy_signal():
     assert result["recomendacion"] == "BUY", f"Expected BUY, got {result['recomendacion']}"
     assert result["confianza"] >= 0.5
     assert "indicadores" in result
-    assert result["indicadores"]["rsi"] == 25.0
+    assert result["indicadores"]["rsi"] == 55.0
     print(f"  ✓ TÉCNICO BUY: confianza={result['confianza']:.4f}")
 
 
