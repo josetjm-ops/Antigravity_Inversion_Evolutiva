@@ -24,6 +24,40 @@ def get_conn():
 
 # ── Helpers de fixtures ──────────────────────────────────────────────────────
 
+# Genoma génesis válido contra los bounds modernos (Sesiones 15-17).
+_GENESIS_TEC = {
+    "rsi_periodo": 14, "rsi_sobrecompra": 70, "rsi_sobreventa": 30,
+    "ema_rapida": 9, "ema_lenta": 21,
+    "macd_rapida": 12, "macd_lenta": 26, "macd_senal": 9,
+    "peso_rsi": 0.35, "peso_ema": 0.35, "peso_macd": 0.30,
+    "rsi_zona_muerta": 5.0,
+}
+_GENESIS_MAC = {
+    "peso_noticias_alto": 0.60, "peso_noticias_medio": 0.25,
+    "peso_noticias_bajo": 0.10, "umbral_sentimiento_compra": 0.65,
+    "umbral_sentimiento_venta": 0.35, "ventana_noticias_horas": 4,
+    "peso_total_macro": 0.40, "peso_sesgo_tendencia": 0.40,
+}
+_GENESIS_RIESGO = {
+    "stop_loss_pct": 0.02, "take_profit_pct": 0.04,
+    "max_drawdown_diario_pct": 0.10, "capital_por_operacion_pct": 0.50,
+    "umbral_confianza_minima": 0.60, "peso_tecnico_vs_macro": 0.55,
+}
+_GENESIS_SMC = {
+    "fvg_min_pips": 5.0, "ob_impulse_pips": 10.0,
+    "range_spike_multiplier": 1.5, "risk_reward_target": 2.0,
+    "macro_quarantine_minutes": 60, "risk_pct_per_trade": 0.015,
+    "peso_fvg": 0.15, "peso_ob": 0.15,
+    "atr_factor": 1.5, "trailing_activation_pips": 15.0,
+    "trailing_distance_pips": 10.0, "atr_period": 14,
+    "htf_filter_enabled": 1,
+    "breakout_lookback_bars": 20, "breakout_min_pips": 5.0,
+    "peso_breakout": 0.40,
+    "adx_period": 14, "adx_threshold": 25.0,
+}
+_ESPECIES_TEST = ["tendencia", "reversion", "ruptura"]
+
+
 def _get_active_agents():
     conn = get_conn()
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
@@ -31,7 +65,7 @@ def _get_active_agents():
         SELECT id, generacion, roi_total, capital_actual,
                operaciones_total, operaciones_ganadoras,
                params_tecnicos, params_macro, params_riesgo
-        FROM agentes WHERE estado = 'activo' ORDER BY roi_total DESC
+        FROM agentes WHERE estado = 'activo' ORDER BY id ASC
     """)
     rows = [dict(r) for r in cur.fetchall()]
     conn.close()
@@ -40,15 +74,15 @@ def _get_active_agents():
 
 def _inject_varied_rois():
     """
-    Inyecta ROI y operaciones variadas en los 10 agentes génesis
-    para simular un día de trading real. Necesario para probar la
-    selección diferencial (algunos buenos, algunos malos).
+    Inyecta ROI y operaciones variadas en los 15 agentes génesis
+    para simular trading real. Por especie: 3 positivos y 2 negativos,
+    de modo que la selección diferencial tenga trabajo en cada especie.
     """
     conn = get_conn()
     cur = conn.cursor()
-    # Distribuir ROIs simulados: primeros 5 positivos, últimos 5 negativos
-    rois = [0.08, 0.06, 0.04, 0.03, 0.01, -0.01, -0.02, -0.03, -0.05, -0.08]
-    agents = _get_active_agents()
+    rois_por_especie = [0.08, 0.04, 0.01, -0.03, -0.08]
+    agents = _get_active_agents()  # 15, ordenados por id
+    rois = rois_por_especie * 3
     for agent, roi in zip(agents, rois):
         new_capital = round(10.0 * (1 + roi), 4)
         ops = random.randint(3, 8)
@@ -63,28 +97,48 @@ def _inject_varied_rois():
         """, (roi * 100, new_capital, ops, won, agent["id"]))
     conn.commit()
     conn.close()
-    print("  [SETUP] ROIs variados inyectados en 10 agentes génesis.")
+    print("  [SETUP] ROIs variados inyectados en 15 agentes génesis.")
 
 
 def _reset_agents():
-    """Resetea todos los agentes a estado activo y ROI=0 para tests limpios."""
+    """
+    Deja la sandbox en un estado génesis determinista: borra TODO el
+    contenido (tablas hijas primero por las FKs) y recrea 15 agentes
+    Gen-1 (5 por especie), como exige la garantía de población de
+    Sesión 19. No depende de filas preexistentes en la sandbox.
+    """
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute("""
-        UPDATE agentes
-        SET estado = 'activo', roi_total = 0, capital_actual = 10.0,
-            operaciones_total = 0, operaciones_ganadoras = 0,
-            fecha_eliminacion = NULL, razon_eliminacion = NULL
-        WHERE fecha_nacimiento = '2026-05-03'
-    """)
-    # Eliminar agentes de generaciones > 1 creados en tests anteriores
-    cur.execute("DELETE FROM agentes WHERE generacion > 1")
+    cur.execute("DELETE FROM operaciones")
     cur.execute("DELETE FROM ranking_historico")
     cur.execute("DELETE FROM logs_juez")
     cur.execute("DELETE FROM estrategias_exitosas")
+    cur.execute("DELETE FROM agentes")
+
+    idx = 0
+    for especie in _ESPECIES_TEST:
+        for _ in range(5):
+            idx += 1
+            cur.execute("""
+                INSERT INTO agentes (
+                    id, fecha_nacimiento, generacion,
+                    padre_1_id, padre_2_id,
+                    params_tecnicos, params_macro, params_riesgo, params_smc,
+                    capital_inicial, capital_actual, especie, estado,
+                    roi_total, operaciones_total, operaciones_ganadoras
+                ) VALUES (
+                    %s, '2026-05-03', 1, NULL, NULL,
+                    %s, %s, %s, %s, 10.0, 10.0, %s, 'activo', 0, 0, 0
+                )
+            """, (
+                f"2026-05-03_{idx:02d}",
+                json.dumps(_GENESIS_TEC), json.dumps(_GENESIS_MAC),
+                json.dumps(_GENESIS_RIESGO), json.dumps(_GENESIS_SMC),
+                especie,
+            ))
     conn.commit()
     conn.close()
-    print("  [SETUP] DB reseteada a estado génesis limpio.")
+    print("  [SETUP] Sandbox recreada: 15 agentes génesis (5 por especie).")
 
 
 # ── Tests de la lógica de mutación ──────────────────────────────────────────
@@ -213,9 +267,11 @@ def test_selection_picks_top_and_bottom():
 def test_full_evolution_cycle_on_db():
     """
     Ejecuta el ciclo evolutivo completo contra la DB Neon:
-    - Inyecta ROIs variados
+    - Recrea 15 agentes génesis (5/especie) e inyecta ROIs variados
     - Corre EvolutionEngine.run()
-    - Verifica que se eliminaron agentes, se crearon nuevos y se registró genealogía
+    - Verifica eliminación, reproducción, genealogía y la garantía de
+      Sesión 19: la población activa final vuelve a 15 (vía torneo OOS,
+      HoF, repoblación o clon forzado — eliminados ≠ nuevos es válido).
     """
     _reset_agents()
     _inject_varied_rois()
@@ -228,13 +284,23 @@ def test_full_evolution_cycle_on_db():
     assert len(result.survivors)  > 0, "No hubo supervivientes"
     assert len(result.eliminated) > 0, "No se eliminó ningún agente"
     assert len(result.new_agents) > 0, "No se crearon nuevos agentes"
-    assert len(result.eliminated) == len(result.new_agents), \
-        "El número de eliminados debe igualar el de nuevos agentes"
 
     print(f"  [PASS] Ciclo evolutivo: "
           f"{len(result.survivors)} supervivientes, "
           f"{len(result.eliminated)} eliminados, "
-          f"{len(result.new_agents)} nuevos agentes.")
+          f"{len(result.new_agents)} nuevos agentes, "
+          f"{len(result.slots_vacantes)} slots vacantes, "
+          f"deficit restante: {result.deficit_restante}.")
+
+    # Garantía Sesión 19: población activa final = 15 (5 por especie)
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) FROM agentes WHERE estado = 'activo'")
+    n_active = cur.fetchone()[0]
+    conn.close()
+    assert n_active == 15, \
+        f"La población activa final debe ser 15, es {n_active}"
+    print(f"  [PASS] Población activa final: {n_active}/15.")
 
     # Verificar en DB
     conn = get_conn()

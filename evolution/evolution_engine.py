@@ -973,23 +973,32 @@ class EvolutionEngine:
 
         Hace JOIN con agentes para recuperar params_smc y especie, ya que
         estrategias_exitosas solo almacena params_tecnicos / macro / riesgo.
+
+        Dedup por agente (DISTINCT ON): un mismo agente puede tener varias
+        entradas en estrategias_exitosas, y devolver duplicados rompía la
+        selección de segundo padre (IndexError en random.choice — jun 10/11)
+        además de inflar el conteo de "padres" disponibles.
         """
         with get_conn() as conn:
             cur = get_dict_cursor(conn)
             if especie:
                 cur.execute(
                     """
-                    SELECT e.agente_origen_id AS id,
-                           e.roi_que_genero   AS roi_total,
-                           e.params_tecnicos,
-                           e.params_macro,
-                           e.params_riesgo,
-                           a.params_smc,
-                           COALESCE(a.especie, 'tendencia') AS especie
-                    FROM estrategias_exitosas e
-                    JOIN agentes a ON e.agente_origen_id = a.id
-                    WHERE COALESCE(a.especie, 'tendencia') = %s
-                    ORDER BY e.roi_que_genero DESC
+                    SELECT * FROM (
+                        SELECT DISTINCT ON (e.agente_origen_id)
+                               e.agente_origen_id AS id,
+                               e.roi_que_genero   AS roi_total,
+                               e.params_tecnicos,
+                               e.params_macro,
+                               e.params_riesgo,
+                               a.params_smc,
+                               COALESCE(a.especie, 'tendencia') AS especie
+                        FROM estrategias_exitosas e
+                        JOIN agentes a ON e.agente_origen_id = a.id
+                        WHERE COALESCE(a.especie, 'tendencia') = %s
+                        ORDER BY e.agente_origen_id, e.roi_que_genero DESC
+                    ) t
+                    ORDER BY t.roi_total DESC
                     LIMIT 10
                     """,
                     (especie,),
@@ -1000,16 +1009,20 @@ class EvolutionEngine:
             # Fallback: cualquier especie
             cur.execute(
                 """
-                SELECT e.agente_origen_id AS id,
-                       e.roi_que_genero   AS roi_total,
-                       e.params_tecnicos,
-                       e.params_macro,
-                       e.params_riesgo,
-                       a.params_smc,
-                       COALESCE(a.especie, 'tendencia') AS especie
-                FROM estrategias_exitosas e
-                JOIN agentes a ON e.agente_origen_id = a.id
-                ORDER BY e.roi_que_genero DESC
+                SELECT * FROM (
+                    SELECT DISTINCT ON (e.agente_origen_id)
+                           e.agente_origen_id AS id,
+                           e.roi_que_genero   AS roi_total,
+                           e.params_tecnicos,
+                           e.params_macro,
+                           e.params_riesgo,
+                           a.params_smc,
+                           COALESCE(a.especie, 'tendencia') AS especie
+                    FROM estrategias_exitosas e
+                    JOIN agentes a ON e.agente_origen_id = a.id
+                    ORDER BY e.agente_origen_id, e.roi_que_genero DESC
+                ) t
+                ORDER BY t.roi_total DESC
                 LIMIT 10
                 """
             )
@@ -1183,8 +1196,10 @@ class EvolutionEngine:
             candidates: list[tuple[dict, dict]] = []
             for _c in range(N_CANDIDATE_CHILDREN):
                 p1, p2 = random.choices(pool, weights=weights, k=2)
-                if p1["id"] == p2["id"] and len(pool) > 1:
-                    p2 = random.choice([a for a in pool if a["id"] != p1["id"]])
+                if p1["id"] == p2["id"]:
+                    others = [a for a in pool if a["id"] != p1["id"]]
+                    if others:
+                        p2 = random.choice(others)
                 candidate = breed_agent(
                     p1, p2, cid, self.today, max_gen + 1,
                     sigma_weights=sw, sigma_periods=sp, sigma_risk=sr,
@@ -1546,8 +1561,10 @@ class EvolutionEngine:
                     _pool=pool, _weights=weights
                 ):
                     p1_, p2_ = random.choices(_pool, weights=_weights, k=2)
-                    if p1_["id"] == p2_["id"] and len(_pool) > 1:
-                        p2_ = random.choice([a for a in _pool if a["id"] != p1_["id"]])
+                    if p1_["id"] == p2_["id"]:
+                        others_ = [a for a in _pool if a["id"] != p1_["id"]]
+                        if others_:
+                            p2_ = random.choice(others_)
                     return p1_, p2_
 
                 child_id = f"{self.today.strftime('%Y-%m-%d')}_{next_idx + i:02d}"

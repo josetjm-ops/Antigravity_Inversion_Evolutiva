@@ -233,10 +233,31 @@ def test_full_pipeline_dry_run():
 
 def test_db_operation_persist():
     """Inserta una operación de prueba y verifica que se guardó correctamente."""
+    import json
     import psycopg2
     DB = "postgresql://neondb_owner:npg_HpqvWm94yaLr@ep-crimson-heart-amtwwmvf.c-5.us-east-1.aws.neon.tech/inversion_evolutiva?channel_binding=require&sslmode=require"
     conn = psycopg2.connect(DB)
     cur = conn.cursor()
+
+    # Fixture autosuficiente: garantizar que el agente de prueba existe
+    # (la sandbox puede haber sido reseteada por otros tests).
+    cur.execute("""
+        INSERT INTO agentes (
+            id, fecha_nacimiento, generacion,
+            params_tecnicos, params_macro, params_riesgo,
+            capital_inicial, capital_actual, especie, estado
+        ) VALUES (
+            '2026-05-03_01', '2026-05-03', 1,
+            %s, %s, %s, 10.0, 10.0, 'tendencia', 'activo'
+        )
+        ON CONFLICT (id) DO NOTHING
+    """, (
+        json.dumps({"rsi_periodo": 14, "ema_rapida": 9, "ema_lenta": 21,
+                    "peso_rsi": 0.35, "peso_ema": 0.35, "peso_macd": 0.30}),
+        json.dumps({"peso_total_macro": 0.40}),
+        json.dumps({"stop_loss_pct": 0.02, "take_profit_pct": 0.04}),
+    ))
+    conn.commit()
 
     cur.execute("""
         INSERT INTO operaciones (

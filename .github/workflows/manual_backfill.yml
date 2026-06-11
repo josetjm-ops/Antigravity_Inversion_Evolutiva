@@ -20,7 +20,7 @@ jobs:
   backfill:
     name: "Sincronizar DB hacia Google Sheets"
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
 
     env:
       DATABASE_URL:             ${{ secrets.DATABASE_URL }}

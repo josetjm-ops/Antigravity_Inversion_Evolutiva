@@ -1,4 +1,6 @@
+import logging
 import os
+import time
 from contextlib import contextmanager
 from typing import Generator
 
@@ -9,6 +11,8 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session, sessionmaker
 
 load_dotenv()
+
+_log = logging.getLogger(__name__)
 
 _DATABASE_URL = os.environ["DATABASE_URL"]
 
@@ -35,13 +39,36 @@ def get_session() -> Generator[Session, None, None]:
         session.close()
 
 
+# El pooler de Supabase sufre timeouts transitorios esporádicos; un solo
+# intento tumbaba el run completo del workflow (issues de jun 2-10).
+_CONNECT_ATTEMPTS = 3
+_CONNECT_BACKOFF_S = (5, 15)
+
+
+def _connect_with_retry():
+    last_exc: Exception | None = None
+    for attempt in range(_CONNECT_ATTEMPTS):
+        try:
+            return psycopg2.connect(_DATABASE_URL, connect_timeout=10)
+        except psycopg2.OperationalError as exc:
+            last_exc = exc
+            if attempt < _CONNECT_ATTEMPTS - 1:
+                wait = _CONNECT_BACKOFF_S[attempt]
+                _log.warning(
+                    "[DB] Conexión falló (intento %d/%d): %s — reintento en %ds",
+                    attempt + 1, _CONNECT_ATTEMPTS, exc, wait,
+                )
+                time.sleep(wait)
+    raise last_exc
+
+
 @contextmanager
 def get_conn():
     """
     Contexto psycopg2 puro con cursor RealDict para acceso por nombre de columna.
     Preferido en el motor evolutivo por simplicidad y rendimiento.
     """
-    conn = psycopg2.connect(_DATABASE_URL, connect_timeout=10)
+    conn = _connect_with_retry()
     try:
         yield conn
         conn.commit()
@@ -65,9 +92,17 @@ def run_migration(sql_path: str) -> None:
 
 
 def health_check() -> bool:
-    try:
-        with _engine.connect() as conn:
-            conn.execute(text("SELECT 1"))
-        return True
-    except Exception:
-        return False
+    for attempt in range(_CONNECT_ATTEMPTS):
+        try:
+            with _engine.connect() as conn:
+                conn.execute(text("SELECT 1"))
+            return True
+        except Exception as exc:
+            if attempt < _CONNECT_ATTEMPTS - 1:
+                wait = _CONNECT_BACKOFF_S[attempt]
+                _log.warning(
+                    "[DB] health_check falló (intento %d/%d): %s — reintento en %ds",
+                    attempt + 1, _CONNECT_ATTEMPTS, exc, wait,
+                )
+                time.sleep(wait)
+    return False

@@ -18,6 +18,7 @@ import json
 import logging
 import os
 import sys
+import time
 
 # Permitir ejecución directa desde la raíz del proyecto
 _root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -42,24 +43,48 @@ from utils.sheets_logger import (
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 log = logging.getLogger(__name__)
 
-_BATCH = 50
+# La cuota de Sheets es ~60 escrituras/min por usuario: lotes grandes para
+# minimizar requests, pausa entre lotes y reintento con espera ante 429.
+_BATCH = 500
+_PAUSE_S = 1.2
+_MAX_RETRIES = 5
+_QUOTA_WAIT_S = 65  # la cuota es por minuto; esperar >60s garantiza el reset
+
+
+def _api_call(fn, *args, **kwargs):
+    """Llama a la API de Sheets reintentando ante 429 (cuota por minuto)."""
+    from gspread.exceptions import APIError
+
+    for attempt in range(1, _MAX_RETRIES + 1):
+        try:
+            return fn(*args, **kwargs)
+        except APIError as e:
+            code = getattr(e, "code", None)
+            if code != 429 or attempt == _MAX_RETRIES:
+                raise
+            log.warning(
+                "Cuota de Sheets excedida (429) — reintento %d/%d en %ds...",
+                attempt, _MAX_RETRIES - 1, _QUOTA_WAIT_S,
+            )
+            time.sleep(_QUOTA_WAIT_S)
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
 def _clear_sheet(ws, headers: list[str]) -> None:
     """Borra todo el contenido y reescribe solo la cabecera."""
-    ws.clear()
+    _api_call(ws.clear)
     end_col = _col_letter(len(headers))
-    ws.update([headers], f"A1:{end_col}1", value_input_option="USER_ENTERED")
+    _api_call(ws.update, [headers], f"A1:{end_col}1", value_input_option="USER_ENTERED")
     log.info("Pestaña '%s' limpiada y headers restaurados.", ws.title)
 
 
 def _write_batches(ws, rows: list[list]) -> None:
     for i in range(0, len(rows), _BATCH):
         batch = rows[i : i + _BATCH]
-        ws.append_rows(batch, value_input_option="USER_ENTERED")
+        _api_call(ws.append_rows, batch, value_input_option="USER_ENTERED")
         log.info("  Escritas filas %d–%d.", i + 1, i + len(batch))
+        time.sleep(_PAUSE_S)
 
 
 # ── Agentes ────────────────────────────────────────────────────────────────────
