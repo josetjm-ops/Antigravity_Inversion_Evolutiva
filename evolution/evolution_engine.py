@@ -1608,9 +1608,10 @@ class EvolutionEngine:
                             for _hc in range(N_CANDIDATE_CHILDREN):
                                 hp1, hp2 = random.choices(hof_parents, weights=hof_w, k=2)
                                 if hp1["id"] == hp2["id"] and len(hof_parents) > 1:
-                                    hp2 = random.choice(
-                                        [p for p in hof_parents if p["id"] != hp1["id"]]
-                                    )
+                                    alternatives = [p for p in hof_parents if p["id"] != hp1["id"]]
+                                    if alternatives:
+                                        hp2 = random.choice(alternatives)
+                                    # else: self-mutation (hp2 == hp1), breed_agent lo soporta
                                 hof_child = breed_agent(
                                     hp1, hp2, child_id, self.today, max_gen + 1,
                                     sigma_weights=sw, sigma_periods=sp, sigma_risk=sr,
