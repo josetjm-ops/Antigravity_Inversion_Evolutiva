@@ -457,6 +457,7 @@ def breed_agent(
     sigma_periods: float | None = None,
     sigma_risk: float | None = None,
     especie: str = "tendencia",
+    p1_weight: float | None = None,
 ) -> dict:
     """
     Genera un nuevo agente a partir de dos padres.
@@ -467,15 +468,20 @@ def breed_agent(
     Las sigmas son opcionales: si no se pasan, se usan los defaults globales
     (lectura del .env). El motor evolutivo puede pasar valores boosteados
     cuando detecta baja diversidad genética en el pool de supervivientes.
+
+    p1_weight opcional: por defecto el padre de mejor ROI domina el cruce
+    (60/40). El cruce forzado entre especies lo sobreescribe para que el
+    genoma de la especie correcta (parent1) sea siempre el dominante.
     """
     sw = SIGMA_WEIGHTS if sigma_weights is None else sigma_weights
     sp = SIGMA_PERIODS if sigma_periods is None else sigma_periods
     sr = SIGMA_RISK    if sigma_risk    is None else sigma_risk
 
-    # Crossover con sesgo hacia el padre de mejor ROI
-    roi1 = float(parent1.get("roi_total", 0))
-    roi2 = float(parent2.get("roi_total", 0))
-    p1_weight = 0.6 if roi1 >= roi2 else 0.4
+    # Crossover con sesgo hacia el padre de mejor ROI (salvo override)
+    if p1_weight is None:
+        roi1 = float(parent1.get("roi_total", 0))
+        roi2 = float(parent2.get("roi_total", 0))
+        p1_weight = 0.6 if roi1 >= roi2 else 0.4
 
     tec_child  = crossover(parent1["params_tecnicos"], parent2["params_tecnicos"], p1_weight)
     mac_child  = crossover(parent1["params_macro"],    parent2["params_macro"],    p1_weight)
@@ -969,64 +975,62 @@ class EvolutionEngine:
         con todos los parámetros necesarios para breed_agent.
 
         Si se especifica especie, prioriza esa especie; si no hay suficientes
-        (< 2) retorna de cualquier especie como fallback.
+        (< 2) MEZCLA: conserva los padres de la especie y completa con el top
+        global de cualquier especie (antes se descartaban los de la especie,
+        lo que llevaba a criar hijos con genoma 100% de otra especie).
 
-        Hace JOIN con agentes para recuperar params_smc y especie, ya que
-        estrategias_exitosas solo almacena params_tecnicos / macro / riesgo.
+        Hace JOIN con agentes para recuperar params_smc, especie y estado, ya
+        que estrategias_exitosas solo almacena params_tecnicos / macro / riesgo.
+        El estado permite que los caminos de último recurso eviten usar un
+        agente eliminado como genoma único.
 
         Dedup por agente (DISTINCT ON): un mismo agente puede tener varias
         entradas en estrategias_exitosas, y devolver duplicados rompía la
         selección de segundo padre (IndexError en random.choice — jun 10/11)
         además de inflar el conteo de "padres" disponibles.
         """
+        _SELECT_HOF = """
+            SELECT * FROM (
+                SELECT DISTINCT ON (e.agente_origen_id)
+                       e.agente_origen_id AS id,
+                       e.roi_que_genero   AS roi_total,
+                       e.params_tecnicos,
+                       e.params_macro,
+                       e.params_riesgo,
+                       a.params_smc,
+                       COALESCE(a.especie, 'tendencia') AS especie,
+                       a.estado
+                FROM estrategias_exitosas e
+                JOIN agentes a ON e.agente_origen_id = a.id
+                {where}
+                ORDER BY e.agente_origen_id, e.roi_que_genero DESC
+            ) t
+            ORDER BY t.roi_total DESC
+            LIMIT 10
+        """
         with get_conn() as conn:
             cur = get_dict_cursor(conn)
+            rows: list[dict] = []
             if especie:
                 cur.execute(
-                    """
-                    SELECT * FROM (
-                        SELECT DISTINCT ON (e.agente_origen_id)
-                               e.agente_origen_id AS id,
-                               e.roi_que_genero   AS roi_total,
-                               e.params_tecnicos,
-                               e.params_macro,
-                               e.params_riesgo,
-                               a.params_smc,
-                               COALESCE(a.especie, 'tendencia') AS especie
-                        FROM estrategias_exitosas e
-                        JOIN agentes a ON e.agente_origen_id = a.id
-                        WHERE COALESCE(a.especie, 'tendencia') = %s
-                        ORDER BY e.agente_origen_id, e.roi_que_genero DESC
-                    ) t
-                    ORDER BY t.roi_total DESC
-                    LIMIT 10
-                    """,
+                    _SELECT_HOF.format(
+                        where="WHERE COALESCE(a.especie, 'tendencia') = %s"
+                    ),
                     (especie,),
                 )
                 rows = [dict(r) for r in cur.fetchall()]
                 if len(rows) >= 2:
                     return rows
-            # Fallback: cualquier especie
-            cur.execute(
-                """
-                SELECT * FROM (
-                    SELECT DISTINCT ON (e.agente_origen_id)
-                           e.agente_origen_id AS id,
-                           e.roi_que_genero   AS roi_total,
-                           e.params_tecnicos,
-                           e.params_macro,
-                           e.params_riesgo,
-                           a.params_smc,
-                           COALESCE(a.especie, 'tendencia') AS especie
-                    FROM estrategias_exitosas e
-                    JOIN agentes a ON e.agente_origen_id = a.id
-                    ORDER BY e.agente_origen_id, e.roi_que_genero DESC
-                ) t
-                ORDER BY t.roi_total DESC
-                LIMIT 10
-                """
-            )
-            return [dict(r) for r in cur.fetchall()]
+            # Fallback: completar con el top global SIN descartar los de la
+            # especie — así el mejor padre de la especie sigue disponible y
+            # domina el cruce (60%) frente a un segundo padre global.
+            cur.execute(_SELECT_HOF.format(where=""))
+            seen = {r["id"] for r in rows}
+            for r in cur.fetchall():
+                if r["id"] not in seen:
+                    rows.append(dict(r))
+                    seen.add(r["id"])
+            return rows[:10]
 
     # ── Redistribución de capital ────────────────────────────────────────────
 
@@ -1244,6 +1248,11 @@ class EvolutionEngine:
                 child: dict | None = None
                 best_bt: dict | None = None
                 origen = ""
+                # Mejor hijo de CRUCE visto en todas las rondas (dos padres
+                # distintos): si nadie pasa el umbral estricto, se despliega
+                # este en vez de clonar — el cruce 60/40 nunca se abandona.
+                best_cand: dict | None = None
+                best_cand_bt: dict | None = None
 
                 # ── Reintentos torneo → HoF hasta MAX_ATTEMPTS rondas ──────────
                 for _attempt in range(REPOPULATION_MAX_ATTEMPTS_PER_SLOT):
@@ -1252,52 +1261,87 @@ class EvolutionEngine:
                         if _passes_oos(bt):
                             child, best_bt, origen = cand, bt, "torneo"
                             break
+                        if best_cand_bt is None or bt["fitness"] > best_cand_bt["fitness"]:
+                            best_cand, best_cand_bt = cand, bt
                     if len(hof_parents) >= 2:
                         cand, bt = _best_from_pool(hof_parents, esp, child_id)
                         if _passes_oos(bt):
                             child, best_bt, origen = cand, bt, "hall_of_fame"
                             break
+                        if best_cand_bt is None or bt["fitness"] > best_cand_bt["fitness"]:
+                            best_cand, best_cand_bt = cand, bt
 
-                # ── Último recurso: CLON FORZADO del mejor histórico ───────────
-                # Garantiza el cupo. Genética probada (no aleatoria), pero entra
-                # sin superar el OOS de hoy. Se marca origen='forzado_*' para
-                # trazabilidad y se backtestea solo para registrar su fitness.
+                # ── Degradación 1: mejor candidato de cruce sin umbral ─────────
+                # Nadie pasó el filtro estricto (fitness>0 Y n_trades>=MIN), pero
+                # hubo hijos de cruce real: entra el de mayor fitness OOS. Mejor
+                # un hijo de dos padres con muestra corta que un clon sin cruce.
+                if child is None and best_cand is not None:
+                    child, best_bt = best_cand, best_cand_bt
+                    origen = "mejor_candidato_oos"
+                    _log.warning(
+                        "[EvolutionEngine] Repopulación %s (%s): sin candidato sobre "
+                        "umbral tras %d rondas → MEJOR CANDIDATO de cruce "
+                        "(fitness=%.5f, n=%d).",
+                        child_id, esp, REPOPULATION_MAX_ATTEMPTS_PER_SLOT,
+                        best_bt["fitness"], best_bt["n_trades"],
+                    )
+
+                # ── Degradación 2 (último recurso real): cruce forzado ─────────
+                # Ningún pool tiene 2 padres — se cruzan los DOS MEJORES genomas
+                # distintos disponibles entre HoF y pool (60% el de la especie
+                # correcta / mejor puntuado). Un agente eliminado puede aportar
+                # como uno de los dos padres, pero nunca ser el genoma único.
+                # Auto-clon SOLO si existe literalmente un genoma en el sistema.
                 if child is None:
-                    forced_source = None
-                    forced_origen = ""
-                    if hof_parents:
-                        forced_source = max(
-                            hof_parents,
-                            key=lambda p: float(p.get("roi_total", 0) or 0),
-                        )
-                        forced_origen = "forzado_hof"
-                    elif tourn_pool:
-                        forced_source = max(
-                            tourn_pool,
-                            key=lambda p: float(p.get("fitness_score", 0) or 0),
-                        )
-                        forced_origen = "forzado_pool"
+                    sources: dict[str, dict] = {}
+                    for p in list(hof_parents) + list(tourn_pool):
+                        if p["id"] not in sources:
+                            sources[p["id"]] = p
 
-                    if forced_source is not None:
-                        child = breed_agent(
-                            forced_source, forced_source, child_id, self.today,
-                            max_gen + 1, sigma_weights=sw, sigma_periods=sp,
-                            sigma_risk=sr, especie=esp,
+                    def _score(p: dict) -> tuple:
+                        return (
+                            str(p.get("especie") or "tendencia") == esp,
+                            p.get("estado", "activo") != "eliminado",
+                            float(p.get("fitness_score") or p.get("roi_total") or 0),
                         )
+
+                    ranked_src = sorted(sources.values(), key=_score, reverse=True)
+                    if len(ranked_src) >= 2:
+                        fp1, fp2 = ranked_src[0], ranked_src[1]
+                        # fp1 (mejor de la especie correcta si existe) domina
+                        # el cruce con el 60% del genoma, sin importar su ROI.
+                        child = breed_agent(
+                            fp1, fp2, child_id, self.today, max_gen + 1,
+                            sigma_weights=sw, sigma_periods=sp, sigma_risk=sr,
+                            especie=esp, p1_weight=0.6,
+                        )
+                        origen = "forzado_cruce"
+                        _log.warning(
+                            "[EvolutionEngine] Repopulación %s (%s): pools sin 2 padres "
+                            "→ CRUCE FORZADO %s × %s.",
+                            child_id, esp, fp1["id"], fp2["id"],
+                        )
+                    elif len(ranked_src) == 1 and ranked_src[0].get("estado", "activo") != "eliminado":
+                        fp1 = ranked_src[0]
+                        child = breed_agent(
+                            fp1, fp1, child_id, self.today, max_gen + 1,
+                            sigma_weights=sw, sigma_periods=sp, sigma_risk=sr,
+                            especie=esp,
+                        )
+                        origen = "forzado_clon_unico"
+                        _log.warning(
+                            "[EvolutionEngine] Repopulación %s (%s): UN SOLO genoma "
+                            "disponible (%s) → auto-clon inevitable.",
+                            child_id, esp, fp1["id"],
+                        )
+                    if child is not None:
                         try:
                             best_bt = run_backtest(backtest_data, child)
                         except Exception:
                             best_bt = {"fitness": 0.0, "n_trades": 0}
-                        origen = forced_origen
-                        _log.warning(
-                            "[EvolutionEngine] Repopulación %s (%s): sin candidato OOS "
-                            "tras %d rondas → CLON FORZADO de %s (origen=%s).",
-                            child_id, esp, REPOPULATION_MAX_ATTEMPTS_PER_SLOT,
-                            forced_source["id"], origen,
-                        )
 
                 if child is None:
-                    # Degenerado: ni pool de torneo ni HoF disponibles.
+                    # Degenerado: ningún genoma utilizable disponible.
                     _log.warning(
                         "[EvolutionEngine] Repopulación %s (%s): sin pool ni HoF; "
                         "cupo queda vacante.", child_id, esp,

@@ -210,6 +210,10 @@ class JudgeAgent(BaseAgent):
                         f"(ningún candidato superó el umbral OOS)."
                     )
                 if result.slots_recuperados:
+                    n_mejor_cand = sum(
+                        1 for s in result.slots_recuperados
+                        if s.get("origen") == "mejor_candidato_oos"
+                    )
                     n_forzados = sum(
                         1 for s in result.slots_recuperados
                         if str(s.get("origen", "")).startswith("forzado")
@@ -217,10 +221,15 @@ class JudgeAgent(BaseAgent):
                     descripcion += (
                         f" Cupos recuperados: {len(result.slots_recuperados)}"
                     )
-                    if n_forzados:
-                        descripcion += (
-                            f" ({n_forzados} por clon forzado del Hall of Fame)"
+                    detalles = []
+                    if n_mejor_cand:
+                        detalles.append(
+                            f"{n_mejor_cand} por mejor candidato de cruce sin umbral"
                         )
+                    if n_forzados:
+                        detalles.append(f"{n_forzados} por cruce/clon forzado")
+                    if detalles:
+                        descripcion += f" ({', '.join(detalles)})"
                     descripcion += "."
 
             self._log(

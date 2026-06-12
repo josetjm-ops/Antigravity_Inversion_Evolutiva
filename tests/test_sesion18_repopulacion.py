@@ -229,11 +229,12 @@ def test_repopulation_hof_fallback():
     assert deficit_restante == {}
 
 
-# ─── (5) Clon forzado del HoF garantiza el cupo cuando nadie pasa el OOS ──────
+# ─── (5) Nadie pasa el umbral → entra el MEJOR CANDIDATO de cruce ─────────────
 
-def test_repopulation_forced_clone_guarantees_slot():
-    """Sesión 19: si tras todas las rondas nadie pasa OOS, se clona el mejor
-    del Hall of Fame (origen='forzado_hof') para garantizar el cupo."""
+def test_repopulation_best_candidate_when_no_one_passes():
+    """Sesión 21: si tras todas las rondas nadie pasa el umbral OOS, se
+    despliega el mejor hijo de CRUCE visto (origen='mejor_candidato_oos'),
+    nunca un clon. Los padres del hijo deben ser distintos."""
     from evolution.evolution_engine import EvolutionEngine
 
     engine = EvolutionEngine(date(2026, 6, 9))
@@ -244,9 +245,12 @@ def test_repopulation_forced_clone_guarantees_slot():
         + [_agent(f"B_{i}", "ruptura")   for i in range(5)]  # completo
     )
 
-    bad_bt = {"fitness": 0.0, "n_trades": 3}  # nadie supera el umbral nunca
+    bad_bt = {"fitness": 0.02, "n_trades": 3}  # positivo pero muestra corta
+
+    parejas: list[tuple[str, str]] = []
 
     def _mock_breed(p1, p2, child_id, today, gen, **kw):
+        parejas.append((p1["id"], p2["id"]))
         return _agent(child_id, kw.get("especie", "tendencia"))
 
     hof_pool = [_agent(f"HOF_{i}", "tendencia", fitness=0.10) for i in range(2)]
@@ -265,33 +269,125 @@ def test_repopulation_forced_clone_guarantees_slot():
         )
 
     assert len(recovered) == 1, (
-        f"El clon forzado debe garantizar el cupo, obtuvo {len(recovered)}"
+        f"El mejor candidato debe garantizar el cupo, obtuvo {len(recovered)}"
     )
-    assert slots_rec_log[0]["origen"] == "forzado_hof", (
-        f"Origen esperado 'forzado_hof', obtuvo '{slots_rec_log[0]['origen']}'"
+    assert slots_rec_log[0]["origen"] == "mejor_candidato_oos", (
+        f"Origen esperado 'mejor_candidato_oos', obtuvo '{slots_rec_log[0]['origen']}'"
     )
-    assert deficit_restante == {}, "No debe quedar déficit con el clon forzado"
+    assert deficit_restante == {}, "No debe quedar déficit"
+    # Todos los hijos criados nacieron de DOS padres distintos.
+    assert parejas, "breed_agent nunca fue llamado"
+    assert all(p1 != p2 for p1, p2 in parejas), (
+        f"Hubo crianza con padre==madre: {[p for p in parejas if p[0] == p[1]]}"
+    )
 
 
-# ─── (6) Sin HoF, el clon forzado usa el mejor del pool de torneo ────────────
+# ─── (6) Último recurso: cruce forzado de los 2 mejores genomas distintos ─────
 
-def test_repopulation_forced_clone_from_pool_without_hof():
-    """Si no hay HoF y nadie pasa OOS, se clona el mejor del pool
-    (origen='forzado_pool')."""
+def test_repopulation_forced_cruce_two_distinct_genomes():
+    """Sesión 21: si ningún pool tiene 2 padres para torneo, se cruzan los
+    dos mejores genomas distintos disponibles (origen='forzado_cruce') —
+    jamás el mismo agente como padre y madre."""
     from evolution.evolution_engine import EvolutionEngine
 
     engine = EvolutionEngine(date(2026, 6, 9))
-    # Solo falta 1 tendencia; las otras especies están completas.
+    # Población vacía en tendencia, pool de padres con UN solo agente.
     current = (
         [_agent(f"T_{i}", "tendencia")  for i in range(4)]  # déficit de 1
-        + [_agent(f"R_{i}", "reversion") for i in range(5)]  # completo
-        + [_agent(f"B_{i}", "ruptura")   for i in range(5)]  # completo
+        + [_agent(f"R_{i}", "reversion") for i in range(5)]
+        + [_agent(f"B_{i}", "ruptura")   for i in range(5)]
     )
-    parents = [a for a in current if a["especie"] == "tendencia"]
+    solo_parent = [_agent("UNICO_POOL", "tendencia", fitness=0.05)]
+    # OJO: parent_pool de 1 → tourn_pool de 1 → sin torneo posible.
+    hof_pool = [_agent("UNICO_HOF", "tendencia", fitness=0.10)]  # 1 → sin torneo HoF
 
-    bad_bt = {"fitness": 0.0, "n_trades": 3}
+    bad_bt = {"fitness": 0.0, "n_trades": 0}
+    parejas: list[tuple[str, str]] = []
 
     def _mock_breed(p1, p2, child_id, today, gen, **kw):
+        parejas.append((p1["id"], p2["id"]))
+        return _agent(child_id, kw.get("especie", "tendencia"))
+
+    with patch("evolution.evolution_engine.breed_agent", side_effect=_mock_breed), \
+         patch("evolution.backtester.run_backtest", return_value=bad_bt), \
+         patch.object(engine, "_get_hof_parents", return_value=hof_pool):
+
+        recovered, slots_rec_log, deficit_restante = engine._try_repopulate(
+            current_population=current,
+            parent_pool=solo_parent,
+            backtest_data={"df_15m": None, "df_1h": None},
+            start_idx=10,
+            max_gen=1,
+            sw=0.05, sp=0.08, sr=0.10,
+        )
+
+    assert len(recovered) == 1
+    assert slots_rec_log[0]["origen"] == "forzado_cruce"
+    assert deficit_restante == {}
+    assert len(parejas) == 1
+    p1, p2 = parejas[0]
+    assert p1 != p2, "El cruce forzado usó el mismo agente como padre y madre"
+    assert {p1, p2} == {"UNICO_HOF", "UNICO_POOL"}
+
+
+# ─── (7) Un agente ELIMINADO nunca es el genoma único ─────────────────────────
+
+def test_repopulation_eliminated_never_sole_genome():
+    """Sesión 21: si el único genoma disponible pertenece a un agente
+    eliminado, el cupo queda vacante — no se clona un perdedor."""
+    from evolution.evolution_engine import EvolutionEngine
+
+    engine = EvolutionEngine(date(2026, 6, 9))
+    current = (
+        [_agent(f"T_{i}", "tendencia")  for i in range(4)]  # déficit de 1
+        + [_agent(f"R_{i}", "reversion") for i in range(5)]
+        + [_agent(f"B_{i}", "ruptura")   for i in range(5)]
+    )
+    hof_eliminado = _agent("HOF_ELIMINADO", "tendencia", fitness=0.10)
+    hof_eliminado["estado"] = "eliminado"
+
+    bad_bt = {"fitness": 0.0, "n_trades": 0}
+
+    def _mock_breed(p1, p2, child_id, today, gen, **kw):
+        return _agent(child_id, kw.get("especie", "tendencia"))
+
+    with patch("evolution.evolution_engine.breed_agent", side_effect=_mock_breed), \
+         patch("evolution.backtester.run_backtest", return_value=bad_bt), \
+         patch.object(engine, "_get_hof_parents", return_value=[hof_eliminado]):
+
+        recovered, slots_rec_log, deficit_restante = engine._try_repopulate(
+            current_population=current,
+            parent_pool=[],
+            backtest_data={"df_15m": None, "df_1h": None},
+            start_idx=10,
+            max_gen=1,
+            sw=0.05, sp=0.08, sr=0.10,
+        )
+
+    assert recovered == [], "No debe clonarse un agente eliminado como genoma único"
+    assert deficit_restante.get("tendencia", 0) == 1
+
+
+# ─── (8) Auto-clon SOLO cuando existe un único genoma activo ──────────────────
+
+def test_repopulation_self_clone_only_with_single_active_genome():
+    """Sesión 21: con un solo genoma ACTIVO en todo el sistema, el auto-clon
+    es inevitable y se marca origen='forzado_clon_unico'."""
+    from evolution.evolution_engine import EvolutionEngine
+
+    engine = EvolutionEngine(date(2026, 6, 9))
+    current = (
+        [_agent(f"T_{i}", "tendencia")  for i in range(4)]  # déficit de 1
+        + [_agent(f"R_{i}", "reversion") for i in range(5)]
+        + [_agent(f"B_{i}", "ruptura")   for i in range(5)]
+    )
+    solo = [_agent("UNICO_ACTIVO", "tendencia", fitness=0.05)]
+
+    bad_bt = {"fitness": 0.0, "n_trades": 0}
+    parejas: list[tuple[str, str]] = []
+
+    def _mock_breed(p1, p2, child_id, today, gen, **kw):
+        parejas.append((p1["id"], p2["id"]))
         return _agent(child_id, kw.get("especie", "tendencia"))
 
     with patch("evolution.evolution_engine.breed_agent", side_effect=_mock_breed), \
@@ -300,7 +396,7 @@ def test_repopulation_forced_clone_from_pool_without_hof():
 
         recovered, slots_rec_log, deficit_restante = engine._try_repopulate(
             current_population=current,
-            parent_pool=parents,
+            parent_pool=solo,
             backtest_data={"df_15m": None, "df_1h": None},
             start_idx=10,
             max_gen=1,
@@ -308,5 +404,52 @@ def test_repopulation_forced_clone_from_pool_without_hof():
         )
 
     assert len(recovered) == 1
-    assert slots_rec_log[0]["origen"] == "forzado_pool"
-    assert deficit_restante == {}
+    assert slots_rec_log[0]["origen"] == "forzado_clon_unico"
+    assert parejas == [("UNICO_ACTIVO", "UNICO_ACTIVO")]
+
+
+# ─── (9) Coherencia de especie en el cruce forzado ────────────────────────────
+
+def test_repopulation_forced_cruce_prefers_species_parent():
+    """Sesión 21: en el cruce forzado, el padre dominante (p1) debe ser el
+    de la especie del cupo aunque otro genoma global tenga mejor puntuación."""
+    from evolution.evolution_engine import EvolutionEngine
+
+    engine = EvolutionEngine(date(2026, 6, 9))
+    current = (
+        [_agent(f"T_{i}", "tendencia")  for i in range(5)]
+        + [_agent(f"R_{i}", "reversion") for i in range(4)]  # déficit de 1
+        + [_agent(f"B_{i}", "ruptura")   for i in range(5)]
+    )
+    hof_pool = [
+        _agent("HOF_TEND_TOP", "tendencia", fitness=0.50),  # mejor global
+    ]
+    solo_rev = [_agent("REV_DEBIL", "reversion", fitness=0.01)]
+
+    bad_bt = {"fitness": 0.0, "n_trades": 0}
+    parejas: list[tuple[str, str]] = []
+
+    def _mock_breed(p1, p2, child_id, today, gen, **kw):
+        parejas.append((p1["id"], p2["id"]))
+        return _agent(child_id, kw.get("especie", "reversion"))
+
+    with patch("evolution.evolution_engine.breed_agent", side_effect=_mock_breed), \
+         patch("evolution.backtester.run_backtest", return_value=bad_bt), \
+         patch.object(engine, "_get_hof_parents", return_value=hof_pool):
+
+        recovered, slots_rec_log, deficit_restante = engine._try_repopulate(
+            current_population=current,
+            parent_pool=solo_rev,
+            backtest_data={"df_15m": None, "df_1h": None},
+            start_idx=10,
+            max_gen=1,
+            sw=0.05, sp=0.08, sr=0.10,
+        )
+
+    assert len(recovered) == 1
+    assert slots_rec_log[0]["origen"] == "forzado_cruce"
+    p1, p2 = parejas[0]
+    assert p1 == "REV_DEBIL", (
+        f"p1 (padre dominante 60%) debía ser el de la especie reversion, fue {p1}"
+    )
+    assert p2 == "HOF_TEND_TOP"

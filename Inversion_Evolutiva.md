@@ -610,13 +610,24 @@ Para que esto funcione en la "ventana ciega" de 03:30 – 06:30 UTC (11pm – 1:
      b. Hasta REPOPULATION_MAX_ATTEMPTS_PER_SLOT rondas (default 8) de
         (torneo N candidatos → umbral OOS) seguido de (HoF N candidatos → umbral OOS).
         Se detiene en cuanto un candidato supera el umbral.
-     c. ÚLTIMO RECURSO (Sesión 19): si tras agotar las rondas nadie pasa el OOS, se
-        CLONA el mejor agente del Hall of Fame (genética probada, origen='forzado_hof';
-        si no hay HoF, el mejor del pool de torneo → 'forzado_pool'). Esto garantiza
-        llenar el cupo sin insertar genética aleatoria. El clon entra sin superar el
-        OOS de hoy, pero queda marcado para trazabilidad.
-     d. Si Yahoo Finance no está disponible (sin datos de mercado) → omitir
-        silenciosamente: no hay base ni para validar ni para clonar (fallback sin Yahoo).
+     c. DEGRADACIÓN 1 (Sesión 21): si tras agotar las rondas nadie pasa el umbral
+        estricto, entra el MEJOR CANDIDATO DE CRUCE visto en todas las rondas
+        (origen='mejor_candidato_oos') — un hijo de dos padres distintos con
+        muestra OOS corta vale más que un clon sin cruce. El cruce 60/40 nunca
+        se abandona.
+     d. DEGRADACIÓN 2 — último recurso real (Sesión 21): si ningún pool tiene 2
+        padres para criar candidatos, se cruzan los DOS MEJORES genomas distintos
+        disponibles entre HoF y pool (origen='forzado_cruce'); el de la especie
+        correcta es siempre el padre dominante (60% del genoma, p1_weight=0.6
+        explícito). Un agente eliminado puede aportar como uno de los dos padres,
+        pero NUNCA ser el genoma único. Auto-clon (origen='forzado_clon_unico')
+        SOLO si existe literalmente un genoma activo en el sistema.
+        ⚠️ El clon forzado de Sesión 19 (origen='forzado_hof'/'forzado_pool',
+        padre==madre) queda ELIMINADO: el 2026-06-12 produjo 4 hijos sin cruce,
+        3 de ellos del mismo genoma de otra especie y 1 de un agente eliminado
+        esa misma noche. Ver Sesión 21 en el historial.
+     e. Si Yahoo Finance no está disponible (sin datos de mercado) → omitir
+        silenciosamente: no hay base ni para validar ni para criar (fallback sin Yahoo).
    Los agentes recuperados se insertan en la misma transacción DB y reciben capital
    de la redistribución de ese mismo ciclo.
    Trazabilidad: `slots_recuperados` y `deficit_restante` en `logs_juez.datos_json`.
@@ -781,7 +792,7 @@ El valor de `genetic_variance_cv` y el flag `sigma_boost_applied` quedan registr
 | **Inicio del sistema** | Script manual de siembra con parámetros fijos o copiados de agentes previos |
 | **Reproducción diaria** | El Juez selecciona 2 padres del pool de supervivientes elegibles (fitness-proporcional; pesos OOS si todos pierden) y los cruza con mutación. Torneo de 3 candidatos backtesteados OOS — solo se despliega el mejor si supera el umbral de calidad (Sesión 17) |
 | **Fallback Hall of Fame** | Si ningún candidato del torneo supera el umbral OOS, se crían 3 candidatos con genes del Hall of Fame (misma especie primero) y se aplica el mismo umbral. Si tampoco pasan: slot vacante (Sesión 17) |
-| **Recuperación de cupos — garantía de 15 (Sesión 18 / 19)** | En cada ciclo el motor detecta el déficit por especie (`TARGET_AGENTS_PER_ESPECIE − activos`) y llena TODOS los cupos (sin tope). Por cupo: hasta `REPOPULATION_MAX_ATTEMPTS_PER_SLOT` rondas de torneo→HoF con umbral OOS; si nadie pasa, **clon forzado del mejor del Hall of Fame** (`origen='forzado_hof'`) para garantizar los 15. Solo se omite si Yahoo Finance está caído. |
+| **Recuperación de cupos — garantía de 15 (Sesión 18 / 19 / 21)** | En cada ciclo el motor detecta el déficit por especie (`TARGET_AGENTS_PER_ESPECIE − activos`) y llena TODOS los cupos (sin tope). Por cupo: hasta `REPOPULATION_MAX_ATTEMPTS_PER_SLOT` rondas de torneo→HoF con umbral OOS; si nadie pasa, **el mejor candidato de cruce** (`origen='mejor_candidato_oos'` — siempre dos padres distintos); si ningún pool tiene 2 padres, **cruce forzado de los 2 mejores genomas distintos** (`'forzado_cruce'`). Auto-clon solo con un único genoma activo en el sistema. Solo se omite si Yahoo Finance está caído. |
 | **Reset manual** | Limpieza total de la DB e inserción de nueva generación semilla |
 | **Registro en Hall of Fame** | `estrategias_exitosas` captura los genes de agentes con ROI > 0.05% para herencia futura |
 
@@ -823,7 +834,7 @@ La cuota de eliminación no es rígida. Cada tarde el motor calcula cuántos age
 
 | Escenario | Eliminados | Nacimientos | Razón |
 |---|---|---|---|
-| Día normal con veteranos negativos | 1 a 9 | 0 al mismo número (reproducción) + recuperación de TODO el déficit hasta 15 (clon forzado si nadie pasa OOS) | Bottom por fitness, respetando máx 3/especie |
+| Día normal con veteranos negativos | 1 a 9 | 0 al mismo número (reproducción) + recuperación de TODO el déficit hasta 15 (mejor candidato de cruce si nadie pasa OOS) | Bottom por fitness, respetando máx 3/especie |
 | Día de HOLD generalizado | 0 | recuperación de TODO el déficit hasta 15, si Yahoo disponible | Todos los activos están en inmunidad/gracia |
 | Veteranos rentables protegidos | 0 | recuperación de TODO el déficit hasta 15, si Yahoo disponible | Todos los elegibles tienen fitness > 0 |
 | Yahoo Finance caído | 0 a 9 | sin recuperación (no hay datos para validar ni clonar) | Población puede quedar < 15 ese día; se recupera al siguiente ciclo con datos |
@@ -938,7 +949,7 @@ Audit trail completo del Agente Juez.
 | `capital_pool_total` | float | Pool total en USD |
 | `capital_por_agente` | float | Cuota individual tras redistribución |
 | `slots_vacantes` | array | Slots no cubiertos en la reproducción (Fase 1, Sesión 17): `[{id, especie, razon}]`. Vacío si todos los cupos se llenaron. |
-| `slots_recuperados` | array | Cupos recuperados en este ciclo (Sesión 18 / 19): `[{id, especie, fitness_oos, origen}]` donde `origen` ∈ `{"torneo", "hall_of_fame", "forzado_hof", "forzado_pool"}`. Los `forzado_*` (Sesión 19) son clones del mejor histórico cuando nadie superó el OOS, para garantizar los 15. Vacío si no hubo recuperación. |
+| `slots_recuperados` | array | Cupos recuperados en este ciclo (Sesión 18 / 19 / 21): `[{id, especie, fitness_oos, origen}]` donde `origen` ∈ `{"torneo", "hall_of_fame", "mejor_candidato_oos", "forzado_cruce", "forzado_clon_unico"}`. `mejor_candidato_oos` = mejor hijo de cruce cuando nadie superó el umbral; `forzado_cruce` = cruce de los 2 mejores genomas distintos cuando no hay pools para torneo; `forzado_clon_unico` = auto-clon con un solo genoma activo (excepcional). Los antiguos `forzado_hof`/`forzado_pool` (clones padre==madre, Sesión 19) fueron eliminados en Sesión 21. Vacío si no hubo recuperación. |
 | `deficit_restante` | object | Déficit por especie no cubierto tras la recuperación (Sesión 18): `{especie: n}`. Vacío si no quedó déficit. |
 | `insight_mercado` | string | Comentario del LLM (vacío en días suspendidos sin recuperación) |
 | `recomendacion_parametros` | string | Sugerencias del LLM para próximas generaciones |
@@ -1220,7 +1231,7 @@ Todas las variables se definen en `.env` local (desarrollo) o en **GitHub Secret
 | `RUPTURA_SOLO_TENDENCIA` | Si `true`, la especie `ruptura` no abre posiciones en régimen `RANGO` (ni en el monitor de producción ni en el backtester OOS). NEUTRAL siempre opera. Default: `true`. **Fase 5, desde Sesión 17.** |
 | `TARGET_AGENTS_PER_ESPECIE` | Objetivo de agentes activos por especie. El motor llena TODO el déficit cada ciclo (3 × 5 = 15 garantizados). Default: `5`. **Sesión 18 / 19.** |
 | `REPOPULATION_MAX_PER_CYCLE` | **DEPRECADO (Sesión 19).** El tope por ciclo se eliminó para garantizar los 15. Default: `3` (sin efecto). **Sesión 18.** |
-| `REPOPULATION_MAX_ATTEMPTS_PER_SLOT` | Rondas de reintento (torneo→HoF) por cupo antes del clon forzado del Hall of Fame. Acota el costo de backtests del cron. Default: `8`. **Sesión 19.** |
+| `REPOPULATION_MAX_ATTEMPTS_PER_SLOT` | Rondas de reintento (torneo→HoF) por cupo antes de desplegar el mejor candidato de cruce. Acota el costo de backtests del cron. Default: `8`. **Sesión 19 / 21.** |
 | `LOG_LEVEL` | Nivel de logs (default: `INFO`) |
 | `ENVIRONMENT` | Ambiente (`production` / `development`) |
 
@@ -1274,7 +1285,7 @@ Cada 15 min de 1:30am a 10:30pm:
              ║         ningún candidato pasa (Sesión 17).           ║
              ║      7. Recuperar TODO el déficit hasta los 15       ║
              ║         (Sesión 18/19): torneo→HoF ×8 rondas;        ║
-             ║         clon forzado del HoF si nadie pasa el OOS.   ║
+             ║         mejor candidato de cruce si nadie pasa OOS.  ║
              ║      8. Razonamiento LLM: veredicto y expectativas.  ║
              ║      9. Registro detallado en logs_juez.             ║
              ║     10. Redistribución de capital: pool ÷ activos    ║
@@ -1373,9 +1384,17 @@ Antigravity_Inversion_Evolutiva/
 
 ---
 
-*Documento actualizado el 2026-06-10 (Sesión 19 — garantía de 15 agentes: sin tope por ciclo, reintentos por cupo y clon forzado del Hall of Fame como último recurso).*
+*Documento actualizado el 2026-06-12 (Sesión 21 — cruce 60/40 garantizado: el clon forzado padre==madre fue eliminado; la recuperación de cupos despliega el mejor candidato de cruce y, como último recurso, cruza los dos mejores genomas distintos).*
 
 ## Historial de cambios mayores
+
+- **2026-06-12 (Sesión 21 — cruce 60/40 garantizado: eliminación del clon forzado padre==madre) · en producción:**
+  - **Contexto:** el ciclo del 2026-06-12 eliminó correctamente 4 agentes con fitness ≤ 0, pero los 4 hijos nacieron por el "clon forzado" de Sesión 19 con **padre == madre**: los 3 de reversion eran mutaciones del MISMO genoma Gen-1 de especie tendencia (`2026-05-19_10`), y el de ruptura era clon de `2026-06-02_06` — **el agente eliminado esa misma noche** (su entrada HoF era de cuando tuvo ROI positivo). Incoherencia adicional: el umbral OOS rechazó hijos de cruce real con fitness +0.067 (por tener 4 trades en vez de 5) y luego desplegó clones con fitness −0.144 y −0.116. El usuario detectó la violación del principio central del sistema: los hijos deben recombinar el ADN de los dos mejores padres (cruce 60/40).
+  - **Rediseño de la jerarquía de recuperación (`evolution/evolution_engine.py`, `_try_repopulate`):** el cruce de dos padres distintos nunca se abandona. Escalera nueva: (1) torneo con umbral estricto (sin cambio); (2) **mejor candidato de cruce** (`origen='mejor_candidato_oos'`): si nadie pasa el umbral tras todas las rondas, entra el hijo de cruce con mayor fitness OOS — muestra corta es preferible a clon sin cruce; (3) **cruce forzado** (`'forzado_cruce'`): si ningún pool tiene 2 padres, se cruzan los dos mejores genomas distintos entre HoF y pool, con el de la especie correcta como dominante (60% vía `p1_weight=0.6` explícito — nuevo parámetro opcional de `breed_agent`); un agente eliminado puede ser uno de los dos padres pero nunca el genoma único; (4) auto-clon (`'forzado_clon_unico'`) SOLO si existe un único genoma activo en el sistema. Los orígenes `forzado_hof`/`forzado_pool` desaparecen.
+  - **`_get_hof_parents` con mezcla de especies:** cuando la especie tiene < 2 padres únicos, antes se descartaban por completo y se usaba el top global (por eso los hijos de reversion salieron 100% tendencia); ahora se conservan los de la especie y se completa con el top global — el mejor padre de la especie sigue disponible y domina el cruce. La query también devuelve `a.estado` para que el último recurso evite eliminados como genoma único.
+  - **`judge_agent.py`:** la descripción del ciclo reporta por separado los cupos por "mejor candidato de cruce sin umbral" y por "cruce/clon forzado".
+  - **Corrección retroactiva en producción (`scripts/fix_genealogia_20260612.py`):** los 4 hijos de anoche fueron re-criados in-place con la lógica nueva (mismos ids, capital, generación y FKs; solo cambian padres y genoma): `_05` (reversion) ← `2026-06-02_05 × 2026-05-28_04`; `_06` (reversion) ← `2026-06-02_05 × 2026-05-28_04` (pasó umbral estricto vía torneo, n=5); `_07` (reversion) ← `2026-05-29_04 × 2026-05-19_04` (pasó vía HoF, n=5); `_08` (ruptura) ← `2026-05-29_04 × 2026-06-05_01` (pasó vía HoF, n=5). Verificado: 0 agentes activos con padre==madre en toda la población. Corrección registrada en `logs_juez` y Sheets re-sincronizado vía backfill.
+  - **Tests (`tests/test_sesion18_repopulacion.py`):** los 2 tests de clon forzado reemplazados por 5 nuevos: mejor candidato cuando nadie pasa el umbral (verifica que todas las crianzas usaron padres distintos), cruce forzado con 2 genomas, veto a eliminados como genoma único (cupo queda vacante), auto-clon solo con genoma único activo, y coherencia de especie (p1 dominante = especie del cupo aunque otro genoma global puntúe mejor). **Suite completa: 51/51 verdes.**
 
 - **2026-06-11 (Sesión 20 — auditoría exhaustiva de operación: 4 reparaciones + incidente de tests revertido) · commits `9d7dc38`, `8af973a`, `f70806d` · en producción:**
   - **Contexto:** el Agente Juez no se ejecutó las noches del 10 y 11 de junio (issues #9 y #12). La auditoría posterior revisó todos los flujos del sistema y encontró tres fallos adicionales independientes.
@@ -1390,7 +1409,7 @@ Antigravity_Inversion_Evolutiva/
   - **Contexto:** la recuperación de cupos de Sesión 18 tenía dos límites de diseño que impedían garantizar los 15 agentes: el tope `REPOPULATION_MAX_PER_CYCLE` (máx 3/ciclo) y el umbral OOS que dejaba cupos vacantes si ningún candidato pasaba. El usuario solicitó que **siempre existan 15 agentes**.
   - **Sin tope por ciclo (`evolution/evolution_engine.py`):** `_try_repopulate()` ahora intenta llenar TODOS los cupos faltantes en un solo ciclo (`REPOPULATION_MAX_PER_CYCLE` queda deprecado, sin efecto).
   - **Reintentos por cupo:** hasta `REPOPULATION_MAX_ATTEMPTS_PER_SLOT` rondas (default 8) de (torneo → umbral OOS) seguido de (HoF → umbral OOS), deteniéndose al primer candidato que pasa. Sube fuertemente la probabilidad de cubrir el cupo respetando el filtro de calidad.
-  - **Clon forzado como último recurso:** si tras agotar las rondas nadie supera el OOS, se clona el mejor agente del Hall of Fame (`origen='forzado_hof'`; si no hay HoF, el mejor del pool → `'forzado_pool'`). Genética probada, no aleatoria. Esto **garantiza los 15** en cualquier día con datos de mercado. El clon entra sin pasar el OOS de hoy, marcado para trazabilidad.
+  - **Clon forzado como último recurso:** ⚠️ **ELIMINADO en Sesión 21** (el 2026-06-12 produjo 4 hijos con padre==madre, violando el cruce 60/40 — ver entrada de Sesión 21). Diseño original: si tras agotar las rondas nadie supera el OOS, se clonaba el mejor agente del Hall of Fame (`origen='forzado_hof'`; si no hay HoF, el mejor del pool → `'forzado_pool'`). Garantizaba los 15 pero sin recombinación genética.
   - **Fallback sin Yahoo Finance (preservado):** si no hay datos de mercado, la recuperación se omite por completo — no hay base para validar ni para clonar. Ese día la población puede quedar < 15 y se recupera al siguiente ciclo con datos.
   - **Trazabilidad:** `origen` en `slots_recuperados` admite ahora `forzado_hof`/`forzado_pool`; `judge_agent.py` reporta en la descripción cuántos cupos se llenaron por clon forzado.
   - **Tests:** `tests/test_sesion18_repopulacion.py` actualizado — 6 tests: llenado completo sin tope (4 cupos), llenado de los 15, omisión sin backtest, fallback HoF, clon forzado HoF, clon forzado pool. Suite: 45 no-DB verdes (3 fallos de BD esperados sin `DATABASE_URL`).
