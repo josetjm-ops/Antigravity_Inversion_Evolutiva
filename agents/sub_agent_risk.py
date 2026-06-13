@@ -24,6 +24,12 @@ _RISK_PCT_MAX  = 0.02    # máximo 2% del equity en riesgo por operación
 # 5→10 pips. No empeora el riesgo: position sizing escala inverso a sl_pips, así
 # que un SL mayor produce un nocional menor con el mismo 1–2% de riesgo.
 _MIN_SL_PIPS   = float(os.getenv("MIN_SL_PIPS", "10.0"))  # distancia mínima de SL válido
+# Techo de Stop Loss (Sesión 22 — coherencia intradía): un SL mayor produce un
+# TP (R:R ≥ 1.5) inalcanzable antes del cierre forzoso EOD, dejando solo dos
+# finales posibles (EOD o SL completo) y fitness sin señal. Aplica a TODAS las
+# fuentes de SL (estructura OB/FVG y ATR) — el SL de 61 pips del 2026-06-12
+# salió de la rama estructural, que solo validaba distancia mínima.
+_MAX_SL_PIPS   = float(os.getenv("MAX_SL_PIPS", "35.0"))
 _MAX_LEVERAGE  = 50.0    # techo de apalancamiento (nocional ≤ equity × 50)
 _UNITS_PER_LOT = 1000.0  # unidades EUR por lote micro (referencia pip_value)
 
@@ -142,12 +148,14 @@ class SubAgentRisk(BaseAgent):
                 sl_precio = candidate
                 sl_fuente = "FVG"
 
-        # Validar que el SL esté del lado correcto y a distancia mínima
+        # Validar que el SL esté del lado correcto y a distancia válida
         if sl_precio is not None:
             wrong_side = (accion == "BUY" and sl_precio >= precio) or \
                          (accion == "SELL" and sl_precio <= precio)
-            too_close  = abs(precio - sl_precio) * 10_000 < _MIN_SL_PIPS
-            if wrong_side or too_close:
+            sl_dist_pips = abs(precio - sl_precio) * 10_000
+            too_close  = sl_dist_pips < _MIN_SL_PIPS
+            too_far    = sl_dist_pips > _MAX_SL_PIPS   # Sesión 22
+            if wrong_side or too_close or too_far:
                 sl_precio = None
                 sl_fuente = "pct"
 
@@ -158,7 +166,7 @@ class SubAgentRisk(BaseAgent):
                                self.params.get("atr_factor", 1.5)))
             if atr > 0:
                 dist = max(atr * atr_factor, _MIN_SL_PIPS * 0.0001)  # piso = _MIN_SL_PIPS
-                dist = min(dist, 0.0050)                             # máx 50 pips
+                dist = min(dist, _MAX_SL_PIPS * 0.0001)              # techo (Sesión 22)
                 sl_precio = (
                     round(precio - dist, 5) if accion == "BUY"
                     else round(precio + dist, 5)

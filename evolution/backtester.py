@@ -104,6 +104,13 @@ def run_backtest(data: dict, agent: dict) -> dict:
     friction_pips = float(os.getenv("TRADE_FRICTION_PIPS", "1.4"))
     min_sl_pips   = float(os.getenv("MIN_SL_PIPS", "10.0"))
 
+    # Salidas inteligentes (Sesión 22) — mismos genes que el trade_monitor,
+    # replicados aquí para que el fitness OOS refleje el comportamiento real.
+    be_r          = float(params_smc.get("be_activation_r", 0) or 0)
+    exit_rev      = int(params_smc.get("exit_on_reversal", 0) or 0)
+    min_profit_r  = float(params_smc.get("min_profit_for_exit_r", 0.4) or 0.4)
+    umbral_conf   = float(params_riesgo.get("umbral_confianza_minima", 0.60) or 0.60)
+
     n_total = len(df_15m)
     oos_start = max(0, n_total - BACKTEST_VALIDATE_DAYS * _CANDLES_PER_DAY)
 
@@ -167,9 +174,27 @@ def run_backtest(data: dict, agent: dict) -> dict:
                     "pnl": pnl, "hit": "SL" if hit_sl else "TP",
                 })
                 open_pos = None
+            elif be_r > 0:
+                # ── Break-even stop (Sesión 22) — igual que trade_monitor:
+                # tras el chequeo de hits, si el extremo favorable de la vela
+                # alcanza be_r × R, el SL sube a entrada ± fricción.
+                r_pips = open_pos.get("sl_pips") or (abs(entry - sl) * 10_000)
+                favorable = candle_hi if accion == "BUY" else candle_lo
+                profit_pips = (
+                    (favorable - entry) * 10_000 if accion == "BUY"
+                    else (entry - favorable) * 10_000
+                )
+                if r_pips > 0 and profit_pips >= be_r * r_pips:
+                    fr = friction_pips * 0.0001
+                    if accion == "BUY":
+                        open_pos["stop_loss"] = max(sl, round(entry + fr, 5))
+                    else:
+                        open_pos["stop_loss"] = min(sl, round(entry - fr, 5))
 
-        # ── 2. Cada N velas: evaluar nueva posición ───────────────────────
-        if open_pos is None and (i - oos_start) % _CHECK_EVERY == 0:
+        # ── 2. Cada N velas: evaluar señal (entrada o salida por reversa) ─
+        cadence = (i - oos_start) % _CHECK_EVERY == 0
+        needs_signal = cadence and (open_pos is None or exit_rev == 1)
+        if needs_signal:
             lo = max(0, i - _LOOKBACK)
             df_slice = df_15m.iloc[lo: i + 1]
             if len(df_slice) < 30:
@@ -181,6 +206,42 @@ def run_backtest(data: dict, agent: dict) -> dict:
             except Exception:
                 continue
 
+            # ── 2a. Posición abierta + gen activo: salida por señal contraria
+            #        (Sesión 22). Mismas 3 condiciones que trade_monitor:
+            #        opuesta + confianza >= umbral propio + ganancia mínima en R.
+            if open_pos is not None:
+                senal = sub_tec.analyze(signals, especie=especie)
+                accion = open_pos["accion"]
+                opuesta = (
+                    (accion == "BUY" and senal["recomendacion"] == "SELL")
+                    or (accion == "SELL" and senal["recomendacion"] == "BUY")
+                )
+                if opuesta and float(senal.get("confianza", 0)) >= umbral_conf:
+                    entry    = open_pos["precio_entrada"]
+                    cap_used = open_pos["capital_usado"]
+                    r_pips   = open_pos.get("sl_pips") or (
+                        abs(entry - open_pos["stop_loss"]) * 10_000
+                    )
+                    profit_pips = (
+                        (precio - entry) * 10_000 if accion == "BUY"
+                        else (entry - precio) * 10_000
+                    )
+                    if r_pips > 0 and profit_pips >= min_profit_r * r_pips:
+                        pnl = (
+                            (precio - entry) / entry * cap_used if accion == "BUY"
+                            else (entry - precio) / entry * cap_used
+                        )
+                        pnl -= friction_pips * 0.0001 / entry * cap_used
+                        pnl  = round(pnl, 6)
+                        capital += pnl
+                        trades.append({
+                            "accion": accion, "entry": entry, "exit": precio,
+                            "pnl": pnl, "hit": "REV",
+                        })
+                        open_pos = None
+                continue
+
+            # ── 2b. Sin posición: evaluar nueva entrada ───────────────────
             # Gate de régimen (igual que trade_monitor)
             r_estado = signals.regime_estado
             if r_estado != "NEUTRAL":
@@ -207,6 +268,7 @@ def run_backtest(data: dict, agent: dict) -> dict:
                 "stop_loss":      sl,
                 "take_profit":    tp,
                 "capital_usado":  cap_uso,
+                "sl_pips":        sl_pips,
             }
 
     # ── Cerrar posición abierta al precio final (EOD del período) ────────────

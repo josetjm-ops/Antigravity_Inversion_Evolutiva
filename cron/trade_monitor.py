@@ -65,6 +65,11 @@ if str(ROOT) not in sys.path:
 _POLL_SECONDS = int(os.getenv("TRADE_MONITOR_POLL_SECONDS", "60"))
 _MIN_CAPITAL  = float(os.getenv("MIN_CAPITAL_TO_TRADE", "2.0"))
 
+# Fricción round-trip (spread + slippage) — misma constante que investor_agent.
+# Usada por el break-even stop (Sesión 22): BE = entrada ± fricción para que
+# el cierre en BE no termine en pérdida tras descontar la fricción.
+_FRICTION_PIPS = float(os.getenv("TRADE_FRICTION_PIPS", "1.4"))
+
 # Fase 5 Sesión 17: ruptura bloqueada en régimen RANGO.
 # Un breakout en mercado lateral tiene un WR muy bajo (~22% observado en prod).
 # En NEUTRAL sigue operando (régimen indefinido / sin datos de ADX).
@@ -179,13 +184,26 @@ def _apply_trailing_stop(op: dict, current_price: float) -> tuple[float, float]:
     dist_pips = min(op.get("trailing_distance_pips") or 10.0, 0.7 * activation_pips)
     trailing_dist = dist_pips * 0.0001
 
-    # Actualizar extremo favorable
+    # Actualizar extremo favorable (redondeo a 0.1 milipip: evita que el
+    # ruido de coma flotante deje el profit justo bajo un umbral exacto)
     if accion == "BUY":
         nuevo_extremo = max(extremo_actual, current_price)
-        profit_pips   = (nuevo_extremo - precio_entrada) * 10_000
+        profit_pips   = round((nuevo_extremo - precio_entrada) * 10_000, 4)
     else:
         nuevo_extremo = min(extremo_actual, current_price)
-        profit_pips   = (precio_entrada - nuevo_extremo) * 10_000
+        profit_pips   = round((precio_entrada - nuevo_extremo) * 10_000, 4)
+
+    # ── Break-even stop (Sesión 22 — gen be_activation_r) ──────────────────
+    # Al ganar be_activation_r × R, el SL sube a entrada ± fricción: la
+    # operación ya no puede terminar en pérdida, sin recortar su potencial.
+    # Se aplica ANTES del trailing (que exige 1R completo) y nunca empeora.
+    be_r = float(op.get("be_activation_r") or 0)
+    if be_r > 0 and r_pips > 0 and profit_pips >= be_r * r_pips:
+        friction = _FRICTION_PIPS * 0.0001
+        if accion == "BUY":
+            sl_actual = max(sl_actual, round(precio_entrada + friction, 5))
+        else:
+            sl_actual = min(sl_actual, round(precio_entrada - friction, 5))
 
     if profit_pips < activation_pips:
         return sl_actual, nuevo_extremo
@@ -466,8 +484,10 @@ def sync_once() -> dict:
                 COALESCE(o.precio_extremo_favorable,
                     o.precio_entrada)::float                            AS precio_extremo_favorable,
                 (o.decision_riesgo->>'trailing_activation_pips')::float AS trailing_activation_pips,
-                (o.decision_riesgo->>'trailing_distance_pips')::float   AS trailing_distance_pips
+                (o.decision_riesgo->>'trailing_distance_pips')::float   AS trailing_distance_pips,
+                COALESCE((a.params_smc->>'be_activation_r')::float, 0)  AS be_activation_r
             FROM operaciones o
+            JOIN agentes a ON a.id = o.agente_id
             WHERE o.estado = 'abierta'
               AND o.accion IN ('BUY', 'SELL')
               AND o.precio_entrada IS NOT NULL
@@ -518,8 +538,110 @@ def sync_once() -> dict:
         "sltp_errors":  sltp_errors,
         "new_evaluated": new_result.get("evaluated", 0),
         "new_opened":    new_result.get("opened", 0),
+        "reversal_closed": new_result.get("reversal_closed", 0),
         "errors":        sltp_errors + new_result.get("errors", 0),
     }
+
+
+# ── Salida por señal contraria (Sesión 22 — gen exit_on_reversal) ────────────
+
+def _check_reversal_exits(df_ohlcv, htf_trend) -> int:
+    """
+    Para agentes CON posición abierta y gen exit_on_reversal=1, evalúa la
+    señal técnica determinista (sin LLM) con los genes del propio agente y
+    cierra la posición si se cumplen LAS TRES condiciones:
+
+      1. La señal es OPUESTA a la posición (BUY abierto + señal SELL, o viceversa).
+      2. Confianza de la señal >= umbral_confianza_minima del agente — la misma
+         vara que el agente exige para ABRIR una posición en contra.
+      3. La posición gana al menos min_profit_for_exit_r × R. Nunca se cierra
+         en pérdida por señal: para eso está el Stop Loss.
+
+    La evolución decide si este rasgo aporta: los genes se heredan, mutan y
+    compiten como cualquier otro. Devuelve el número de posiciones cerradas.
+    """
+    from agents.sub_agent_technical import SubAgentTechnical
+    from data.indicators import calc_signals
+    from db.connection import get_conn, get_dict_cursor
+
+    with get_conn() as conn:
+        cur = get_dict_cursor(conn)
+        cur.execute(
+            """
+            SELECT o.id, o.agente_id, o.accion,
+                   o.precio_entrada::float AS precio_entrada,
+                   o.pips_sl::float        AS pips_sl,
+                   COALESCE(o.sl_dinamico,
+                       (o.decision_riesgo->>'stop_loss')::float)::float AS stop_loss,
+                   a.params_tecnicos, a.params_smc, a.params_riesgo,
+                   COALESCE(a.especie, 'tendencia') AS especie
+            FROM operaciones o
+            JOIN agentes a ON a.id = o.agente_id
+            WHERE o.estado = 'abierta'
+              AND o.accion IN ('BUY', 'SELL')
+              AND o.precio_entrada IS NOT NULL
+              AND COALESCE((a.params_smc->>'exit_on_reversal')::int, 0) = 1
+            """
+        )
+        ops = [dict(r) for r in cur.fetchall()]
+
+    if not ops:
+        return 0
+
+    precio_actual = float(df_ohlcv["close"].iloc[-1])
+    closed = 0
+
+    for op in ops:
+        try:
+            accion  = op["accion"]
+            entrada = float(op["precio_entrada"])
+            smc     = op.get("params_smc") or {}
+            riesgo  = op.get("params_riesgo") or {}
+
+            # Condición 3 primero (barata): ganancia mínima en R
+            r_pips = float(op.get("pips_sl") or 0) or (
+                abs(entrada - float(op["stop_loss"])) * 10_000
+            )
+            profit_pips = (
+                (precio_actual - entrada) * 10_000 if accion == "BUY"
+                else (entrada - precio_actual) * 10_000
+            )
+            min_profit_r = float(smc.get("min_profit_for_exit_r", 0.4) or 0.4)
+            if r_pips <= 0 or profit_pips < min_profit_r * r_pips:
+                continue
+
+            # Señal técnica determinista con los genes del agente (sin LLM)
+            tech_signals = calc_signals(
+                df_ohlcv, op["params_tecnicos"], smc or None, htf_trend=htf_trend,
+            )
+            sub_tec = SubAgentTechnical(op["agente_id"], op["params_tecnicos"], smc)
+            sub_tec.reason = lambda _p: '{"recomendacion":"HOLD","confianza":0.0,"razon":""}'
+            senal = sub_tec.analyze(tech_signals, especie=op["especie"])
+
+            opuesta = (
+                (accion == "BUY" and senal["recomendacion"] == "SELL")
+                or (accion == "SELL" and senal["recomendacion"] == "BUY")
+            )
+            umbral = float(riesgo.get("umbral_confianza_minima", 0.60) or 0.60)
+            if not opuesta or float(senal.get("confianza", 0)) < umbral:
+                continue
+
+            _close_op(op, precio_actual, ts_salida=None, resultado="REVERSAL")
+            closed += 1
+            log.info(
+                "[TradeMonitor] Op %d %s (%s) cerrada por SEÑAL CONTRARIA "
+                "%s conf=%.2f — profit=%.1f pips (>= %.1f = %.2fR).",
+                op["id"], accion, op["agente_id"],
+                senal["recomendacion"], float(senal.get("confianza", 0)),
+                profit_pips, min_profit_r * r_pips, min_profit_r,
+            )
+        except Exception as exc:
+            log.error(
+                "[TradeMonitor] Error en salida por señal para op %d: %s",
+                op["id"], exc,
+            )
+
+    return closed
 
 
 # ── 3. Nuevas posiciones (trading intraday) ───────────────────────────────────
@@ -603,6 +725,18 @@ def _evaluate_new_positions() -> dict:
     except Exception as exc:
         log.error("[TradeMonitor] Error descargando datos de mercado: %s", exc)
         return {"evaluated": 0, "opened": 0, "errors": 1}
+
+    # ── Salidas por señal contraria (Sesión 22) — reusa los datos ya bajados ──
+    try:
+        reversal_closed = _check_reversal_exits(df_ohlcv, htf_trend)
+        if reversal_closed:
+            log.info(
+                "[TradeMonitor] Salidas por señal contraria: %d posiciones cerradas.",
+                reversal_closed,
+            )
+    except Exception as exc:
+        log.error("[TradeMonitor] Error en chequeo de salidas por señal: %s", exc)
+        reversal_closed = 0
 
     evaluated = opened = errors = 0
 
@@ -691,7 +825,10 @@ def _evaluate_new_positions() -> dict:
         "[TradeMonitor] Nuevas posiciones — evaluados=%d abiertos=%d errores=%d",
         evaluated, opened, errors,
     )
-    return {"evaluated": evaluated, "opened": opened, "errors": errors}
+    return {
+        "evaluated": evaluated, "opened": opened, "errors": errors,
+        "reversal_closed": reversal_closed,
+    }
 
 
 # ── 4. Cierre forzado EOD ─────────────────────────────────────────────────────

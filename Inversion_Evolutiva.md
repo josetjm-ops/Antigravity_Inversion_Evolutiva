@@ -188,7 +188,7 @@ Cada agente lleva cuatro diccionarios JSON que constituyen su "ADN". Estos pará
 | `risk_pct_per_trade` | 1%–2% | Porcentaje del equity en riesgo por operación |
 | `peso_fvg` | 0.05–0.50 | Peso del FVG en la señal ponderada |
 | `peso_ob` | 0.05–0.50 | Peso del Order Block en la señal ponderada |
-| `atr_factor` | 0.8–3.0 | Multiplicador del ATR para calcular el SL dinámico |
+| `atr_factor` | 0.8–1.8 | Multiplicador del ATR para calcular el SL dinámico. Tope 3.0 → 1.8 en Sesión 22: con ATR alto, 3.0 producía SL de 60+ pips cuyo TP era inalcanzable intradía (fitness sin señal). |
 | `trailing_activation_pips` | 5–40 | Pips de ganancia para activar el trailing stop |
 | `trailing_distance_pips` | 5–25 | Distancia del trailing stop al precio extremo favorable |
 | `atr_period` | 7–21 (entero) | Período del ATR (Average True Range) de Wilder |
@@ -198,6 +198,9 @@ Cada agente lleva cuatro diccionarios JSON que constituyen su "ADN". Estos pará
 | `peso_breakout` | 0.20–0.70 | Peso del score de ruptura en el ensamble S3. (desde Sesión 16 — Fase 2) |
 | `adx_period` | 14 (fijo) | Período del ADX para el clasificador de régimen. No se muta gaussianamente. |
 | `adx_threshold` | 25.0 (fijo) | Umbral ADX para clasificar el régimen: ≥ 25 = TENDENCIA, < 25 = RANGO. No se muta. |
+| `be_activation_r` | 0.3–1.0 | Break-even stop: al ganar este múltiplo de R, el SL sube a entrada ± fricción. Gen mutable gaussianamente. (Sesión 22) |
+| `exit_on_reversal` | 0 / 1 | Salida por señal contraria fuerte: 1 = cierra la posición si la señal técnica determinista es opuesta con confianza ≥ umbral propio y la ganancia ≥ `min_profit_for_exit_r` × R. Muta por **bit-flip** (prob. 10% por crianza) — la evolución decide si el rasgo aporta. Sembrado 50/50 en la población por la migración 011. (Sesión 22) |
+| `min_profit_for_exit_r` | 0.2–1.0 | Piso de ganancia (en R) para permitir la salida por señal contraria. Nunca se cierra en pérdida por señal. Gen mutable gaussianamente. (Sesión 22) |
 
 #### `especie` — Arquetipo estratégico (columna en `agentes`, no en `params_smc`)
 
@@ -316,7 +319,7 @@ La señal ponderada emite BUY/SELL si `score_dominante > 0.40` y la ventaja sobr
 **Jerarquía de Stop Loss (en orden de prioridad):**
 1. **Order Block estructural** — nivel del OB no mitigado (fuente más fuerte).
 2. **Fair Value Gap** — nivel del FVG no rellenado.
-3. **ATR dinámico** — `precio ± (ATR × atr_factor)`. Piso: `MIN_SL_PIPS` (default **10 pips**), máx. 50 pips. El piso protege el SL del ruido normal de las velas de 1m que usa el monitor intra-vela. (Fase 0, desde Sesión 16)
+3. **ATR dinámico** — `precio ± (ATR × atr_factor)`. Piso: `MIN_SL_PIPS` (default **10 pips**), techo: `MAX_SL_PIPS` (default **35 pips**, Sesión 22). El piso protege el SL del ruido normal de las velas de 1m que usa el monitor intra-vela; el techo garantiza que el TP resultante (R:R ≥ 1.5) sea alcanzable antes del cierre EOD. El techo aplica a TODAS las fuentes de SL — el SL estructural (OB/FVG) que supere `MAX_SL_PIPS` se descarta y cae a la rama ATR. (Fase 0 desde Sesión 16; techo desde Sesión 22)
 4. **Porcentaje fijo** — `stop_loss_pct` del precio de entrada (fallback si ATR = 0).
 
 > **Fricción de mercado (Fase 0, desde Sesión 16):** al cerrar cada operación BUY/SELL, `close_operation()` descuenta `TRADE_FRICTION_PIPS` (default 1.4 pips round-trip ≈ 0.8 spread + 0.6 slippage) del P&L, independientemente del resultado. Sin esto el simulador es optimista y la evolución converge hacia estrategias que solo "funcionan" sin costos. Con fricción modelada, el fitness refleja el edge real neto.
@@ -440,6 +443,18 @@ Para cada agente:
   │            cerrado, error API), cae al check legacy con snapshot único
   │            para no bloquear el ciclo. Log warning en ese caso.
   │
+  ├── SÍ + gen exit_on_reversal=1 → Salida por señal contraria (Sesión 22):
+  │         Con los datos de mercado ya descargados se recalcula la señal
+  │         técnica DETERMINISTA del agente (sin LLM, reason() neutralizado
+  │         como en el backtester). La posición se cierra solo si se cumplen
+  │         LAS TRES condiciones:
+  │           1. Señal OPUESTA a la posición (BUY abierto + señal SELL o viceversa).
+  │           2. Confianza >= umbral_confianza_minima del propio agente
+  │              (la misma vara que exige para ABRIR en contra).
+  │           3. Ganancia >= min_profit_for_exit_r × R. Nunca se cierra en
+  │              pérdida por señal — para eso está el SL.
+  │         Ambos parámetros son GENES: la evolución decide si el rasgo aporta.
+  │
   └── NO → Evaluar si abrir nueva posición:
             1. ¿Estamos en horario de trading? (1:30 am – 11:00 pm Bogotá)
             2. ¿Cuarentena macro? (eventos críticos próximos)
@@ -462,6 +477,22 @@ Con OHLC 1-minuto, cada ciclo de 15 min cubre las 15 velas anteriores con precis
 Si una sola vela toca SL y TP simultáneamente (gap o vela muy amplia), `check_sl_tp_intrabar` devuelve **HIT_SL**. Es la convención estándar de backtesters serios (Backtrader, vectorbt) — ante ambigüedad sobre el orden intra-vela, asumir el peor caso para el trader, evitando inflar el fitness con casos que en producción real podrían haber cerrado en SL.
 
 Por la misma razón, dentro de cada vela se chequea SL/TP **antes** de aplicar el trailing. Aplicar trailing primero (con el extremo favorable) y después chequear SL con el extremo adverso de la misma vela equivaldría a "ver el futuro" para apretar el SL — un sesgo a favor del trader.
+
+### Break-even stop (Sesión 22 — gen `be_activation_r`)
+
+Entre el "no proteger nada" y el trailing (que exige +1R completo) existía un
+hueco: una posición con +24 pips de ganancia flotante sobre un SL de 35 pips
+podía devolverlo todo (caso op #9284, 2026-06-12). El break-even stop lo cubre:
+
+1. Al acumular `be_activation_r × R` de ganancia flotante (gen mutable,
+   rango 0.3–1.0, default 0.6), el SL se mueve a **entrada ± fricción**
+   (`TRADE_FRICTION_PIPS`): la operación ya no puede terminar en pérdida.
+2. No recorta el potencial: el TP y el trailing siguen intactos por encima.
+3. Se aplica vela a vela dentro del verificador intra-bar, DESPUÉS del chequeo
+   de SL/TP de la vela (misma convención anti-lookahead del trailing) y
+   **nunca empeora** un SL ya mejorado por el trailing.
+4. Replicado en `evolution/backtester.py`: el fitness OOS castiga o premia el
+   gen con el mismo comportamiento que tendrá en producción.
 
 ### Trailing stop dinámico
 
@@ -1219,6 +1250,7 @@ Todas las variables se definen en `.env` local (desarrollo) o en **GitHub Secret
 | `SIGMA_BOOST_FACTOR` | Multiplicador aplicado a las sigmas cuando la diversidad cae bajo el umbral (default: `2.0`) |
 | `TRADE_FRICTION_PIPS` | Fricción round-trip (spread + slippage) en pips descontada del P&L de cada operación al cerrar. Default: `1.4` (≈ 0.8 spread retail EUR/USD + 0.6 slippage). **Fase 0, desde Sesión 16.** |
 | `MIN_SL_PIPS` | Piso mínimo del Stop Loss en pips. Por debajo de esto el SL muere por el ruido de las velas de 1m. Default: `10.0`. El sizing escala inverso a sl_pips (mismo riesgo porcentual). **Fase 0, desde Sesión 16.** |
+| `MAX_SL_PIPS` | Techo del Stop Loss en pips, para TODAS las fuentes de SL (estructura OB/FVG y ATR). Un SL mayor produce un TP inalcanzable intradía: el trade solo puede terminar en EOD o SL completo y el fitness pierde la señal (op #9284: SL estructural de 61 pips). Default: `35.0`. **Sesión 22.** |
 | `MIN_SAMPLE_TRADES` | Operaciones cerradas mínimas antes de que un agente sea elegible para eliminación, reproducción o Hall of Fame. Default: `15`. **Fase 1, desde Sesión 16.** |
 | `MIN_AGENTS_PER_ESPECIE` | Agentes mínimos por especie (tendencia/reversion/ruptura). La evolución no elimina si bajaría una especie de este umbral. Default: `2`. **Fase 2, desde Sesión 16.** |
 | `BACKTEST_TRAIN_DAYS` | Días de warmup del backtester (ignorados en la evaluación). Default: `40`. **Fase 3, desde Sesión 16.** |
@@ -1384,9 +1416,19 @@ Antigravity_Inversion_Evolutiva/
 
 ---
 
-*Documento actualizado el 2026-06-12 (Sesión 21 — cruce 60/40 garantizado: el clon forzado padre==madre fue eliminado; la recuperación de cupos despliega el mejor candidato de cruce y, como último recurso, cruza los dos mejores genomas distintos).*
+*Documento actualizado el 2026-06-12 (Sesión 22 — salidas inteligentes como genes evolutivos: break-even stop `be_activation_r`, salida por señal contraria `exit_on_reversal`/`min_profit_for_exit_r`, techo `MAX_SL_PIPS` y recorte de `atr_factor` a 1.8; replicado en backtester, migración 011 en producción).*
 
 ## Historial de cambios mayores
+
+- **2026-06-12 (Sesión 22 — salidas inteligentes como genes evolutivos + coherencia intradía de SL/TP) · en producción:**
+  - **Contexto:** la op #9284 (BUY del 2026-06-12, agente `2026-06-02_05`) expuso dos problemas: (1) su SL **estructural** (OB) de 61 pips generó un TP de 122 pips inalcanzable intradía — la rama ATR tenía techo de 50 pips pero la estructural solo validaba distancia mínima; con TP inalcanzable y trailing a +1R (61 pips) inactivable, el trade solo podía terminar en EOD o SL completo → fitness sin señal; (2) la posición llegó a +24 pips y los devolvió sin que ningún mecanismo protegiera la ganancia parcial. El usuario propuso evaluar las señales cada 15 min también para SALIR; se acordó implementarlo como **genes** para que la evolución decida (no como regla impuesta).
+  - **Coherencia intradía de SL (`agents/sub_agent_risk.py`):** nuevo techo `MAX_SL_PIPS` (env, default 35) aplicado a TODAS las fuentes de SL: el estructural (OB/FVG) que lo supere se descarta y cae a la rama ATR (antes solo se validaba `too_close`); la rama ATR baja su tope hardcodeado de 50 → `MAX_SL_PIPS`. Bound del gen `atr_factor` 3.0 → **1.8** en `_BOUNDS_SMC`.
+  - **Gen `be_activation_r` (0.3–1.0, default 0.6, gaussiano) — break-even stop:** al ganar `be_activation_r × R`, el SL se mueve a entrada ± fricción (`TRADE_FRICTION_PIPS`): la operación ya no puede terminar en pérdida sin recortar su potencial. Implementado en `_apply_trailing_stop` (vela a vela, tras el chequeo SL/TP de la vela, nunca empeora un SL ya mejorado). El SELECT de posiciones abiertas ahora hace JOIN con `agentes` para leer el gen.
+  - **Gen `exit_on_reversal` (0/1, bit-flip 10%) + `min_profit_for_exit_r` (0.2–1.0, default 0.4, gaussiano) — salida por señal contraria:** nueva `_check_reversal_exits()` en `trade_monitor` (reusa el OHLCV/HTF ya descargado, sin costo LLM — `reason()` neutralizado como en el backtester). Cierra una posición solo si: señal técnica OPUESTA + confianza ≥ `umbral_confianza_minima` del propio agente + ganancia ≥ `min_profit_for_exit_r × R`. Nunca cierra en pérdida por señal. Nuevo mecanismo de mutación **bit-flip** para genes booleanos (`_BOOLEAN_GENE_FLIP_PROB`) — mantiene el rasgo re-descubrible si se extingue.
+  - **Backtester (`evolution/backtester.py`):** BE-stop y salida por reversa replicados con la misma lógica y convenciones (hits primero, BE después; señal en cadencia `_CHECK_EVERY`; trades marcados `hit="REV"`). El fitness OOS premia o castiga los genes nuevos con el comportamiento real de producción.
+  - **Migración `011_salidas_inteligentes.sql` (aplicada en prod Supabase y sandbox Neon):** backfill idempotente de los 3 genes; semilla de diversidad 50/50 de `exit_on_reversal` en los activos (8 con el rasgo / 7 sin él) — sin ella el rasgo no existiría en la población; clamp de `atr_factor` > 1.8 (verificado: 0 agentes sobre el tope).
+  - **Tests (`tests/test_sesion22_salidas.py`):** 12 nuevos — BE BUY/SELL, umbral no alcanzado, gen en 0, BE nunca empeora, SL estructural a 61 pips descartado (caso #9284), cap ATR, defaults/bounds, bit-flip produce ambos valores, y las 3 condiciones de la salida por reversa (cierra con señal fuerte; no cierra bajo el piso de ganancia; no cierra con señal débil o misma dirección).
+  - **Filosofía:** nada se impone — los tres parámetros se heredan, mutan y compiten. Si los linajes con break-even temprano o salida por reversa superan a los que dejan correr, sus hijos dominarán la población; si no, se extinguen. La selección natural responde la pregunta.
 
 - **2026-06-12 (Sesión 21 — cruce 60/40 garantizado: eliminación del clon forzado padre==madre) · en producción:**
   - **Contexto:** el ciclo del 2026-06-12 eliminó correctamente 4 agentes con fitness ≤ 0, pero los 4 hijos nacieron por el "clon forzado" de Sesión 19 con **padre == madre**: los 3 de reversion eran mutaciones del MISMO genoma Gen-1 de especie tendencia (`2026-05-19_10`), y el de ruptura era clon de `2026-06-02_06` — **el agente eliminado esa misma noche** (su entrada HoF era de cuando tuvo ROI positivo). Incoherencia adicional: el umbral OOS rechazó hijos de cruce real con fitness +0.067 (por tener 4 trades en vez de 5) y luego desplegó clones con fitness −0.144 y −0.116. El usuario detectó la violación del principio central del sistema: los hijos deben recombinar el ADN de los dos mejores padres (cruce 60/40).

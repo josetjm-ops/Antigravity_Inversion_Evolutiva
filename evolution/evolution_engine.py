@@ -124,6 +124,10 @@ _DEFAULT_SMC_PARAMS: dict = {
     # Régimen (Fase 2) — no se mutan gaussianamente; son umbrales estratégicos
     "adx_period":               14,
     "adx_threshold":            25.0,
+    # Salidas inteligentes (Sesión 22) — genes evolutivos
+    "be_activation_r":          0.6,    # mover SL a break-even al ganar este múltiplo de R
+    "exit_on_reversal":         0,      # 1=salir ante señal contraria fuerte; 0/1, muta por bit-flip
+    "min_profit_for_exit_r":    0.4,    # ganancia mínima (en R) para permitir salida por señal
 }
 
 _BOUNDS_SMC = {
@@ -136,7 +140,11 @@ _BOUNDS_SMC = {
     "peso_fvg":                 (0.05,  0.50, False),
     "peso_ob":                  (0.05,  0.50, False),
     # ATR-based SL + Trailing Stop (Session 6)
-    "atr_factor":               (0.8,   3.0,  False),
+    # Sesión 22: tope de atr_factor 3.0 → 1.8. Con ATR alto, 3.0 producía SL
+    # de 60+ pips cuyo TP (2R = 120+ pips) era inalcanzable intradía: el
+    # fitness de esos genomas era ruido (solo EOD o SL completo) y la
+    # selección natural operaba sobre datos sin señal.
+    "atr_factor":               (0.8,   1.8,  False),
     "trailing_activation_pips": (5.0,  40.0,  False),
     "trailing_distance_pips":   (5.0,  25.0,  False),
     "atr_period":               (7,    21,    True),
@@ -144,7 +152,16 @@ _BOUNDS_SMC = {
     "breakout_lookback_bars":   (10,   50,    True),
     "breakout_min_pips":        (3.0,  15.0,  False),
     "peso_breakout":            (0.20,  0.70, False),
+    # Salidas inteligentes (Sesión 22) — mutables
+    "be_activation_r":          (0.3,   1.0,  False),
+    "min_profit_for_exit_r":    (0.2,   1.0,  False),
+    # exit_on_reversal NO va aquí: es 0/1 y muta por bit-flip en breed_agent.
 }
+
+# Probabilidad de invertir genes booleanos 0/1 en cada crianza (Sesión 22).
+# Mantiene el rasgo re-descubrible si se extingue de la población; la
+# selección natural decide si la salida por señal contraria aporta edge.
+_BOOLEAN_GENE_FLIP_PROB = {"exit_on_reversal": 0.10}
 
 # Mínimo de agentes por especie para garantizar diversidad real.
 # El motor evolutivo no elimina un agente si hacerlo bajaría su especie de este umbral.
@@ -498,6 +515,12 @@ def breed_agent(
     mac_child  = _mutate_block(mac_child,  _BOUNDS_MACRO,            sw)
     risk_child = _mutate_block(risk_child, _BOUNDS_RIESGO,           sr)
     smc_child  = _mutate_block(smc_child,  _BOUNDS_SMC,              sr)
+
+    # Mutación bit-flip de genes booleanos 0/1 (Sesión 22): con probabilidad
+    # baja el rasgo se invierte, manteniéndolo explorable por la evolución.
+    for _bool_gene, _flip_p in _BOOLEAN_GENE_FLIP_PROB.items():
+        if random.random() < _flip_p:
+            smc_child[_bool_gene] = 1 - int(smc_child.get(_bool_gene, 0) or 0)
 
     # Normalizar pesos y aplicar constraints
     tec_child  = _normalize_weights(tec_child, ["peso_rsi", "peso_ema", "peso_macd"])
