@@ -24,12 +24,9 @@ import logging
 from datetime import datetime, timezone
 from typing import Literal
 
-import requests
+from data import yahoo_client
 
 log = logging.getLogger(__name__)
-
-_YAHOO_URL = "https://query1.finance.yahoo.com/v8/finance/chart/EURUSD=X"
-_HEADERS   = {"User-Agent": "Mozilla/5.0 (compatible; InversionEvolutiva/1.0)"}
 
 PositionResult = Literal["HIT_TP", "HIT_SL", "OPEN"]
 
@@ -41,14 +38,7 @@ def get_current_price() -> float:
     Obtiene el precio actual de EUR/USD desde Yahoo Finance.
     Gratuito, sin API key, sin límite de llamadas.
     """
-    resp = requests.get(
-        _YAHOO_URL,
-        headers=_HEADERS,
-        params={"interval": "1m", "range": "1d"},
-        timeout=10,
-    )
-    resp.raise_for_status()
-    data = resp.json()
+    data = yahoo_client.fetch_chart({"interval": "1m", "range": "1d"}, timeout=10)
     chart_result = data.get("chart", {}).get("result") or []
     if not chart_result:
         raise RuntimeError(
@@ -111,14 +101,7 @@ def get_price_history(interval: str = "1h", range_str: str = "5d") -> list[dict]
     range_str : "1d" | "5d"  | "1mo"
     Retorna lista de dicts con claves: timestamp (UTC), open, high, low, close.
     """
-    resp = requests.get(
-        _YAHOO_URL,
-        headers=_HEADERS,
-        params={"interval": interval, "range": range_str},
-        timeout=15,
-    )
-    resp.raise_for_status()
-    data2 = resp.json()
+    data2 = yahoo_client.fetch_chart({"interval": interval, "range": range_str}, timeout=15)
     chart_result2 = data2.get("chart", {}).get("result") or []
     if not chart_result2:
         raise RuntimeError(

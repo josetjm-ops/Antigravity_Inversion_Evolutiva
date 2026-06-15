@@ -17,14 +17,11 @@ import logging
 from datetime import datetime, timezone
 
 import pandas as pd
-import requests
 
+from data import yahoo_client
 from data.alpha_vantage_client import TechnicalSignals
 
 log = logging.getLogger(__name__)
-
-_YAHOO_URL = "https://query1.finance.yahoo.com/v8/finance/chart/EURUSD=X"
-_HEADERS   = {"User-Agent": "Mozilla/5.0 (compatible; InversionEvolutiva/1.0)"}
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -42,13 +39,8 @@ def fetch_ohlcv(interval: str = "15m", range_str: str = "5d") -> pd.DataFrame:
     bolsa centralizada). Se incluye en el DataFrame para mantener estructura
     consistente; el Range Proxy sustituye al volumen como señal de actividad.
     """
-    resp = requests.get(
-        _YAHOO_URL, headers=_HEADERS,
-        params={"interval": interval, "range": range_str},
-        timeout=15,
-    )
-    resp.raise_for_status()
-    chart_result = resp.json().get("chart", {}).get("result") or []
+    data = yahoo_client.fetch_chart({"interval": interval, "range": range_str}, timeout=15)
+    chart_result = data.get("chart", {}).get("result") or []
     if not chart_result:
         raise RuntimeError(
             "Yahoo Finance: resultado vacío para EURUSD=X "

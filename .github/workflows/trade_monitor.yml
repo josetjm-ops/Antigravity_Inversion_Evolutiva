@@ -114,6 +114,6 @@ jobs:
               await github.rest.issues.create({
                 owner: context.repo.owner, repo: context.repo.repo,
                 title: title,
-                body: `## 🚨 Trade Monitor Fallido\n\n**Fecha:** ${date} a las ${time} UTC  \n**Logs:** [Ver workflow](${runUrl})\n\n⚠️ **Las posiciones abiertas NO están siendo vigiladas.** SL/TP pueden no ejecutarse.\n\n### Posibles causas:\n- [ ] DB caída (Supabase pooler cold-start / timeout de conexión)\n- [ ] Yahoo Finance sin precio actual\n- [ ] Error en cron/trade_monitor.py`,
+                body: `## 🚨 Trade Monitor Fallido — condición CRÍTICA\n\n**Fecha:** ${date} a las ${time} UTC  \n**Logs:** [Ver workflow](${runUrl})\n\n⚠️ El monitor falló tras **agotar los reintentos** ante un error que SÍ requiere atención — no un parpadeo transitorio de red (esos ahora se absorben solos y ya no generan alerta).\n\nPuede significar que **una posición abierta no pudo ser verificada o cerrada** (SL/TP). Revisar pronto.\n\n### Posibles causas:\n- [ ] DB caída sostenida (el pooler de Supabase agotó los 4 reintentos)\n- [ ] Fallo persistente al cerrar/persistir una operación abierta en DB\n- [ ] Error en cron/trade_monitor.py\n\n_Los timeouts aislados de Yahoo Finance al escanear nuevas entradas ya NO disparan esta alerta: se reintentan y se reevalúan en el siguiente ciclo de 15 min._`,
               });
             }

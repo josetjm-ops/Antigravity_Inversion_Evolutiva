@@ -539,6 +539,14 @@ def sync_once() -> dict:
         "new_evaluated": new_result.get("evaluated", 0),
         "new_opened":    new_result.get("opened", 0),
         "reversal_closed": new_result.get("reversal_closed", 0),
+        # 'critical_errors' = fallos al vigilar posiciones ABIERTAS (SL/TP). Son
+        # los únicos que tumban el workflow y disparan alerta: significan que una
+        # posición real pudo no cerrarse. Los errores de _evaluate_new_positions
+        # (p.ej. un timeout transitorio de Yahoo bajando OHLCV para ESCANEAR
+        # nuevas entradas) NO son críticos: el siguiente ciclo de 15 min reintenta
+        # y ninguna posición abierta queda en riesgo. Se cuentan aparte solo para
+        # visibilidad en logs, no para alertar. (Incidente 2026-06-15 17:15 UTC.)
+        "critical_errors": sltp_errors,
         "errors":        sltp_errors + new_result.get("errors", 0),
     }
 
@@ -951,7 +959,22 @@ def main() -> None:
 
     if args.run_once:
         result = sync_once()
-        sys.exit(0 if result["errors"] == 0 else 1)
+        critical = result.get("critical_errors", 0)
+        non_critical = result.get("errors", 0) - critical
+        if critical:
+            log.error(
+                "[TradeMonitor] Ciclo con %d error(es) CRÍTICO(s) en vigilancia "
+                "SL/TP de posiciones abiertas — el workflow fallará para alertar.",
+                critical,
+            )
+        elif non_critical:
+            log.warning(
+                "[TradeMonitor] Ciclo OK con %d incidencia(s) NO crítica(s) "
+                "(p.ej. datos de mercado para nuevas entradas no disponibles este "
+                "ciclo). Se reintenta en 15 min — sin alerta ni falla de workflow.",
+                non_critical,
+            )
+        sys.exit(0 if critical == 0 else 1)
     elif args.force_close_all:
         result = force_close_all()
         sys.exit(0 if result["errors"] == 0 else 1)

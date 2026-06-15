@@ -39,17 +39,20 @@ def get_session() -> Generator[Session, None, None]:
         session.close()
 
 
-# El pooler de Supabase sufre timeouts transitorios esporádicos; un solo
-# intento tumbaba el run completo del workflow (issues de jun 2-10).
-_CONNECT_ATTEMPTS = 3
-_CONNECT_BACKOFF_S = (5, 15)
+# El pooler de Supabase sufre timeouts transitorios esporádicos (cold-starts);
+# un solo intento tumbaba el run completo del workflow (issues de jun 2-10).
+# El 2026-06-15 11:00 UTC un cold-start largo agotó los 3 intentos y volvió a
+# tumbar el run → 4º intento + backoff más amplio para absorber el arranque
+# en frío del pooler sin alertar por un blip.
+_CONNECT_ATTEMPTS = 4
+_CONNECT_BACKOFF_S = (5, 10, 20)
 
 
 def _connect_with_retry():
     last_exc: Exception | None = None
     for attempt in range(_CONNECT_ATTEMPTS):
         try:
-            return psycopg2.connect(_DATABASE_URL, connect_timeout=10)
+            return psycopg2.connect(_DATABASE_URL, connect_timeout=15)
         except psycopg2.OperationalError as exc:
             last_exc = exc
             if attempt < _CONNECT_ATTEMPTS - 1:
