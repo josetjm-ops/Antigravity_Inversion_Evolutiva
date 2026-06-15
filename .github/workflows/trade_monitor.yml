@@ -114,6 +114,6 @@ jobs:
               await github.rest.issues.create({
                 owner: context.repo.owner, repo: context.repo.repo,
                 title: title,
-                body: `## 🚨 Trade Monitor Fallido\n\n**Fecha:** ${date} a las ${time} UTC  \n**Logs:** [Ver workflow](${runUrl})\n\n⚠️ **Las posiciones abiertas NO están siendo vigiladas.** SL/TP pueden no ejecutarse.\n\n### Posibles causas:\n- [ ] DB caída (Neon cold-start prolongado)\n- [ ] Yahoo Finance sin precio actual\n- [ ] Error en cron/trade_monitor.py`,
+                body: `## 🚨 Trade Monitor Fallido\n\n**Fecha:** ${date} a las ${time} UTC  \n**Logs:** [Ver workflow](${runUrl})\n\n⚠️ **Las posiciones abiertas NO están siendo vigiladas.** SL/TP pueden no ejecutarse.\n\n### Posibles causas:\n- [ ] DB caída (Supabase pooler cold-start / timeout de conexión)\n- [ ] Yahoo Finance sin precio actual\n- [ ] Error en cron/trade_monitor.py`,
               });
             }

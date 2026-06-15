@@ -20,10 +20,15 @@ jobs:
       issues: write
 
     env:
-      DATABASE_URL:     ${{ secrets.DATABASE_URL }}
-      DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
-      FINNHUB_API_KEY:  ${{ secrets.FINNHUB_API_KEY }}
-      LOG_LEVEL:        "INFO"
+      DATABASE_URL:            ${{ secrets.DATABASE_URL }}
+      DEEPSEEK_API_KEY:        ${{ secrets.DEEPSEEK_API_KEY }}
+      FINNHUB_API_KEY:         ${{ secrets.FINNHUB_API_KEY }}
+      # Umbral de aviso preventivo de saldo bajo en DeepSeek (USD).
+      # El health check NO falla por saldo bajo; solo emite ⚠️ para avisar
+      # con antelación antes de que el saldo llegue a cero y bloquee las
+      # llamadas (incidente 2026-06-15: saldo agotado → HTTP 402).
+      DEEPSEEK_LOW_BALANCE_USD: "2.0"
+      LOG_LEVEL:               "INFO"
 
     steps:
       - name: "Checkout del repositorio"
@@ -55,12 +60,12 @@ jobs:
             echo "✅ FINNHUB_API_KEY configurada"
           fi
 
-      - name: "Verificar conexión a base de datos (Neon PostgreSQL)"
+      - name: "Verificar conexión a base de datos (Supabase PostgreSQL)"
         run: |
           python -c "
           from db.connection import health_check
           ok = health_check()
-          print('DB Neon PostgreSQL:', '✅ OK' if ok else '❌ FAIL')
+          print('DB Supabase PostgreSQL:', '✅ OK' if ok else '❌ FAIL')
           exit(0 if ok else 1)
           "
 
@@ -102,12 +107,57 @@ jobs:
               exit(1)
           "
 
+      - name: "Verificar saldo de DeepSeek (cuota LLM)"
+        # Preflight de facturación: consulta el saldo ANTES del ping de inferencia.
+        # Falla con mensaje accionable si el saldo está agotado (is_available=false)
+        # y emite un aviso preventivo ⚠️ cuando el saldo cae por debajo del umbral,
+        # para recargar antes de que llegue a cero y bloquee a los agentes.
+        run: |
+          python -c "
+          import os, sys, requests
+          key = os.environ.get('DEEPSEEK_API_KEY', '')
+          if not key:
+              print('❌ DEEPSEEK_API_KEY no configurada')
+              sys.exit(1)
+          low = float(os.environ.get('DEEPSEEK_LOW_BALANCE_USD', '2.0'))
+          try:
+              resp = requests.get(
+                  'https://api.deepseek.com/user/balance',
+                  headers={'Authorization': 'Bearer ' + key},
+                  timeout=10,
+              )
+          except Exception as e:
+              print(f'⚠️  No se pudo consultar el saldo ({e}) — el ping de inferencia lo confirmará.')
+              sys.exit(0)
+          if resp.status_code != 200:
+              print(f'⚠️  Endpoint de saldo respondió HTTP {resp.status_code} — el ping de inferencia lo confirmará.')
+              sys.exit(0)
+          data = resp.json()
+          disponible = data.get('is_available', True)
+          infos = data.get('balance_infos', []) or []
+          info = next((b for b in infos if b.get('currency') == 'USD'), infos[0] if infos else {})
+          total = info.get('total_balance', '?')
+          cur = info.get('currency', '?')
+          if not disponible:
+              print(f'❌ SALDO AGOTADO en DeepSeek (is_available=false · saldo={total} {cur}).')
+              print('   → Recarga en https://platform.deepseek.com/ (Top up / Recargar).')
+              print('   Mientras tanto los agentes operan SOLO con heurística (sin validación del LLM).')
+              sys.exit(1)
+          try:
+              if float(total) < low:
+                  print(f'⚠️  SALDO BAJO en DeepSeek: {total} {cur} (umbral {low}). Recarga pronto: https://platform.deepseek.com/')
+              else:
+                  print(f'✅ Saldo DeepSeek OK: {total} {cur}')
+          except (TypeError, ValueError):
+              print(f'✅ Saldo DeepSeek: {total} {cur}')
+          "
+
       - name: "Verificar DeepSeek API (LLM de los agentes)"
         run: |
           python -c "
           import os, sys
           from openai import OpenAI
-          key = os.environ.get('DEEPSEEK_API_KEY','')
+          key = os.environ.get('DEEPSEEK_API_KEY', '')
           if not key:
               print('❌ DEEPSEEK_API_KEY no configurada')
               sys.exit(1)
@@ -119,9 +169,18 @@ jobs:
                   max_tokens=5,
                   timeout=20.0,
               )
-              print('✅ DeepSeek API OK')
+              print('✅ DeepSeek API OK (ping de inferencia exitoso)')
           except Exception as e:
-              print(f'❌ DeepSeek API error: {e}')
+              status = getattr(e, 'status_code', None)
+              msg = str(e)
+              if status == 402 or 'Insufficient Balance' in msg or '402' in msg:
+                  print('❌ DeepSeek rechazó la llamada por SALDO INSUFICIENTE (HTTP 402).')
+                  print('   → Recarga en https://platform.deepseek.com/ (Top up / Recargar).')
+                  print('   Los agentes seguirán operando con heurística determinista hasta que recargues.')
+              elif status in (401, 403):
+                  print(f'❌ DeepSeek rechazó la API KEY (HTTP {status}). Revisa el secret DEEPSEEK_API_KEY.')
+              else:
+                  print(f'❌ DeepSeek API inaccesible o lenta (no es problema de saldo): {e}')
               sys.exit(1)
           "
 
@@ -185,7 +244,7 @@ jobs:
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 title: title,
-                body: `## 🚨 Health Check Diario Fallido\n\n**Fecha:** ${date} a las ${time} UTC  \n**Logs:** [Ver workflow](${runUrl})\n\n### Qué revisar:\n- [ ] \`DATABASE_URL\` configurado en Secrets\n- [ ] \`DEEPSEEK_API_KEY\` configurado en Secrets\n- [ ] Neon PostgreSQL accesible (https://neon.tech/)\n- [ ] Yahoo Finance responde\n- [ ] DeepSeek API responde (https://platform.deepseek.com/)\n\n**El ciclo de trading de hoy puede estar afectado.**\n\n> Configura secrets en: **Settings → Secrets and variables → Actions**`,
+                body: `## 🚨 Health Check Diario Fallido\n\n**Fecha:** ${date} a las ${time} UTC  \n**Logs:** [Ver workflow](${runUrl})\n\n### Qué revisar:\n- [ ] \`DATABASE_URL\` configurado en Secrets\n- [ ] \`DEEPSEEK_API_KEY\` configurado en Secrets\n- [ ] Supabase PostgreSQL accesible (https://supabase.com/dashboard)\n- [ ] Yahoo Finance responde\n- [ ] DeepSeek CON SALDO y respondiendo (https://platform.deepseek.com/) — causa más común (HTTP 402 Insufficient Balance)\n\n**El ciclo de trading de hoy puede estar afectado.**\n\n> Configura secrets en: **Settings → Secrets and variables → Actions**`,
               });
               console.log(`Issue creado: #${issue.data.number}`);
             }
