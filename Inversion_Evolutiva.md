@@ -391,10 +391,10 @@ El LLM **DeepSeek** (`deepseek-chat`) se consulta en tres momentos distintos del
 
 ```python
 # base_agent.py
-_MODEL  = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")   # default: deepseek-chat
-                                                          # en producción: deepseek-reasoner
+_MODEL  = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")   # default y producción: deepseek-chat
+                                                          # (no hay override DEEPSEEK_MODEL configurado)
 _client = OpenAI(
-    api_key=os.environ["DEEPSEEK_API_KEY"],
+    api_key=os.environ.get("DEEPSEEK_API_KEY", ""),
     base_url=os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
 )
 model       = _MODEL
@@ -403,7 +403,7 @@ max_tokens  = 512
 timeout     = 30 seg
 ```
 
-> **Modelo activo en producción:** `deepseek-reasoner` (configurado en `.env` y en GitHub Secrets como `DEEPSEEK_MODEL`). El API de DeepSeek puede servir este modelo bajo el alias `deepseek-v4-flash` en algunas respuestas — es el mismo endpoint.
+> **Modelo activo en producción:** `deepseek-chat` (default del código). No existe un secret ni variable `DEEPSEEK_MODEL` configurado, ni se mapea en el bloque `env:` de ningún workflow — verificado el 2026-06-15 con `gh secret list` / `gh variable list`. Para usar otro modelo (p. ej. `deepseek-reasoner`), hay que añadir `DEEPSEEK_MODEL` como secret **y** mapearlo en cada workflow.
 
 ---
 
@@ -1191,7 +1191,14 @@ Schedule histórico (comentado): "45 3 * * 2-6"  → 03:45 UTC
 
 **Disparado por:** cron-job.org a las 8:00:00 Bogotá L-V (job "GH Action - Health Check").
 
-Verifica que DB, DeepSeek API, Finnhub API, Yahoo Finance y todos los secrets estén disponibles. Si algún check falla, crea un GitHub Issue de alerta.
+Verifica en orden: secrets configurados → DB (Supabase) → agentes activos → Yahoo Finance → **saldo de DeepSeek** → ping de inferencia DeepSeek → Finnhub (opcional). Si algún check falla, crea un GitHub Issue de alerta (o comenta el existente del día).
+
+**Preflight de saldo DeepSeek (Sesión 23):** antes del ping de inferencia, el paso "Verificar saldo de DeepSeek" consulta `GET https://api.deepseek.com/user/balance`:
+- `is_available=false` (saldo agotado) → **falla** con mensaje accionable y link de recarga.
+- saldo `< DEEPSEEK_LOW_BALANCE_USD` (default 2.0 USD) → ⚠️ **avisa sin fallar** (recargar pronto, antes de que llegue a cero).
+- si el endpoint de saldo no responde → no rompe el check; el ping queda como red de seguridad.
+
+**Clasificación de errores del ping (Sesión 23):** el paso "Verificar DeepSeek API" distingue `HTTP 402 Insufficient Balance` (recargar saldo) de `401/403` (API key inválida) y de errores de red/timeout — cada caso imprime una instrucción distinta.
 
 ```
 Schedule histórico (comentado): "0 13 * * 1-5"  → 13:00 UTC = 8:00 am Bogotá
@@ -1230,12 +1237,13 @@ Todas las variables se definen en `.env` local (desarrollo) o en **GitHub Secret
 |---|---|
 | `DATABASE_URL` | Cadena de conexión a Supabase PostgreSQL (Transaction Pooler, puerto 6543) |
 | `DEEPSEEK_API_KEY` | API key de DeepSeek LLM |
-| `DEEPSEEK_MODEL` | Modelo DeepSeek a utilizar (producción: `deepseek-reasoner`) |
+| `DEEPSEEK_MODEL` | Modelo DeepSeek a utilizar (default y producción: `deepseek-chat`; no hay override configurado — ver §6.4) |
 | `FINNHUB_API_KEY` | API key de Finnhub (noticias y calendario económico) |
 | `ALPHA_VANTAGE_API_KEY` | API key de Alpha Vantage (legado) |
 | `GOOGLE_SHEET_ID` | ID del spreadsheet de Google Sheets |
 | `GOOGLE_CREDENTIALS_JSON` | JSON completo de la service account de Google (o ruta al archivo en local) |
 | `DEEPSEEK_BASE_URL` | Base URL del API (default: `https://api.deepseek.com`) |
+| `DEEPSEEK_LOW_BALANCE_USD` | Umbral de aviso preventivo de saldo bajo en DeepSeek (USD). El health check NO falla por saldo bajo; solo emite ⚠️ para recargar antes de que llegue a cero. Default: `2.0`. **Sesión 23.** |
 | `JUDGE_TIMEZONE` | Zona horaria del Juez (default: `America/Bogota`) |
 | `JUDGE_RUN_TIME` | Hora de ejecución del Juez en zona local (default: `23:00`) |
 | `TRADING_START_TIME_UTC` | Hora UTC desde la que se permite abrir posiciones, formato HH:MM (default: `06:30` = 1:30 am Bogotá) |
@@ -1419,6 +1427,18 @@ Antigravity_Inversion_Evolutiva/
 *Documento actualizado el 2026-06-12 (Sesión 22 — salidas inteligentes como genes evolutivos: break-even stop `be_activation_r`, salida por señal contraria `exit_on_reversal`/`min_profit_for_exit_r`, techo `MAX_SL_PIPS` y recorte de `atr_factor` a 1.8; replicado en backtester, migración 011 en producción).*
 
 ## Historial de cambios mayores
+
+- **2026-06-15 (Sesión 23 — incidente: saldo DeepSeek agotado (HTTP 402) + endurecimiento del health check) · commit `feb3f75` · en producción:**
+  - **Síntoma reportado:** a las 8:16 am Bogotá llegó el correo automático "Health Check Diario: All jobs have failed". El run de las 8:00 am (13:00 UTC, #27547965887) falló en el step "Verificar DeepSeek API"; los 5 checks previos (secrets, DB, agentes activos, Yahoo Finance) pasaron.
+  - **Causa raíz — saldo agotado, NO es bug de código:** DeepSeek devolvió `Error code: 402 - {'message': 'Insufficient Balance'}`. La API key es válida (autentica bien); lo que se agotó fue el saldo de la cuenta durante el fin de semana. El health check funcionó como debía: detectó el problema y alertó (correo + issue #14). Historial: verde todos los días hasta el 12-jun, primer fallo el 15-jun.
+  - **Impacto real (bajo) — el sistema es resiliente al 402:** los tres sub-agentes y el Juez tienen fallback determinista ante fallo del LLM, así que el trading continuó. (1) `SubAgentTechnical` solo consulta el LLM en la zona ambigua (conf 0.45–0.65) y ante excepción cae a la heurística ponderada; (2) `SubAgentMacro` cae a `_fallback_score` (sesgo HTF); (3) `SubAgentRisk` cae a la decisión heurística; (4) `JudgeAgent` cae a `_fallback_verdict`. La protección de SL/TP de posiciones abiertas es 100% determinista (`check_sl_tp` / `check_sl_tp_intrabar`, sin LLM) — nunca estuvo en riesgo. El Monitor de Trades siguió en verde salvo un fallo puntual a las 11:00 (issue #13) por timeout transitorio del pooler de Supabase, que se autorrecuperó en el ciclo siguiente.
+  - **Degradación mientras el saldo estuvo en cero:** los agentes operaron con pura heurística (sin el "desempate" del LLM en señales ambiguas) y el Juez perdió su veredicto cualitativo (la evolución genética en sí es determinista y siguió). El health check habría fallado cada mañana hasta recargar.
+  - **Fix (`.github/workflows/health_check.yml`):** (1) **Paso nuevo "Verificar saldo de DeepSeek"** (preflight, antes del ping): consulta `GET https://api.deepseek.com/user/balance`; falla con mensaje accionable si `is_available=false` (saldo agotado) y emite ⚠️ sin fallar si el saldo cae por debajo de `DEEPSEEK_LOW_BALANCE_USD` (default 2.0 USD) — aviso preventivo para recargar ANTES de llegar a cero. Si el endpoint de saldo falla, no rompe el check (el ping queda de red de seguridad). (2) **Clasificación de errores en el ping:** distingue `402 Insufficient Balance` (recargar) / `401-403` (key inválida) / error de red o timeout — cada caso da instrucción distinta, en vez del genérico "DeepSeek API error" anterior.
+  - **Limpieza de etiquetas Neon → Supabase:** el step de DB del health check y el checklist de su issue automático (`health_check.yml`) más el issue del Trade Monitor (`trade_monitor.yml`) decían "Neon"; corregido a Supabase, que es la DB real (`...pooler.supabase.com:6543`).
+  - **Corrección de documentación:** este documento decía "modelo en producción: `deepseek-reasoner`". Verificado con `gh secret list` / `gh variable list`: **no existe** `DEEPSEEK_MODEL` configurado ni se mapea en ningún workflow, por lo que producción usa el default del código `deepseek-chat`. Secciones 6.4 y 15 actualizadas.
+  - **Verificación:** YAML válido en ambos workflows; los 2 scripts Python embebidos compilan; árbol de decisión del saldo probado en 5 escenarios (agotado→exit 1, bajo→⚠️, sano→ok, cuenta CNY, respuesta vacía). Tras recargar el saldo, el Health Check corrió completo en verde (run #27550771274, 13:47 UTC). Issues #13 y #14 cerrados con su causa raíz documentada.
+  - **Nueva env var:** `DEEPSEEK_LOW_BALANCE_USD=2.0` (umbral de aviso preventivo; el health check NO falla por saldo bajo, solo avisa).
+  - **Mejora pendiente sugerida (no implementada):** proveedor LLM de respaldo (un segundo endpoint OpenAI-compatible vía `DEEPSEEK_BASE_URL`/`DEEPSEEK_MODEL`) para que un saldo agotado no degrade silenciosamente a todos los agentes a heurística. Requiere una segunda API key — pendiente de decisión del usuario.
 
 - **2026-06-12 (Sesión 22 — salidas inteligentes como genes evolutivos + coherencia intradía de SL/TP) · en producción:**
   - **Contexto:** la op #9284 (BUY del 2026-06-12, agente `2026-06-02_05`) expuso dos problemas: (1) su SL **estructural** (OB) de 61 pips generó un TP de 122 pips inalcanzable intradía — la rama ATR tenía techo de 50 pips pero la estructural solo validaba distancia mínima; con TP inalcanzable y trailing a +1R (61 pips) inactivable, el trade solo podía terminar en EOD o SL completo → fitness sin señal; (2) la posición llegó a +24 pips y los devolvió sin que ningún mecanismo protegiera la ganancia parcial. El usuario propuso evaluar las señales cada 15 min también para SALIR; se acordó implementarlo como **genes** para que la evolución decida (no como regla impuesta).
