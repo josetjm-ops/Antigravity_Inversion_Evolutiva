@@ -1080,6 +1080,66 @@ class EvolutionEngine:
                     seen.add(r["id"])
             return rows[:10]
 
+    # ── Pureza de especie: padre dominante de la especie del hijo ──────────────
+
+    def _species_genome_pool(self, especie: str, *agent_lists) -> list[dict]:
+        """
+        Genomas PUROS de la especie, para garantizar pureza dura: agentes de la
+        especie presentes en agent_lists (dedup, en el orden dado — los maduros
+        primero) + el Hall of Fame de la especie.
+
+        Incluye jóvenes/inmunes y eliminados a propósito: cualquier genoma de la
+        especie sirve para no diluirla. El usuario aprobó (Sesión 25) usar padres
+        jóvenes de la especie cuando no hay maduros y mantener el elitismo del HoF.
+
+        `_get_hof_parents` mezcla el top global cuando la especie es delgada; se
+        filtra aquí a la especie, así que solo entran sus entradas puras.
+        """
+        pool: dict[str, dict] = {}
+        for lst in agent_lists:
+            for a in (lst or []):
+                if str(a.get("especie") or "tendencia") == especie and a["id"] not in pool:
+                    pool[a["id"]] = a
+        try:
+            for h in self._get_hof_parents(especie):
+                if str(h.get("especie") or "tendencia") == especie and h["id"] not in pool:
+                    pool[h["id"]] = h
+        except Exception:
+            pass
+        return list(pool.values())
+
+    @staticmethod
+    def _species_dominant_pair(
+        p1: dict, p2: dict, especie: str, species_pool: list[dict]
+    ) -> tuple[dict, dict, float | None]:
+        """
+        Pureza dura: garantiza que al menos un padre sea de la especie del hijo
+        y lo devuelve como DOMINANTE. Retorna (dominante, secundario, p1_weight):
+
+          - ambos de la especie  → (p1, p2, None)  60/40 por ROI, como siempre.
+          - uno de la especie     → ese va primero, p1_weight=0.6 (la especie
+                                     domina pese al ROI del otro).
+          - ninguno de la especie → si hay genomas de la especie, sustituye uno
+                                     (al azar, para preservar diversidad) y lo
+                                     hace dominante (p1_weight=0.6). El segundo
+                                     padre cross-species inyecta diversidad.
+          - especie extinta (pool vacío) → deja el par tal cual (cross-species
+                                     inevitable; debe registrarse arriba).
+        """
+        e1 = str(p1.get("especie") or "tendencia") == especie
+        e2 = str(p2.get("especie") or "tendencia") == especie
+        if e1 and e2:
+            return p1, p2, None
+        if e1:
+            return p1, p2, 0.6
+        if e2:
+            return p2, p1, 0.6
+        if species_pool:
+            s = random.choice(species_pool)
+            otro = p1 if s["id"] != p1["id"] else p2
+            return s, otro, 0.6
+        return p1, p2, None
+
     # ── Redistribución de capital ────────────────────────────────────────────
 
     def _redistribute_capital(
@@ -1236,9 +1296,11 @@ class EvolutionEngine:
                 and bt["n_trades"] >= TOURNAMENT_MIN_OOS_TRADES
             )
 
-        def _best_from_pool(pool: list[dict], esp_: str, cid: str) -> tuple[dict, dict]:
+        def _best_from_pool(pool: list[dict], esp_: str, cid: str,
+                            species_pool: list[dict]) -> tuple[dict, dict]:
             """Cría N_CANDIDATE_CHILDREN ponderados por aptitud y devuelve
-            (mejor_hijo, su_backtest). El pool debe tener >= 2 agentes."""
+            (mejor_hijo, su_backtest). El pool debe tener >= 2 agentes.
+            Pureza dura: cada candidato lleva ≥1 padre de la especie (dominante)."""
             scores = [
                 max(float(a.get("fitness_score", a.get("roi_total", 0)) or 0), 0.0001)
                 for a in pool
@@ -1252,10 +1314,11 @@ class EvolutionEngine:
                     others = [a for a in pool if a["id"] != p1["id"]]
                     if others:
                         p2 = random.choice(others)
+                p1, p2, _pw = self._species_dominant_pair(p1, p2, esp_, species_pool)
                 candidate = breed_agent(
                     p1, p2, cid, self.today, max_gen + 1,
                     sigma_weights=sw, sigma_periods=sp, sigma_risk=sr,
-                    especie=esp_,
+                    especie=esp_, p1_weight=_pw,
                 )
                 try:
                     bt = run_backtest(backtest_data, candidate)
@@ -1289,6 +1352,11 @@ class EvolutionEngine:
                 )
                 hof_parents = []
 
+            # Pureza dura (Sesión 25): pool de genomas puros de la especie para
+            # forzar ≥1 padre de la especie en cada cruce. Incluye activos
+            # jóvenes/inmunes (current_population) y el HoF de la especie.
+            species_pool = self._species_genome_pool(esp, current_population)
+
             for _ in range(deficit):
                 child_id = f"{self.today.strftime('%Y-%m-%d')}_{repop_idx:02d}"
                 repop_idx += 1
@@ -1305,14 +1373,14 @@ class EvolutionEngine:
                 # ── Reintentos torneo → HoF hasta MAX_ATTEMPTS rondas ──────────
                 for _attempt in range(REPOPULATION_MAX_ATTEMPTS_PER_SLOT):
                     if len(tourn_pool) >= 2:
-                        cand, bt = _best_from_pool(tourn_pool, esp, child_id)
+                        cand, bt = _best_from_pool(tourn_pool, esp, child_id, species_pool)
                         if _passes_oos(bt):
                             child, best_bt, origen = cand, bt, "torneo"
                             break
                         if best_cand_bt is None or bt["fitness"] > best_cand_bt["fitness"]:
                             best_cand, best_cand_bt = cand, bt
                     if len(hof_parents) >= 2:
-                        cand, bt = _best_from_pool(hof_parents, esp, child_id)
+                        cand, bt = _best_from_pool(hof_parents, esp, child_id, species_pool)
                         if _passes_oos(bt):
                             child, best_bt, origen = cand, bt, "hall_of_fame"
                             break
@@ -1624,6 +1692,13 @@ class EvolutionEngine:
                                 if str(a.get("especie") or "tendencia") == child_especie]
                 pool = same_species if len(same_species) >= 2 else parent_candidates
 
+                # Pureza dura (Sesión 25): genomas puros de la especie (maduros
+                # elegibles → todos los activos incl. inmunes → HoF de la especie)
+                # para forzar ≥1 padre de la especie en cada cruce de este slot.
+                species_pool = self._species_genome_pool(
+                    child_especie, parent_candidates, survivors_all
+                )
+
                 # ── Fase 2: pesos OOS cuando todos los padres pierden ─────────
                 # Si TODO el pool tiene fitness_score <= 0 y hay backtest disponible,
                 # se pondera por fitness OOS en lugar del floor uniforme 0.0001.
@@ -1671,10 +1746,13 @@ class EvolutionEngine:
                     candidates: list[tuple[dict, dict]] = []
                     for _c in range(N_CANDIDATE_CHILDREN):
                         p1, p2 = _select_parents()
+                        p1, p2, _pw = self._species_dominant_pair(
+                            p1, p2, child_especie, species_pool
+                        )
                         candidate = breed_agent(
                             p1, p2, child_id, self.today, max_gen + 1,
                             sigma_weights=sw, sigma_periods=sp, sigma_risk=sr,
-                            especie=child_especie,
+                            especie=child_especie, p1_weight=_pw,
                         )
                         try:
                             bt = run_backtest(backtest_data, candidate)
@@ -1726,10 +1804,13 @@ class EvolutionEngine:
                                     if alternatives:
                                         hp2 = random.choice(alternatives)
                                     # else: self-mutation (hp2 == hp1), breed_agent lo soporta
+                                hp1, hp2, _hpw = self._species_dominant_pair(
+                                    hp1, hp2, child_especie, species_pool
+                                )
                                 hof_child = breed_agent(
                                     hp1, hp2, child_id, self.today, max_gen + 1,
                                     sigma_weights=sw, sigma_periods=sp, sigma_risk=sr,
-                                    especie=child_especie,
+                                    especie=child_especie, p1_weight=_hpw,
                                 )
                                 try:
                                     hof_bt = run_backtest(backtest_data, hof_child)
@@ -1772,10 +1853,13 @@ class EvolutionEngine:
                         )
                 else:
                     p1, p2 = _select_parents()
+                    p1, p2, _pw = self._species_dominant_pair(
+                        p1, p2, child_especie, species_pool
+                    )
                     child = breed_agent(
                         p1, p2, child_id, self.today, max_gen + 1,
                         sigma_weights=sw, sigma_periods=sp, sigma_risk=sr,
-                        especie=child_especie,
+                        especie=child_especie, p1_weight=_pw,
                     )
                     new_agents.append(child)
 
