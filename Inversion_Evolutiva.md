@@ -126,7 +126,7 @@ DeepSeek     ──► LLM para señales ambiguas y veredictos evolutivos
 
 ### Identificación
 
-Cada agente tiene un ID único con formato `YYYY-MM-DD_NN` donde `YYYY-MM-DD` es su fecha de nacimiento y `NN` es su número de orden ese día (01, 02, ..., 10).
+Cada agente tiene un ID único con formato `YYYY-MM-DD_NN` donde `YYYY-MM-DD` es su fecha de nacimiento y `NN` es su número de orden ese día (01, 02, …). Desde Sesión 25, `NN` es **consecutivo real**: solo los agentes que efectivamente se insertan consumen número (un slot rechazado por el umbral OOS ya no deja un hueco), así que el primer agente nacido un día siempre es `_01`.
 
 Ejemplos: `2026-05-11_01`, `2026-05-11_07`
 
@@ -607,16 +607,18 @@ Para que esto funcione en la "ventana ciega" de 03:30 – 06:30 UTC (11pm – 1:
      a. Descargar datos históricos: fetch_backtest_data() — 1 request compartido
         para todos los hijos del ciclo: 60d/15m + 3mo/1h de Yahoo Finance.
      b. Generar N_CANDIDATE_CHILDREN candidatos (default 3), cada uno con padres
-        distintos (selección fitness-proporcional, preferentemente misma especie).
+        distintos (selección fitness-proporcional). PUREZA DE ESPECIE (Sesión 25):
+        cada candidato lleva ≥1 padre de la especie del hijo, dominante al 60%
+        (p1_weight=0.6), mientras la especie no esté extinta.
      c. Ejecutar run_backtest() en cada candidato: walk-forward OOS 20 días,
         mismo pipeline de producción (señales + régimen ADX + ruptura-en-RANGO
         gate + SL/TP + fricción), sin LLM (heurística pura, determinista).
      d. Umbral de calidad (Fase 1, Sesión 17): el mejor candidato solo se despliega
         si fitness OOS > TOURNAMENT_MIN_OOS_FITNESS (default 0.0, estrictamente mayor)
         Y n_trades OOS >= TOURNAMENT_MIN_OOS_TRADES (default 5).
-        - Si no pasa: fallback al Hall of Fame — se generan 3 hijos de padres HoF
-          (misma especie primero; cualquier especie si no hay suficientes) y se
-          aplica el mismo umbral.
+        - Si no pasa: fallback al Hall of Fame — se generan 3 hijos de padres HoF,
+          con la misma garantía de ≥1 padre de la especie (pureza dura, Sesión 25),
+          y se aplica el mismo umbral.
         - Si tampoco pasa: el slot queda vacante (registrado en logs_juez como
           "slot_vacante"). El pool continúa con un agente menos hasta el próximo ciclo.
      e. Si Yahoo Finance falla → fallback a crianza directa sin backtest (sin umbral).
@@ -640,7 +642,8 @@ Para que esto funcione en la "ventana ciega" de 03:30 – 06:30 UTC (11pm – 1:
      a. Usar los mismos datos de backtest ya descargados (sin nueva descarga de red).
      b. Hasta REPOPULATION_MAX_ATTEMPTS_PER_SLOT rondas (default 8) de
         (torneo N candidatos → umbral OOS) seguido de (HoF N candidatos → umbral OOS).
-        Se detiene en cuanto un candidato supera el umbral.
+        Se detiene en cuanto un candidato supera el umbral. Cada candidato lleva
+        ≥1 padre de la especie (pureza dura, Sesión 25).
      c. DEGRADACIÓN 1 (Sesión 21): si tras agotar las rondas nadie pasa el umbral
         estricto, entra el MEJOR CANDIDATO DE CRUCE visto en todas las rondas
         (origen='mejor_candidato_oos') — un hijo de dos padres distintos con
@@ -1427,6 +1430,19 @@ Antigravity_Inversion_Evolutiva/
 *Documento actualizado el 2026-06-12 (Sesión 22 — salidas inteligentes como genes evolutivos: break-even stop `be_activation_r`, salida por señal contraria `exit_on_reversal`/`min_profit_for_exit_r`, techo `MAX_SL_PIPS` y recorte de `atr_factor` a 1.8; replicado en backtester, migración 011 en producción).*
 
 ## Historial de cambios mayores
+
+- **2026-06-16 (Sesión 25 — numeración consecutiva real de agentes + pureza de especie) · commits `e16de0b`, `f28ee78` · en producción:**
+  - **Contexto:** revisión de coherencia del ciclo del 2026-06-16, que eliminó 1 agente y creó `2026-06-16_02` con herencia de `2026-05-29_04` (ruptura, activo) × `2026-05-19_06` (tendencia, eliminado, Gen1). El usuario detectó dos cosas: (1) un único agente nuevo nombrado `_02` sin que existiera `_01`; (2) un agente eliminado reproduciéndose.
+  - **Diagnóstico (confirmado contra producción vía `logs_juez`):** el slot `2026-06-16_01` SÍ se crió pero el backtester lo rechazó (3 trades < umbral OOS) y quedó vacante; la red de repoblación insertó el agente real como `_02` — el índice `_01` se "quemó" con el intento rechazado. El agente eliminado pudo criar porque su genoma sigue archivado en el Hall of Fame (elitismo intencional, confirmado y mantenido).
+  - **Cambio A — numeración consecutiva real (`fix`, commit `e16de0b`):** nuevo helper `_renumber_contiguous` renumera los agentes que SÍ se insertan a `_01, _02, …` sin huecos, antes de persistir, en ciclo activo Y suspendido. Un slot rechazado por el umbral OOS ya no quema su índice. El remap se propaga a `slots_recuperados`; los slots vacantes se reetiquetan después para no colisionar con un ID real. 5 tests en `tests/test_numeracion_consecutiva.py`.
+  - **Decisión de diseño — se mantiene el elitismo del HoF:** el usuario consideró restringir la reproducción a "solo agentes vivos" y lo revirtió tras confirmar que el HoF es un archivo histórico que preserva genes buenos. Muerte y archivo son juicios independientes: la muerte usa `fitness ≤ 0` (cuota dinámica, recalculado en vivo, castiga drawdown/overtrading); el archivo usa `roi_total ≥ 0.05` (congelado al inscribirse). Por eso `2026-05-19_06` (ROI 6.699 en HoF) seguía criando pese a estar eliminado. Un eliminado puede ser 1 de 2 padres, nunca el genoma único.
+  - **Cambio B — pureza de especie (`feat`, commit `f28ee78`):** un hijo etiquetado de una especie podía nacer de padres de OTRAS especies cuando sus candidatos puros fallaban el umbral OOS y el fallback del HoF mezclaba el top global (el HoF de reversion tenía 1 sola entrada vs 13 de tendencia / 4 de ruptura). `breed_agent` forzaba los genes-interruptor (`rsi_modo`, `htf_filter_enabled`) pero el resto del genoma venía de otra especie → erosión de la especie débil hacia los genes de la fuerte, diluyendo la decorrelación que las especies buscan. Solución (**pureza dura**, decisión del usuario): todo hijo lleva **≥1 padre de su especie, dominante al 60%**, mientras la especie tenga algún genoma (activo —incl. jóvenes/inmunes— o en HoF); cross-species total solo si la especie está extinta. Helpers `_species_genome_pool` (pool puro: maduros → activos → HoF de la especie) + `_species_dominant_pair` (garantiza el padre de la especie como dominante) aplicados en los 5 puntos de cruce (torneo principal, fallback HoF, vía sin-backtest, repoblación torneo + HoF). El `forzado_cruce` ya era puro. El caso sano (≥2 padres elegibles de la especie) queda idéntico — la garantía solo actúa cuando el torneo habría cruzado entre especies. 6 tests en `tests/test_pureza_especie.py`.
+  - **Verificación:** suite **79/79**, incluido el ciclo evolutivo real en sandbox Neon (confirma que la pureza no rompe la garantía de 15 agentes ni el cruce 60/40).
+
+- **2026-06-15 (Sesión 24 — resiliencia ante timeouts transitorios de Yahoo Finance y del pooler de Supabase) · commit `dc2938b` · en producción:**
+  - **Contexto:** dos runs del Trade Monitor fallaron por blips de red — uno con `Read timed out` al bajar OHLCV de Yahoo para escanear NUEVAS entradas (sin posiciones abiertas en riesgo), otro por un cold-start del pooler de Supabase que agotó los reintentos de DB. El run siguiente (15 min después) salió OK solo en ambos casos.
+  - **Fix:** `data/yahoo_client.py` (nuevo) — cliente centralizado con 3 intentos y backoff 2/5s ante timeout/conexión/5xx; reemplaza los `requests.get` crudos de `indicators.py` y `simulated_broker.py`. `db/connection.py` — 3→4 reintentos, backoff 5/10/20s, connect_timeout 10→15s. `cron/trade_monitor.py` — `critical_errors` ahora son SOLO los fallos de vigilancia SL/TP de posiciones abiertas; un timeout bajando datos para nuevas entradas ya no es crítico (exit code y alerta solo si `critical_errors > 0`). Mensaje de alerta del workflow reformulado. 5 tests en `tests/test_yahoo_client.py`.
+  - **Criterio establecido:** el correo de alerta del Trade Monitor = solo cuando no se pudo verificar/cerrar una posición ABIERTA.
 
 - **2026-06-15 (Sesión 23 — incidente: saldo DeepSeek agotado (HTTP 402) + endurecimiento del health check) · commit `feb3f75` · en producción:**
   - **Síntoma reportado:** a las 8:16 am Bogotá llegó el correo automático "Health Check Diario: All jobs have failed". El run de las 8:00 am (13:00 UTC, #27547965887) falló en el step "Verificar DeepSeek API"; los 5 checks previos (secrets, DB, agentes activos, Yahoo Finance) pasaron.
