@@ -698,6 +698,31 @@ class EvolutionEngine:
             )
             return cur.fetchone()[0] + 1
 
+    def _renumber_contiguous(
+        self, agents: list[dict], start_idx: int
+    ) -> dict[str, str]:
+        """
+        Reasigna IDs consecutivos (_NN) a los agentes que SÍ se insertarán, en
+        su orden de aparición y arrancando en start_idx, eliminando los huecos
+        que dejan los slots rechazados por el umbral OOS.
+
+        Sin esto el ID se asignaba por posición del cupo (next_idx + i): si un
+        slot no pasaba el umbral quedaba vacante pero igual 'quemaba' su índice,
+        y el agente realmente insertado podía nacer '_02' sin que existiera
+        '_01'. Aquí los nacidos quedan _01, _02, … sin saltos.
+
+        Muta cada dict in-place (campo 'id') y devuelve {id_viejo: id_nuevo} para
+        propagar el cambio a los logs de auditoría (slots_recuperados).
+        """
+        remap: dict[str, str] = {}
+        prefix = self.today.strftime("%Y-%m-%d")
+        for offset, child in enumerate(agents):
+            new_id = f"{prefix}_{start_idx + offset:02d}"
+            if child.get("id") != new_id:
+                remap[child["id"]] = new_id
+                child["id"] = new_id
+        return remap
+
     # ── Filtro de Elegibilidad: Periodo de Gracia Operativa ──────────────────
 
     def _classify_eligibility(
@@ -1485,6 +1510,11 @@ class EvolutionEngine:
                     result.new_agents = _recovered_s
                 result.slots_recuperados = _slots_rec_s
                 result.deficit_restante  = _deficit_rest_s
+                # Numeración consecutiva real (Cambio A) también en ciclo suspendido.
+                _susp_remap = self._renumber_contiguous(_recovered_s, _susp_next_idx)
+                for _s in result.slots_recuperados:
+                    if _s["id"] in _susp_remap:
+                        _s["id"] = _susp_remap[_s["id"]]
                 # ──────────────────────────────────────────────────────────────
 
                 # Snapshot de ranking para auditoría diaria (sin redistribuir capital
@@ -1766,6 +1796,19 @@ class EvolutionEngine:
                 result.new_agents = new_agents
             result.slots_recuperados = _slots_rec_log
             result.deficit_restante  = _deficit_rest
+
+            # ── Numeración consecutiva real (Cambio A) ────────────────────────
+            # Los agentes que SÍ se insertan llevan _01, _02, … sin huecos. Un
+            # slot rechazado por el umbral OOS ya no 'quema' su índice (antes
+            # nacía '_02' sin existir '_01'). Los slots vacantes se reetiquetan
+            # DESPUÉS de los nacidos para no colisionar con un ID real.
+            id_remap = self._renumber_contiguous(new_agents, next_idx)
+            for _s in result.slots_recuperados:
+                if _s["id"] in id_remap:
+                    _s["id"] = id_remap[_s["id"]]
+            _vac_base = next_idx + len(new_agents)
+            for _j, _sv in enumerate(result.slots_vacantes):
+                _sv["id"] = f"{self.today.strftime('%Y-%m-%d')}_{_vac_base + _j:02d}"
 
             # Pool real del día: suma de todos los agentes ANTES de eliminar/nacer ninguno.
             pool_total_eod = round(
