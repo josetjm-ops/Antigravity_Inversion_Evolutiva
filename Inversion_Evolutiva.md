@@ -613,12 +613,27 @@ Para que esto funcione en la "ventana ciega" de 03:30 – 06:30 UTC (11pm – 1:
      c. Ejecutar run_backtest() en cada candidato: walk-forward OOS 20 días,
         mismo pipeline de producción (señales + régimen ADX + ruptura-en-RANGO
         gate + SL/TP + fricción), sin LLM (heurística pura, determinista).
-     d. Umbral de calidad (Fase 1, Sesión 17): el mejor candidato solo se despliega
-        si fitness OOS > TOURNAMENT_MIN_OOS_FITNESS (default 0.0, estrictamente mayor)
-        Y n_trades OOS >= TOURNAMENT_MIN_OOS_TRADES (default 5).
+     d. Umbral de calidad (Fase 1, Sesión 17 / Fase 2, Sesión 27): el mejor candidato
+        solo se despliega si pasa `_passes_oos_gate()`, que soporta dos modos vía
+        `TOURNAMENT_GATE_MODE`:
+          - `legacy` (default, sin cambio de comportamiento): fitness OOS >
+            TOURNAMENT_MIN_OOS_FITNESS (default 0.0, estrictamente mayor) Y n_trades
+            OOS >= TOURNAMENT_MIN_OOS_TRADES (default 5).
+          - `bootstrap` (Sesión 27, opt-in — pendiente de activar en producción):
+            resample con reemplazo (`BOOTSTRAP_ITERS`, default 1000) sobre los P&L
+            OOS del candidato; exige que el límite inferior del intervalo de
+            confianza (`BOOTSTRAP_CI`, default 0.80) de la expectancy sea > 0, con
+            mínimo `BOOTSTRAP_MIN_TRADES` (default 8) trades OOS. Distingue edge
+            real de azar en muestras pequeñas — el umbral legacy dejaba pasar
+            candidatos con expectancy apenas positiva pero estadísticamente
+            indistinguible de suerte.
+        - Registra `fitness_oos_prometido`/`n_trades_oos_prometido` en `agentes`
+          (Sesión 27) para comparar luego contra el fitness real vía la vista
+          `v_decaimiento_oos` — instrumento de auditoría del propio proceso de
+          selección.
         - Si no pasa: fallback al Hall of Fame — se generan 3 hijos de padres HoF,
           con la misma garantía de ≥1 padre de la especie (pureza dura, Sesión 25),
-          y se aplica el mismo umbral.
+          y se aplica el mismo gate.
         - Si tampoco pasa: el slot queda vacante (registrado en logs_juez como
           "slot_vacante"). El pool continúa con un agente menos hasta el próximo ciclo.
      e. Si Yahoo Finance falla → fallback a crianza directa sin backtest (sin umbral).
@@ -692,14 +707,34 @@ fitness = (expectancy / (max_drawdown + 1)) × confianza − penalidad_overtradi
 -- avg_win / avg_loss: ya son netos de fricción (1.4 pips descontados al cerrar)
 ```
 
-### Backtester Walk-Forward (Fase 3)
+### Backtester Walk-Forward (Fase 3, Sesión 16 · modo multi-fold añadido Sesión 27)
+
+`run_backtest()` es un dispatcher según `BACKTEST_MODE` (`.env`):
 
 ```
-Walk-forward split:
-  Train    : primeros BACKTEST_TRAIN_DAYS (40d) — warmup de indicadores
-  Validate : últimos  BACKTEST_VALIDATE_DAYS (20d) — período OOS
+BACKTEST_MODE=single (default, sin cambio de comportamiento):
+  Split único:
+    Train    : primeros BACKTEST_TRAIN_DAYS (40d) — warmup de indicadores
+    Validate : últimos  BACKTEST_VALIDATE_DAYS (20d) — período OOS
 
-Dentro del período OOS, la simulación replica producción exactamente:
+BACKTEST_MODE=multifold (Sesión 27, opt-in — pendiente de activar en producción):
+  3 folds deslizantes (MULTIFOLD_N_FOLDS), cada uno:
+    Train    : MULTIFOLD_TRAIN_DAYS (30d)
+    Purge    : MULTIFOLD_PURGE_DAYS (1d) — gap descartado, evita fuga train→validate
+    Validate : MULTIFOLD_VALIDATE_DAYS (10d) — período OOS del fold
+  Avance entre folds: MULTIFOLD_STEP_DAYS (10d).
+  Tendencia HTF por fold: se calcula al timestamp de inicio de CADA fold (no
+  siempre "la más reciente" como en modo single) — evita que folds antiguos
+  usen información del futuro.
+  Fitness agregado: mean(fitness_folds) − MULTIFOLD_LAMBDA × stdev(fitness_folds)
+  (default λ=0.5) — penaliza candidatos inestables entre regímenes de mercado
+  distintos; un candidato robusto debe rendir en varios folds, no solo en el
+  tramo específico del split único.
+  n_trades agregado = suma de trades de los 3 folds (más muestra OOS también
+  para el gate bootstrap de la Fase 2).
+
+Dentro de cada período OOS (ambos modos), la simulación replica producción
+exactamente:
   - calc_signals() con los mismos genes del candidato
   - Clasificador ADX: S1 bloqueado en RANGO, S2 bloqueado en TENDENCIA,
     S3 bloqueado en RANGO si RUPTURA_SOLO_TENDENCIA=true (Sesión 17)
@@ -707,9 +742,18 @@ Dentro del período OOS, la simulación replica producción exactamente:
   - SubAgentRisk._compute_levels() — SL ≥ 10 pips, R:R objetivo
   - check_sl_tp_intrabar() sobre cada vela 15m: SL/TP exactos
   - Fricción TRADE_FRICTION_PIPS descontada por trade
+  - Cierre EOD al borde del propio fold/período (nunca al final del dataset
+    completo — bug de fuga hacia adelante corregido en Sesión 27 al extraer
+    el núcleo walk-forward compartido entre ambos modos)
 
-Rendimiento: ~3.5s/candidato, ~53s por ciclo completo (5 slots × 3 candidatos).
-Margen: 11 minutos libres del workflow judge_daily (timeout 12 min).
+Rendimiento medido empíricamente (Sesión 27, EUR/USD real):
+  - single    : ~5.7s/candidato (media de 5 corridas)
+  - multifold : ~9.6-11.7s/candidato (~1.68× el costo de single)
+Presupuesto de tiempo de repoblación (REPOPULATION_TIME_BUDGET_SECONDS, default
+900s) activo SOLO en modo multifold: si se agota, los cupos restantes saltan
+directo a la cascada de degradación (cruce forzado) sin gastar más backtests
+en rondas de torneo/HoF, para no agotar el timeout del workflow judge_daily
+(25 min — no 12; corregido en Sesión 27).
 ```
 
 ### Periodo de Gracia Operativa (inmunidad)
@@ -928,6 +972,8 @@ Registro central de cada agente. Campos clave:
 | `operaciones_total` / `operaciones_ganadoras` | INTEGER | Estadísticas |
 | `fecha_eliminacion` | DATE | Fecha en que el Juez eliminó al agente (NULL si activo) |
 | `razon_eliminacion` | TEXT | Justificación de la eliminación (incluye fitness/cuota dinámica) |
+| `fitness_oos_prometido` | NUMERIC | Fitness OOS del candidato ganador del torneo walk-forward al nacer. `NULL` para agentes previos a la migración 012 o nacidos por cruce/clon forzado sin backtest. Migración 012, Sesión 27. |
+| `n_trades_oos_prometido` | INTEGER | Trades OOS sobre los que se calculó `fitness_oos_prometido` — contexto de confianza de la promesa del torneo. Migración 012, Sesión 27. |
 | `created_at` / `updated_at` | TIMESTAMPTZ | Auditoría temporal |
 
 ### `operaciones`
@@ -997,6 +1043,10 @@ Snapshot diario de posición, ROI y capital de cada agente al final del día. Al
 ### `estrategias_exitosas`
 
 Hall of Fame: parámetros de agentes que superaron el umbral `MIN_ROI_FOR_HALL_OF_FAME` (default 0.05%). Reserva de "genes buenos" para herencia futura.
+
+### `v_decaimiento_oos` (vista, Sesión 27)
+
+Compara `fitness_oos_prometido` (promesa del torneo al nacer) contra el fitness real ya en producción, solo para agentes con `n_trades >= 15` (muestra madura). Instrumento de auditoría del propio proceso de selección: permite calcular el decaimiento promedio (`realizado − prometido`), la correlación prometido↔realizado y la tasa de falsos positivos del torneo (candidatos con promesa positiva que terminan con fitness real negativo). Es el criterio de datos que debe consultarse antes de decidir activar `TOURNAMENT_GATE_MODE=bootstrap` o `BACKTEST_MODE=multifold` (ver `PLAN_DE_MEJORA.md`).
 
 ---
 
@@ -1275,6 +1325,18 @@ Todas las variables se definen en `.env` local (desarrollo) o en **GitHub Secret
 | `TARGET_AGENTS_PER_ESPECIE` | Objetivo de agentes activos por especie. El motor llena TODO el déficit cada ciclo (3 × 5 = 15 garantizados). Default: `5`. **Sesión 18 / 19.** |
 | `REPOPULATION_MAX_PER_CYCLE` | **DEPRECADO (Sesión 19).** El tope por ciclo se eliminó para garantizar los 15. Default: `3` (sin efecto). **Sesión 18.** |
 | `REPOPULATION_MAX_ATTEMPTS_PER_SLOT` | Rondas de reintento (torneo→HoF) por cupo antes de desplegar el mejor candidato de cruce. Acota el costo de backtests del cron. Default: `8`. **Sesión 19 / 21.** |
+| `TOURNAMENT_GATE_MODE` | `legacy` (default, sin cambio) o `bootstrap` (Sesión 27): exige que el límite inferior del IC de la expectancy OOS sea > 0 en vez del umbral débil `fitness>0 & n>=5`. Pendiente de activar en producción — ver criterio en `PLAN_DE_MEJORA.md`. **Sesión 27.** |
+| `BOOTSTRAP_ITERS` | Iteraciones de resample con reemplazo para el gate bootstrap. Default: `1000`. **Sesión 27.** |
+| `BOOTSTRAP_CI` | Nivel de confianza del intervalo bootstrap. Default: `0.80`. **Sesión 27.** |
+| `BOOTSTRAP_MIN_TRADES` | Trades OOS mínimos para intentar el gate bootstrap (con menos, se rechaza directo). Default: `8`. **Sesión 27.** |
+| `BACKTEST_MODE` | `single` (default, sin cambio) o `multifold` (Sesión 27): walk-forward de 3 folds deslizantes con purge gap en vez de un único split. Pendiente de activar en producción. **Sesión 27.** |
+| `MULTIFOLD_N_FOLDS` | Número de folds del walk-forward multi-fold. Default: `3`. **Sesión 27.** |
+| `MULTIFOLD_TRAIN_DAYS` | Días de warmup por fold. Default: `30`. **Sesión 27.** |
+| `MULTIFOLD_VALIDATE_DAYS` | Días OOS por fold. Default: `10`. **Sesión 27.** |
+| `MULTIFOLD_PURGE_DAYS` | Días de gap descartados entre train y validate de cada fold. Default: `1`. **Sesión 27.** |
+| `MULTIFOLD_STEP_DAYS` | Días de avance entre folds consecutivos. Default: `10`. **Sesión 27.** |
+| `MULTIFOLD_LAMBDA` | Penalización por varianza entre folds en la agregación del fitness (`mean − λ×stdev`). Default: `0.5`. **Sesión 27.** |
+| `REPOPULATION_TIME_BUDGET_SECONDS` | Presupuesto de tiempo de repoblación en segundos, activo SOLO si `BACKTEST_MODE=multifold` (sin efecto en modo single). Evita agotar el timeout del cron por el costo extra del multi-fold. Default: `900`. **Sesión 27.** |
 | `LOG_LEVEL` | Nivel de logs (default: `INFO`) |
 | `ENVIRONMENT` | Ambiente (`production` / `development`) |
 
@@ -1430,6 +1492,15 @@ Antigravity_Inversion_Evolutiva/
 *Documento actualizado el 2026-06-12 (Sesión 22 — salidas inteligentes como genes evolutivos: break-even stop `be_activation_r`, salida por señal contraria `exit_on_reversal`/`min_profit_for_exit_r`, techo `MAX_SL_PIPS` y recorte de `atr_factor` a 1.8; replicado en backtester, migración 011 en producción).*
 
 ## Historial de cambios mayores
+
+- **2026-07-01 (Sesión 27 — auditoría experta del motor evolutivo + 3 fases de mejora: instrumentación OOS, gate bootstrap, walk-forward multi-fold) · commit `ecad116` (PR #16 mergeado a `master` vía `67655a0`) · en producción:**
+  - **Contexto:** auditoría integral solicitada (rol experto Forex/macro/técnico) sobre datos reales de producción (788 trades cerrados): win rate 39%, payoff 1.12, expectancy/op negativa — persiste el veredicto de la auditoría 2026-06-01. Hallazgo adicional sobre por qué sobreviven agentes con ROI muy negativo: `roi_total` es una suma aritmética de `pnl_pct` desacoplada del capital real (la redistribución equitativa reinicia la base), y el fitness comprime toda la señal en ±0.02 — casi indistinguible entre un bleeder crónico y uno break-even. Análisis y roadmap completos en `PLAN_DE_MEJORA.md` (raíz del repo), con 3 fases especificadas y luego implementadas.
+  - **Fase 1 — instrumentación del decaimiento OOS→producción:** nadie comparaba sistemáticamente lo que el torneo walk-forward *prometía* (fitness OOS al nacer un agente) contra lo que el agente *realmente* rindió en producción. Migración `012_fitness_oos_prometido.sql` (aditiva, aplicada en Supabase producción y en la sandbox Neon de tests): columnas `fitness_oos_prometido` / `n_trades_oos_prometido` en `agentes` + vista `v_decaimiento_oos` (compara promesa vs. fitness real para agentes con `n_trades >= MIN_SAMPLE_TRADES`). `evolution/evolution_engine.py`: `breed_agent()` inicializa ambos campos en `NULL` por defecto; los 5 puntos de cría (torneo principal, fallback HoF, repoblación, vía sin-backtest) adjuntan la promesa real cuando hay backtest disponible; `_insert_new_agent()` persiste ambas columnas. Sin flag: es puramente aditivo, no cambia ninguna decisión — solo registra un dato nuevo para auditoría futura.
+  - **Fase 2 — validación estadística real en el torneo (gate bootstrap):** el umbral de despliegue de un hijo del torneo era `fitness OOS > 0` con solo `n_trades OOS >= 5` — muestra insuficiente para distinguir edge real de azar. Simulación sobre los 15 agentes activos reales (prototipo, 1000 resamples, IC 80%) mostró el caso concreto: `2026-06-27_01` pasaba el umbral débil (fitness 0.0105, n=5) pero su límite inferior de confianza era −0.062, indistinguible de suerte. Nueva función `bootstrap_edge_ok()` en `evolution/backtester.py`: resample con reemplazo sobre los P&L de los trades OOS del candidato, exige que el límite inferior del IC (`BOOTSTRAP_CI`, default 0.80) de la expectancy sea > 0. Nuevo helper único `_passes_oos_gate()` en `evolution_engine.py` centraliza el switch legacy/bootstrap en los 3 puntos donde vivía el umbral (torneo principal, fallback HoF, repoblación), sin duplicar lógica. Activado con `TOURNAMENT_GATE_MODE=bootstrap` (default `legacy` = comportamiento sin cambios). La cascada de degradación existente (mejor-candidato-de-cruce → cruce forzado → clon único) sigue garantizando la población de 15 aunque el gate sea más estricto.
+  - **Fase 3 — walk-forward multi-fold:** el backtester usaba un único split fijo (`BACKTEST_TRAIN_DAYS=40` / `BACKTEST_VALIDATE_DAYS=20`), sensible al régimen de mercado de esas 3 semanas específicas. `evolution/backtester.py` refactorizado: núcleo walk-forward extraído a `_walk_forward_trades()` (compartido por ambos modos, sin duplicar la lógica de trading); `_run_backtest_single()` reproduce el comportamiento exacto de siempre; `_run_backtest_multifold()` implementa 3 folds deslizantes (30d train / 1d purge gap / 10d validate, avanzando 10d entre folds) con fitness agregado `mean(fitness_folds) − MULTIFOLD_LAMBDA × stdev(fitness_folds)` (penaliza candidatos inestables entre regímenes). `run_backtest()` es ahora un dispatcher según `BACKTEST_MODE` (default `single` = sin cambios). **Bug encontrado y corregido durante el refactor:** el cierre EOD original usaba la última vela del *dataset completo* (`.iloc[-1]`) en vez del borde del propio *fold* (`.iloc[n_end-1]`) — en modo single coincidía por casualidad (`n_end == n_total`), pero en multi-fold habría sido una fuga hacia adelante grave (folds antiguos cerrando posiciones al precio de días en el futuro). Cubierto por test de regresión dedicado. Costo medido empíricamente: single ~5.7s/candidato, multi-fold (3 folds) ~9.6-11.7s/candidato (~1.68×). Presupuesto de tiempo de repoblación (`REPOPULATION_TIME_BUDGET_SECONDS`, default 900s) añadido en `_try_repopulate`, activo **solo** si `BACKTEST_MODE=multifold`: si se agota, los cupos restantes saltan directo a la cascada de degradación (cruce forzado) sin gastar backtests en rondas completas de torneo/HoF, para no agotar el timeout del cron.
+  - **Estado de los flags en producción (deliberado, sin activar):** `TOURNAMENT_GATE_MODE` y `BACKTEST_MODE` no están seteados ni en `.env` ni en Secrets → el código usa sus defaults (`legacy`/`single`). El comportamiento del ciclo evolutivo **no cambió** con este despliegue. Criterio de activación (documentado en `PLAN_DE_MEJORA.md`): esperar a que `v_decaimiento_oos` acumule datos reales de producción antes de decidir activar el gate bootstrap y/o el multi-fold.
+  - **Verificación:** suite **99/99 tests**, corridos íntegramente contra la sandbox Neon aislada (`tests/conftest.py`) — nunca contra Supabase producción. Migración 012 verificada en Supabase antes y después de aplicarla (columnas ausentes → presentes, 15 agentes activos intactos, valores `NULL` en agentes preexistentes).
+  - **Trabajo previo no documentado hasta ahora:** esta misma rama incluye 2 commits de sesiones anteriores no registrados en este documento — columna **Especie** en la tabla de Operaciones del dashboard `mobile-app` (JOIN con `agentes`, reutiliza `ESPECIE_META`) y los scripts de diagnóstico solo-lectura `scripts/diag_agentes_estado.py` / `scripts/diag_ciclos.py`.
 
 - **2026-06-16 (Sesión 25 — numeración consecutiva real de agentes + pureza de especie) · commits `e16de0b`, `f28ee78` · en producción:**
   - **Contexto:** revisión de coherencia del ciclo del 2026-06-16, que eliminó 1 agente y creó `2026-06-16_02` con herencia de `2026-05-29_04` (ruptura, activo) × `2026-05-19_06` (tendencia, eliminado, Gen1). El usuario detectó dos cosas: (1) un único agente nuevo nombrado `_02` sin que existiera `_01`; (2) un agente eliminado reproduciéndose.
