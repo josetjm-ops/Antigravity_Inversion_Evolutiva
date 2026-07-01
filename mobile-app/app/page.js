@@ -677,6 +677,7 @@ function OperationsTable({ operations }) {
   const csvColumns = [
     ["ID", "id"],
     ["Agente", "agente_id"],
+    ["Especie", "especie"],
     ["Generacion", "generacion"],
     ["Fecha Hora Apertura", "timestamp_entrada"],
     ["Accion", "accion"],
@@ -785,6 +786,7 @@ function OperationsTable({ operations }) {
             <tr>
               <th>ID</th>
               <th>Agente</th>
+              <th>Especie</th>
               <th>Gen</th>
               <th>Apertura</th>
               <th>Accion</th>
@@ -804,11 +806,17 @@ function OperationsTable({ operations }) {
             {filtered.map((op) => {
               const isOpen = expanded === op.id;
               const pnlTone = Number(op.pnl || 0) >= 0 ? "emerald" : "red";
+              const especieMeta = ESPECIE_META[op.especie] || { emoji: "•", color: "#888", label: op.especie || "—" };
               return (
                 <Fragment key={op.id}>
                   <tr className={isOpen ? "selected-row" : ""}>
                     <td className="mono strong">#{op.id}</td>
                     <td className="mono strong">{op.agente_id}</td>
+                    <td>
+                      <span style={{ color: especieMeta.color, whiteSpace: "nowrap" }}>
+                        {especieMeta.emoji} {especieMeta.label}
+                      </span>
+                    </td>
                     <td>{op.generacion ?? "--"}</td>
                     <td>{fmtDateTime(op.timestamp_entrada)}</td>
                     <td><span className={`op-type mini ${op.accion?.toLowerCase()}`}>{op.accion}</span></td>
@@ -829,7 +837,7 @@ function OperationsTable({ operations }) {
                   </tr>
                   {isOpen ? (
                     <tr className="detail-row">
-                      <td colSpan="15">
+                      <td colSpan="16">
                         <div className="operation-detail">
                           <div className="detail-grid">
                             <DetailMetric label="Confianza Final" value={fmtNum(op.confianza_final, 4)} />

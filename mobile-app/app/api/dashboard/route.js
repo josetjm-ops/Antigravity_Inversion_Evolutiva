@@ -143,6 +143,7 @@ export async function GET() {
     const opsRes = await client.query(`
       SELECT o.id, o.agente_id, o.accion,
              a.generacion,
+             COALESCE(a.especie, 'tendencia') AS especie,
              o.timestamp_entrada,
              o.timestamp_salida,
              o.precio_entrada::float AS precio_entrada,
