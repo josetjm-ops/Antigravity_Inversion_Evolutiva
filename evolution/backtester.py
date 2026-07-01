@@ -25,6 +25,8 @@ from __future__ import annotations
 
 import logging
 import os
+import random
+import statistics
 from typing import Any
 
 import pandas as pd
@@ -40,12 +42,33 @@ N_CANDIDATE_CHILDREN   = int(os.getenv("N_CANDIDATE_CHILDREN",    "3"))
 # Coherencia entre backtest y producción es crítica para la validez del fitness OOS.
 _RUPTURA_SOLO_TENDENCIA = os.getenv("RUPTURA_SOLO_TENDENCIA", "true").lower() != "false"
 
+# ── Fase 2 PLAN_DE_MEJORA.md: gate estadístico del torneo ────────────────────
+# legacy    : umbral débil actual (fitness OOS > 0 & n_trades >= 5).
+# bootstrap : exige que el límite inferior del IC de la expectancy sea > 0.
+TOURNAMENT_GATE_MODE   = os.getenv("TOURNAMENT_GATE_MODE", "legacy").lower()
+BOOTSTRAP_ITERS         = int(os.getenv("BOOTSTRAP_ITERS", "1000"))
+BOOTSTRAP_CI            = float(os.getenv("BOOTSTRAP_CI", "0.80"))
+BOOTSTRAP_MIN_TRADES    = int(os.getenv("BOOTSTRAP_MIN_TRADES", "8"))
+
 # Velas 15m por día de trading (≈6.5h × 4 velas/h)
 _CANDLES_PER_DAY = 26
 # Evaluar nueva posición cada N velas (= cadencia del cron de producción)
 _CHECK_EVERY     = 4
 # Máximo lookback para el slice de señales (limita O(N) por llamada)
 _LOOKBACK        = 300
+
+# ── Fase 3 PLAN_DE_MEJORA.md: walk-forward multi-fold ───────────────────────
+# single    : split único TRAIN/VALIDATE actual (comportamiento de siempre).
+# multifold : N folds deslizantes con purge gap, fitness agregado penalizado
+#             por varianza entre folds — reduce la sensibilidad al régimen de
+#             mercado específico de un único tramo OOS.
+BACKTEST_MODE           = os.getenv("BACKTEST_MODE", "single").lower()
+MULTIFOLD_N_FOLDS       = int(os.getenv("MULTIFOLD_N_FOLDS", "3"))
+MULTIFOLD_TRAIN_DAYS    = int(os.getenv("MULTIFOLD_TRAIN_DAYS", "30"))
+MULTIFOLD_VALIDATE_DAYS = int(os.getenv("MULTIFOLD_VALIDATE_DAYS", "10"))
+MULTIFOLD_PURGE_DAYS    = int(os.getenv("MULTIFOLD_PURGE_DAYS", "1"))
+MULTIFOLD_STEP_DAYS     = int(os.getenv("MULTIFOLD_STEP_DAYS", "10"))
+MULTIFOLD_LAMBDA        = float(os.getenv("MULTIFOLD_LAMBDA", "0.5"))
 
 
 # ── Descarga única de datos históricos ───────────────────────────────────────
@@ -71,79 +94,49 @@ def fetch_backtest_data() -> dict:
 
 # ── Motor de backtest ─────────────────────────────────────────────────────────
 
-def run_backtest(data: dict, agent: dict) -> dict:
+def _walk_forward_trades(
+    df_15m: pd.DataFrame,
+    oos_start: int,
+    n_end: int,
+    htf_trend: dict,
+    params_tec: dict,
+    params_smc: dict,
+    params_riesgo: dict,
+    especie: str,
+) -> list[dict]:
     """
-    Ejecuta el backtest walk-forward OOS sobre un agente candidato.
+    Núcleo walk-forward compartido entre el modo single-split y multi-fold:
+    simula señales → entrada → gestión de SL/TP/BE/reversal sobre el tramo
+    [oos_start, n_end) de df_15m, con htf_trend fijo para todo el tramo
+    (igual que el comportamiento original: el filtro HTF no se recalcula
+    vela a vela dentro de un mismo fold — ver docstring del módulo).
 
-    Parameters
-    ----------
-    data  : dict de fetch_backtest_data()
-    agent : dict con params_tecnicos, params_smc, params_riesgo, especie
-
-    Returns
-    -------
-    {
-      "n_trades"    : int,
-      "win_rate"    : float,
-      "expectancy"  : float,   # expectancy neta por trade (OOS)
-      "max_drawdown": float,
-      "fitness"     : float,   # expectancy / (max_drawdown + 1)
-      "oos_trades"  : list,    # detalle de cada trade
-    }
+    Extraído de run_backtest() sin cambiar una sola línea de la lógica de
+    trading, para poder reutilizarlo también en el modo multi-fold (Fase 3
+    de PLAN_DE_MEJORA.md) sin duplicar ni divergir el comportamiento.
     """
-    from data.indicators      import calc_signals, calc_htf_trend_series
+    from data.indicators      import calc_signals
     from agents.sub_agent_technical import SubAgentTechnical
     from agents.sub_agent_risk      import SubAgentRisk
 
-    df_15m        = data["df_15m"]
-    df_1h         = data["df_1h"]
-    params_tec    = agent.get("params_tecnicos") or {}
-    params_smc    = agent.get("params_smc")      or {}
-    params_riesgo = agent.get("params_riesgo")   or {}
-    especie       = str(agent.get("especie", "tendencia"))
     friction_pips = float(os.getenv("TRADE_FRICTION_PIPS", "1.4"))
     min_sl_pips   = float(os.getenv("MIN_SL_PIPS", "10.0"))
 
-    # Salidas inteligentes (Sesión 22) — mismos genes que el trade_monitor,
-    # replicados aquí para que el fitness OOS refleje el comportamiento real.
     be_r          = float(params_smc.get("be_activation_r", 0) or 0)
     exit_rev      = int(params_smc.get("exit_on_reversal", 0) or 0)
     min_profit_r  = float(params_smc.get("min_profit_for_exit_r", 0.4) or 0.4)
     umbral_conf   = float(params_riesgo.get("umbral_confianza_minima", 0.60) or 0.60)
 
-    n_total = len(df_15m)
-    oos_start = max(0, n_total - BACKTEST_VALIDATE_DAYS * _CANDLES_PER_DAY)
-
-    # Mínimo de datos para que el warmup sea válido
-    if oos_start < 50:
-        log.warning("[Backtester] Datos insuficientes (%d velas). Skip.", n_total)
-        return _empty_result()
-
-    # ── HTF trend al inicio del período OOS ──────────────────────────────────
-    try:
-        htf_series = calc_htf_trend_series(df_1h)
-        last_htf   = htf_series.iloc[-1]
-        htf_trend  = {
-            "direccion":  str(last_htf["htf_direccion"]),
-            "ema_rapida": float(last_htf["htf_ema_rapida"]),
-            "ema_lenta":  float(last_htf["htf_ema_lenta"]),
-        }
-    except Exception:
-        htf_trend = {"direccion": "NEUTRAL", "ema_rapida": 0.0, "ema_lenta": 0.0}
-
-    # ── Sub-agentes sin LLM ───────────────────────────────────────────────────
-    # reason() devuelve JSON mínimo que no modifica el resultado heurístico.
     sub_tec  = SubAgentTechnical("bt", params_tec, params_smc)
     sub_risk = SubAgentRisk("bt", params_riesgo, params_smc)
     sub_tec.reason  = lambda _p: '{"recomendacion":"HOLD","confianza":0.0,"razon":""}'
     sub_risk.reason = lambda _p: '{"accion_final":"HOLD","confianza_final":0.0}'
 
-    # ── Walk-forward OOS ──────────────────────────────────────────────────────
     open_pos: dict | None = None
     capital  = 10.0
     trades: list[dict] = []
 
-    for i in range(oos_start, n_total):
+    for i in range(oos_start, n_end):
         candle_hi = float(df_15m["high"].iloc[i])
         candle_lo = float(df_15m["low"].iloc[i])
         precio    = float(df_15m["close"].iloc[i])
@@ -271,9 +264,12 @@ def run_backtest(data: dict, agent: dict) -> dict:
                 "sl_pips":        sl_pips,
             }
 
-    # ── Cerrar posición abierta al precio final (EOD del período) ────────────
+    # ── Cerrar posición abierta al precio final del FOLD (no del dataset) ────
+    # n_end-1 es la última vela de este tramo OOS: en modo single n_end==n_total
+    # (idéntico al comportamiento original); en multi-fold cada fold cierra en
+    # su propio borde, nunca "espía" velas de folds posteriores.
     if open_pos is not None:
-        precio_final = float(df_15m["close"].iloc[-1])
+        precio_final = float(df_15m["close"].iloc[n_end - 1])
         accion  = open_pos["accion"]
         entry   = open_pos["precio_entrada"]
         cap_used = open_pos["capital_usado"]
@@ -287,7 +283,197 @@ def run_backtest(data: dict, agent: dict) -> dict:
             "pnl": round(pnl, 6), "hit": "EOD",
         })
 
+    return trades
+
+
+# ── Modo single (comportamiento original, default) ──────────────────────────
+
+def _run_backtest_single(data: dict, agent: dict) -> dict:
+    """
+    Split único TRAIN/VALIDATE: comportamiento exacto de antes de la Fase 3
+    (PLAN_DE_MEJORA.md). HTF se calcula UNA VEZ con la última fila disponible
+    de calc_htf_trend_series (tendencia HTF "actual", como siempre).
+    """
+    from data.indicators import calc_htf_trend_series
+
+    df_15m        = data["df_15m"]
+    df_1h         = data["df_1h"]
+    params_tec    = agent.get("params_tecnicos") or {}
+    params_smc    = agent.get("params_smc")      or {}
+    params_riesgo = agent.get("params_riesgo")   or {}
+    especie       = str(agent.get("especie", "tendencia"))
+
+    n_total = len(df_15m)
+    oos_start = max(0, n_total - BACKTEST_VALIDATE_DAYS * _CANDLES_PER_DAY)
+
+    if oos_start < 50:
+        log.warning("[Backtester] Datos insuficientes (%d velas). Skip.", n_total)
+        return _empty_result()
+
+    try:
+        htf_series = calc_htf_trend_series(df_1h)
+        last_htf   = htf_series.iloc[-1]
+        htf_trend  = {
+            "direccion":  str(last_htf["htf_direccion"]),
+            "ema_rapida": float(last_htf["htf_ema_rapida"]),
+            "ema_lenta":  float(last_htf["htf_ema_lenta"]),
+        }
+    except Exception:
+        htf_trend = {"direccion": "NEUTRAL", "ema_rapida": 0.0, "ema_lenta": 0.0}
+
+    trades = _walk_forward_trades(
+        df_15m, oos_start, n_total, htf_trend,
+        params_tec, params_smc, params_riesgo, especie,
+    )
     return _calc_metrics(trades)
+
+
+# ── Modo multi-fold (Fase 3 PLAN_DE_MEJORA.md) ──────────────────────────────
+
+def _lookup_htf_at(htf_series: pd.DataFrame | None, ts) -> dict:
+    """HTF vigente al timestamp `ts` (última fila con timestamp <= ts).
+
+    A diferencia del modo single (que usa siempre la última tendencia HTF
+    disponible), cada fold multi-fold valida un tramo histórico distinto y
+    debe usar la tendencia HTF que existía EN ESE MOMENTO — de lo contrario
+    folds antiguos usarían información del futuro (fuga hacia adelante).
+    """
+    if htf_series is None or htf_series.empty:
+        return {"direccion": "NEUTRAL", "ema_rapida": 0.0, "ema_lenta": 0.0}
+    mask = htf_series["timestamp"] <= ts
+    if not mask.any():
+        return {"direccion": "NEUTRAL", "ema_rapida": 0.0, "ema_lenta": 0.0}
+    row = htf_series[mask].iloc[-1]
+    return {
+        "direccion":  str(row["htf_direccion"]),
+        "ema_rapida": float(row["htf_ema_rapida"]),
+        "ema_lenta":  float(row["htf_ema_lenta"]),
+    }
+
+
+def _compute_fold_bounds(n_total: int) -> list[tuple[int, int, int]]:
+    """
+    Índices [(train_start, oos_start, oos_end), ...] para MULTIFOLD_N_FOLDS
+    folds deslizantes, avanzando MULTIFOLD_STEP_DAYS días entre folds, con
+    purge gap de MULTIFOLD_PURGE_DAYS entre train y validate:
+
+        train_k    = [train_start,             train_start+TRAIN_DAYS)
+        purge      = MULTIFOLD_PURGE_DAYS días descartados
+        validate_k = [oos_start,                oos_start+VALIDATE_DAYS)
+
+    Folds cuyo oos_end excede los datos disponibles se omiten (dataset corto).
+    """
+    bounds: list[tuple[int, int, int]] = []
+    for k in range(MULTIFOLD_N_FOLDS):
+        train_start = k * MULTIFOLD_STEP_DAYS * _CANDLES_PER_DAY
+        oos_start = train_start + (MULTIFOLD_TRAIN_DAYS + MULTIFOLD_PURGE_DAYS) * _CANDLES_PER_DAY
+        oos_end = oos_start + MULTIFOLD_VALIDATE_DAYS * _CANDLES_PER_DAY
+        if oos_end > n_total:
+            continue
+        bounds.append((train_start, oos_start, oos_end))
+    return bounds
+
+
+def _run_backtest_multifold(data: dict, agent: dict) -> dict:
+    """
+    N folds deslizantes; fitness agregado = mean(fitness_folds) -
+    MULTIFOLD_LAMBDA * stdev(fitness_folds). Penaliza candidatos inestables
+    entre regímenes de mercado distintos (ver Fase 3, PLAN_DE_MEJORA.md).
+
+    Fallback automático a modo single si el dataset no alcanza para los
+    folds configurados (nunca deja el candidato sin evaluar).
+    """
+    from data.indicators import calc_htf_trend_series
+
+    df_15m        = data["df_15m"]
+    df_1h         = data["df_1h"]
+    params_tec    = agent.get("params_tecnicos") or {}
+    params_smc    = agent.get("params_smc")      or {}
+    params_riesgo = agent.get("params_riesgo")   or {}
+    especie       = str(agent.get("especie", "tendencia"))
+
+    n_total = len(df_15m)
+    bounds = _compute_fold_bounds(n_total)
+    if not bounds:
+        log.warning(
+            "[Backtester] multifold: datos insuficientes (%d velas) para "
+            "%d folds — fallback a modo single.", n_total, MULTIFOLD_N_FOLDS,
+        )
+        return _run_backtest_single(data, agent)
+
+    try:
+        htf_series = calc_htf_trend_series(df_1h)
+    except Exception:
+        htf_series = None
+
+    fold_metrics: list[dict] = []
+    all_trades:   list[dict] = []
+    for _train_start, oos_start, oos_end in bounds:
+        ts_fold = df_15m["timestamp"].iloc[oos_start]
+        htf_trend = _lookup_htf_at(htf_series, ts_fold)
+        trades = _walk_forward_trades(
+            df_15m, oos_start, oos_end, htf_trend,
+            params_tec, params_smc, params_riesgo, especie,
+        )
+        fold_metrics.append(_calc_metrics(trades))
+        all_trades.extend(trades)
+
+    fitnesses = [f["fitness"] for f in fold_metrics]
+    mean_fit  = statistics.fmean(fitnesses)
+    stdev_fit = statistics.pstdev(fitnesses) if len(fitnesses) > 1 else 0.0
+    fitness_agg = mean_fit - MULTIFOLD_LAMBDA * stdev_fit
+
+    n_trades_agg = sum(f["n_trades"] for f in fold_metrics)
+    expectancies = [f["expectancy"] for f in fold_metrics]
+    win_rate_agg = (
+        sum(1 for t in all_trades if t["pnl"] > 0) / len(all_trades)
+        if all_trades else 0.0
+    )
+    max_dd_agg = max((f["max_drawdown"] for f in fold_metrics), default=0.0)
+
+    return {
+        "n_trades":       n_trades_agg,
+        "win_rate":       round(win_rate_agg, 4),
+        "expectancy":     round(statistics.fmean(expectancies), 6) if expectancies else 0.0,
+        "max_drawdown":   round(max_dd_agg, 4),
+        "fitness":        round(fitness_agg, 6),
+        "oos_trades":     all_trades,
+        # Auditoría: fitness de cada fold individual (no lo usa el motor,
+        # útil para tests y diagnóstico de estabilidad entre regímenes).
+        "fold_fitnesses": [round(f, 6) for f in fitnesses],
+    }
+
+
+# ── Punto de entrada público (dispatcher) ───────────────────────────────────
+
+def run_backtest(data: dict, agent: dict) -> dict:
+    """
+    Ejecuta el backtest walk-forward OOS sobre un agente candidato.
+
+    BACKTEST_MODE=single (default): split único TRAIN/VALIDATE — comporta-
+    miento histórico exacto, sin cambios.
+    BACKTEST_MODE=multifold: N folds deslizantes con purge gap y fitness
+    agregado penalizado por varianza (Fase 3, PLAN_DE_MEJORA.md).
+
+    Parameters
+    ----------
+    data  : dict de fetch_backtest_data()
+    agent : dict con params_tecnicos, params_smc, params_riesgo, especie
+
+    Returns
+    -------
+    {
+      "n_trades"    : int,
+      "win_rate"    : float,
+      "expectancy"  : float,   # expectancy neta por trade (OOS)
+      "max_drawdown": float,
+      "fitness"     : float,   # expectancy / (max_drawdown + 1) [multifold: agregado]
+      "oos_trades"  : list,    # detalle de cada trade (todos los folds en multifold)
+    }
+    """
+    if BACKTEST_MODE == "multifold":
+        return _run_backtest_multifold(data, agent)
+    return _run_backtest_single(data, agent)
 
 
 # ── Métricas OOS ─────────────────────────────────────────────────────────────
@@ -333,3 +519,56 @@ def _empty_result() -> dict:
         "n_trades": 0, "win_rate": 0.0, "expectancy": 0.0,
         "max_drawdown": 0.0, "fitness": 0.0, "oos_trades": [],
     }
+
+
+# ── Fase 2 (PLAN_DE_MEJORA.md): gate estadístico bootstrap ──────────────────
+
+def bootstrap_edge_ok(
+    oos_trades: list[dict],
+    iters: int | None = None,
+    ci: float | None = None,
+    min_trades: int | None = None,
+    seed: int | None = None,
+) -> tuple[bool, float | None]:
+    """
+    Bootstrap sobre los P&L de los trades OOS de un candidato: resample con
+    reemplazo `iters` veces, calcula la expectancy de cada resample y toma el
+    límite inferior del intervalo de confianza `ci`.
+
+    Reemplaza el umbral débil `fitness OOS > 0 & n_trades >= 5`: con muestras
+    de 5 trades una expectancy apenas positiva es indistinguible de azar (ver
+    hallazgo 5 de PLAN_DE_MEJORA.md: 2026-06-27_01 pasaba con fitness=0.0105/
+    n=5 pero su IC80 inferior era -0.062).
+
+    Parameters
+    ----------
+    oos_trades : lista de dicts con clave "pnl" (formato de run_backtest()["oos_trades"]).
+    iters       : nº de resamples (default BOOTSTRAP_ITERS = 1000).
+    ci          : nivel de confianza, p.ej. 0.80 (default BOOTSTRAP_CI).
+    min_trades  : mínimo de trades OOS para intentar el bootstrap
+                  (default BOOTSTRAP_MIN_TRADES = 8; con menos, se rechaza
+                  directamente — muestra insuficiente incluso para resamplear).
+    seed        : semilla opcional (tests deterministas); None = aleatorio real.
+
+    Returns
+    -------
+    (pasa, limite_inferior) — pasa=True si limite_inferior > 0.
+    limite_inferior es None si no hay suficientes trades para evaluar.
+    """
+    iters      = BOOTSTRAP_ITERS      if iters      is None else iters
+    ci         = BOOTSTRAP_CI         if ci         is None else ci
+    min_trades = BOOTSTRAP_MIN_TRADES if min_trades is None else min_trades
+
+    pnls = [float(t["pnl"]) for t in oos_trades]
+    n = len(pnls)
+    if n < min_trades:
+        return False, None
+
+    rng = random.Random(seed)
+    exps = sorted(
+        sum(pnls[rng.randrange(n)] for _ in range(n)) / n
+        for _ in range(iters)
+    )
+    lower_idx = int((1 - ci) / 2 * iters)
+    lower = exps[lower_idx]
+    return lower > 0, round(lower, 6)

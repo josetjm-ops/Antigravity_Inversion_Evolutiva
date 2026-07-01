@@ -19,6 +19,7 @@ import math
 import os
 import random
 import statistics
+import time
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 
@@ -173,6 +174,32 @@ TOURNAMENT_MIN_OOS_FITNESS = float(os.getenv("TOURNAMENT_MIN_OOS_FITNESS", "0.0"
 # Trades OOS mínimos para desplegar un hijo del torneo.
 TOURNAMENT_MIN_OOS_TRADES = int(os.getenv("TOURNAMENT_MIN_OOS_TRADES", "5"))
 
+
+def _passes_oos_gate(bt: dict) -> bool:
+    """
+    Fase 2 (PLAN_DE_MEJORA.md): gate único de despliegue de un candidato OOS.
+
+    TOURNAMENT_GATE_MODE=legacy (default): umbral débil histórico
+      (fitness OOS > 0 & n_trades OOS >= TOURNAMENT_MIN_OOS_TRADES).
+    TOURNAMENT_GATE_MODE=bootstrap: exige que el límite inferior del IC
+      (BOOTSTRAP_CI) de la expectancy, estimado por bootstrap sobre los
+      P&L de oos_trades, sea > 0 — distingue edge real de azar en muestras
+      pequeñas (ver bootstrap_edge_ok en evolution/backtester.py).
+
+    Import perezoso de evolution.backtester (mismo patrón que el resto del
+    módulo) para no forzar su carga en callers que no ejecutan backtest.
+    """
+    from evolution.backtester import TOURNAMENT_GATE_MODE, bootstrap_edge_ok
+
+    if TOURNAMENT_GATE_MODE == "bootstrap":
+        passes, _lower = bootstrap_edge_ok(bt.get("oos_trades", []))
+        return passes
+
+    return (
+        bt["fitness"] > TOURNAMENT_MIN_OOS_FITNESS
+        and bt["n_trades"] >= TOURNAMENT_MIN_OOS_TRADES
+    )
+
 # ── Tope de pérdida a la inmunidad por muestra (Fase 3 Sesión 17) ────────────
 # Un agente inmune solo por muestra insuficiente pierde la inmunidad si su
 # roi_total (en %) cae por debajo de este umbral negativo.
@@ -195,6 +222,18 @@ REPOPULATION_MAX_PER_CYCLE = int(os.getenv("REPOPULATION_MAX_PER_CYCLE", "3"))
 # clon forzado del Hall of Fame. Acota el costo de backtests para no colgar el cron.
 REPOPULATION_MAX_ATTEMPTS_PER_SLOT = int(
     os.getenv("REPOPULATION_MAX_ATTEMPTS_PER_SLOT", "8")
+)
+
+# ── Presupuesto de tiempo de repoblación (Fase 3 PLAN_DE_MEJORA.md) ─────────
+# El multi-fold cuesta ~1.68× un backtest single (medido). Este presupuesto
+# SOLO se aplica cuando BACKTEST_MODE=multifold — en modo single (default)
+# no se activa ninguna comprobación de tiempo (comportamiento legacy intacto).
+# Si se agota, los cupos restantes saltan directo a la cascada de degradación
+# (forzado_cruce / forzado_clon_unico) en vez de intentar rondas completas de
+# torneo→HoF — así el ciclo nunca deja un cupo vacante ni agota el timeout de
+# judge_daily.yml (25 min) por exceso de backtests multi-fold.
+REPOPULATION_TIME_BUDGET_SECONDS = int(
+    os.getenv("REPOPULATION_TIME_BUDGET_SECONDS", "900")
 )
 
 
@@ -548,6 +587,10 @@ def breed_agent(
         "params_smc":       smc_child,
         "capital_inicial":  10.0,
         "capital_actual":   10.0,
+        # Fase 1 (PLAN_DE_MEJORA.md): default None; el llamador lo sobreescribe
+        # con la promesa OOS del torneo cuando hay backtest disponible.
+        "fitness_oos_prometido":  None,
+        "n_trades_oos_prometido": None,
     }
 
 
@@ -912,12 +955,14 @@ class EvolutionEngine:
                 id, fecha_nacimiento, generacion,
                 padre_1_id, padre_2_id,
                 params_tecnicos, params_macro, params_riesgo, params_smc,
-                capital_inicial, capital_actual, especie, estado
+                capital_inicial, capital_actual, especie, estado,
+                fitness_oos_prometido, n_trades_oos_prometido
             ) VALUES (
                 %(id)s, %(fecha_nacimiento)s, %(generacion)s,
                 %(padre_1_id)s, %(padre_2_id)s,
                 %(params_tecnicos)s, %(params_macro)s, %(params_riesgo)s, %(params_smc)s,
-                %(capital_inicial)s, %(capital_actual)s, %(especie)s, 'activo'
+                %(capital_inicial)s, %(capital_actual)s, %(especie)s, 'activo',
+                %(fitness_oos_prometido)s, %(n_trades_oos_prometido)s
             )
             """,
             {
@@ -926,6 +971,8 @@ class EvolutionEngine:
                 "params_macro":    json.dumps(agent["params_macro"]),
                 "params_riesgo":   json.dumps(agent["params_riesgo"]),
                 "params_smc":      json.dumps(agent.get("params_smc", _DEFAULT_SMC_PARAMS)),
+                "fitness_oos_prometido":  agent.get("fitness_oos_prometido"),
+                "n_trades_oos_prometido": agent.get("n_trades_oos_prometido"),
             },
         )
         
@@ -1264,6 +1311,12 @@ class EvolutionEngine:
         import logging
         _log = logging.getLogger(__name__)
 
+        # Fase 3 PLAN_DE_MEJORA.md: presupuesto de tiempo, solo activo en
+        # modo multifold (ver constante REPOPULATION_TIME_BUDGET_SECONDS).
+        from evolution.backtester import BACKTEST_MODE as _BT_MODE
+        _repop_t_start = time.monotonic()
+        _time_budget_active = (_BT_MODE == "multifold")
+
         ESPECIES = ("tendencia", "reversion", "ruptura")
 
         count_by_especie: dict[str, int] = {esp: 0 for esp in ESPECIES}
@@ -1291,10 +1344,7 @@ class EvolutionEngine:
         from evolution.backtester import run_backtest, N_CANDIDATE_CHILDREN
 
         def _passes_oos(bt: dict) -> bool:
-            return (
-                bt["fitness"] > TOURNAMENT_MIN_OOS_FITNESS
-                and bt["n_trades"] >= TOURNAMENT_MIN_OOS_TRADES
-            )
+            return _passes_oos_gate(bt)
 
         def _best_from_pool(pool: list[dict], esp_: str, cid: str,
                             species_pool: list[dict]) -> tuple[dict, dict]:
@@ -1370,8 +1420,24 @@ class EvolutionEngine:
                 best_cand: dict | None = None
                 best_cand_bt: dict | None = None
 
+                # ── Presupuesto de tiempo agotado (solo multifold): saltar ──────
+                # directo a la cascada de degradación para este cupo, sin gastar
+                # más backtests en rondas de torneo/HoF.
+                _budget_exhausted = (
+                    _time_budget_active
+                    and (time.monotonic() - _repop_t_start) > REPOPULATION_TIME_BUDGET_SECONDS
+                )
+                if _budget_exhausted:
+                    _log.warning(
+                        "[EvolutionEngine] Repopulación %s (%s): presupuesto de "
+                        "tiempo agotado (%ds) — cupo va directo a degradación.",
+                        child_id, esp, REPOPULATION_TIME_BUDGET_SECONDS,
+                    )
+
                 # ── Reintentos torneo → HoF hasta MAX_ATTEMPTS rondas ──────────
-                for _attempt in range(REPOPULATION_MAX_ATTEMPTS_PER_SLOT):
+                for _attempt in range(
+                    0 if _budget_exhausted else REPOPULATION_MAX_ATTEMPTS_PER_SLOT
+                ):
                     if len(tourn_pool) >= 2:
                         cand, bt = _best_from_pool(tourn_pool, esp, child_id, species_pool)
                         if _passes_oos(bt):
@@ -1463,6 +1529,12 @@ class EvolutionEngine:
                         "cupo queda vacante.", child_id, esp,
                     )
                     continue
+
+                # Fase 1 (PLAN_DE_MEJORA.md): persistir la promesa OOS también
+                # en los agentes recuperados en repoblación (todos los caminos
+                # de este método corren con backtest_data disponible).
+                child["fitness_oos_prometido"]  = round(float(best_bt["fitness"]), 6)
+                child["n_trades_oos_prometido"] = int(best_bt["n_trades"])
 
                 recovered.append(child)
                 slots_rec_log.append({
@@ -1773,11 +1845,8 @@ class EvolutionEngine:
                         best_bt["fitness"], best_bt["expectancy"], best_bt["n_trades"],
                     )
 
-                    # ── Fase 1: umbral de calidad ─────────────────────────────
-                    passes = (
-                        best_bt["fitness"] > TOURNAMENT_MIN_OOS_FITNESS
-                        and best_bt["n_trades"] >= TOURNAMENT_MIN_OOS_TRADES
-                    )
+                    # ── Fase 1 Sesión 17 / Fase 2 PLAN_DE_MEJORA.md: umbral ──
+                    passes = _passes_oos_gate(best_bt)
                     if not passes:
                         _log.warning(
                             "[EvolutionEngine] Slot %s (%s) no superó umbral OOS "
@@ -1820,10 +1889,7 @@ class EvolutionEngine:
                             hof_best, hof_best_bt = max(
                                 hof_candidates, key=lambda x: x[1]["fitness"]
                             )
-                            passes = (
-                                hof_best_bt["fitness"] > TOURNAMENT_MIN_OOS_FITNESS
-                                and hof_best_bt["n_trades"] >= TOURNAMENT_MIN_OOS_TRADES
-                            )
+                            passes = _passes_oos_gate(hof_best_bt)
                             if passes:
                                 child = hof_best
                                 best_bt = hof_best_bt
@@ -1835,6 +1901,10 @@ class EvolutionEngine:
                                 )
 
                     if passes:
+                        # Fase 1 (PLAN_DE_MEJORA.md): persistir la promesa OOS del
+                        # torneo para poder comparar luego contra el fitness real.
+                        child["fitness_oos_prometido"]  = round(float(best_bt["fitness"]), 6)
+                        child["n_trades_oos_prometido"] = int(best_bt["n_trades"])
                         new_agents.append(child)
                     else:
                         razon_vac = (
@@ -1861,6 +1931,9 @@ class EvolutionEngine:
                         sigma_weights=sw, sigma_periods=sp, sigma_risk=sr,
                         especie=child_especie, p1_weight=_pw,
                     )
+                    # Sin backtest disponible: no hay promesa OOS que registrar.
+                    child["fitness_oos_prometido"]  = None
+                    child["n_trades_oos_prometido"] = None
                     new_agents.append(child)
 
             result.new_agents    = new_agents
