@@ -1081,13 +1081,13 @@ def _tab_instructions() -> None:
           🧬 Tres arquetipos decorrelacionados (desde Sesión 16)
         </div>
         <div class="ins-body">
-          Los 10 agentes ya <b>no son copias del mismo sistema</b>. Pertenecen a tres
-          <b>especies estratégicas</b> genuinamente distintas, cada una diseñada para
-          ganar en un régimen de mercado diferente:
+          Los 15 agentes activos <b>no son copias del mismo sistema</b>. Pertenecen a tres
+          <b>especies estratégicas</b> genuinamente distintas, 5 agentes cada una, cada
+          especie diseñada para ganar en un régimen de mercado diferente:
         </div>
         <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:14px;">
           <div class="ins-param-box" style="border-left:3px solid {GOLD};">
-            <div class="ins-param-label">📈 Tendencia (4 agentes)</div>
+            <div class="ins-param-label">📈 Tendencia (5 agentes)</div>
             <div class="ins-param-items">
               Momentum RSI + EMA + MACD<br>
               Filtro HTF activo<br>
@@ -1096,7 +1096,7 @@ def _tab_instructions() -> None:
             </div>
           </div>
           <div class="ins-param-box" style="border-left:3px solid {EMERALD};">
-            <div class="ins-param-label">↔️ Reversión (3 agentes)</div>
+            <div class="ins-param-label">↔️ Reversión (5 agentes)</div>
             <div class="ins-param-items">
               RSI en extremos + OB/FVG<br>
               HTF desactivado<br>
@@ -1105,29 +1105,32 @@ def _tab_instructions() -> None:
             </div>
           </div>
           <div class="ins-param-box" style="border-left:3px solid {AMBER};">
-            <div class="ins-param-label">💥 Ruptura (3 agentes)</div>
+            <div class="ins-param-label">💥 Ruptura (5 agentes)</div>
             <div class="ins-param-items">
               Breakout de estructura N velas<br>
               Confirmado por range_spike<br>
-              Opera en <b style="color:{AMBER};">ambos regímenes</b><br>
-              (busca explosión de volatilidad)
+              Opera en régimen <b style="color:{AMBER};">TENDENCIA</b><br>
+              (bloqueado en RANGO por defecto)
             </div>
           </div>
         </div>
         <div class="ins-body" style="margin-top:12px;">
           <b>Clasificador ADX:</b> cada ciclo se calcula el ADX(14) sobre las velas de 15m.
-          ADX ≥ 25 = <em>TENDENCIA</em> (S1 + S3 activos, S2 bloqueado).
-          ADX &lt; 25 = <em>RANGO</em> (S2 activo, S1 bloqueado). NEUTRAL = todos operan.<br><br>
-          <b>Resultado práctico:</b> en días de mercado lateral (como el 01-jun-2026 con ADX=17.7),
-          los 4 agentes tendencia quedan en HOLD automáticamente y los 3 de reversión operan
-          en la dirección <em>correcta</em> para ese régimen. <s>Nunca más "todos pierden a la vez".</s>
+          ADX ≥ 25 = <em>TENDENCIA</em> (S1 activo, S3 activo, S2 bloqueado).
+          ADX &lt; 25 = <em>RANGO</em> (S2 activo, S1 y S3 bloqueados por defecto). NEUTRAL = todos operan.<br><br>
+          <b>Resultado práctico:</b> en días de mercado lateral (ADX bajo, ej. ~17-20),
+          los 5 agentes tendencia y los 5 de ruptura quedan en HOLD automáticamente y los
+          5 de reversión operan en la dirección <em>correcta</em> para ese régimen.
+          <s>Nunca más "todos pierden a la vez".</s>
         </div>
       </div>
 
       <div class="ins-card ins-card-left-gold">
         <div class="ins-body">
-          Cada agente tiene <b>$10.00 USD de capital virtual</b> y un conjunto único de parámetros
-          que constituyen su "ADN". Se heredan, cruzan y mutan entre generaciones.
+          Cada agente nace con <b>$10.00 USD de capital inicial</b> (referencia de diseño;
+          el capital real actual de cada agente es su cuota del pool compartido, ver más
+          abajo) y un conjunto único de parámetros que constituyen su "ADN".
+          Se heredan, cruzan y mutan entre generaciones.
         </div>
         <div class="ins-param-grid" style="margin-top:14px;">
           <div class="ins-param-box">
@@ -1168,13 +1171,16 @@ def _tab_instructions() -> None:
               Spike de rango (1.2–3.0×)<br>
               Cuarentena macro (30–120 min)<br>
               Pesos FVG / OB (0.05–0.50)<br>
-              ATR factor SL (0.8–3.0)<br>
+              ATR factor SL (0.8–1.8)<br>
               Trailing activation pips (5–40)<br>
               Trailing distance pips (5–25)<br>
               <b>Breakout lookback bars (10–50)</b> S3<br>
               <b>Breakout min pips (3–15)</b> S3<br>
               <b>Peso breakout (0.20–0.70)</b> S3<br>
-              Filtro HTF habilitado (0 / 1)
+              Filtro HTF habilitado (0 / 1)<br>
+              <b>Break-even activation (0.3–1.0R)</b><br>
+              <b>Salida por reversa (0/1, bit-flip)</b><br>
+              <b>Piso ganancia para salida (0.2–1.0R)</b>
             </div>
           </div>
         </div>
@@ -1432,8 +1438,14 @@ def _tab_instructions() -> None:
           <code>fvg_min_pips</code> (2–15), <code>ob_impulse_pips</code> (5–20),
           <code>risk_reward_target</code> (1.5–4.0), <code>macro_quarantine_minutes</code> (30–120),
           <code>risk_pct_per_trade</code> (1–2%), <code>peso_fvg/peso_ob</code> (0.05–0.50),
-          <code>atr_factor</code> (0.8–3.0), <code>trailing_activation_pips</code> (5–40),
+          <code>atr_factor</code> (0.8–1.8, tope bajado en Sesión 22), <code>trailing_activation_pips</code> (5–40),
           <code>trailing_distance_pips</code> (5–25), <code>atr_period</code> (7–21).<br>
+          &nbsp;• Genes de salidas inteligentes (Sesión 22): <code>be_activation_r</code>
+          (0.3–1.0, break-even al ganar ese múltiplo de R), <code>min_profit_for_exit_r</code>
+          (0.2–1.0, piso de ganancia para permitir salida por señal contraria) mutan
+          gaussianamente; <code>exit_on_reversal</code> (0/1) muta por <b>bit-flip</b>
+          (10% de probabilidad) en vez de ruido gaussiano — mantiene el rasgo
+          re-descubrible si se extingue de la población.<br>
           &nbsp;• Genes nuevos (Sesión 15): <code>rsi_zona_muerta</code> (1.0–15.0, técnico),
           <code>peso_sesgo_tendencia</code> (0.20–0.65, macro). El gen <code>htf_filter_enabled</code>
           es entero 0/1 — decisión estratégica, no mutable gaussianamente.
@@ -1482,11 +1494,13 @@ def _tab_instructions() -> None:
               <span style="color:{DIM};">① 10:45 pm — Cierre forzado:</span> todas las posiciones abiertas
               se cierran al precio de mercado del momento.<br>
               <span style="color:{DIM};">② 11:00 pm — Selección natural:</span> el Agente Juez clasifica
-              los 10 agentes por Calmar Ratio (fitness), elimina hasta 5 (cuota dinámica, solo
-              fitness ≤ 0) y crea el mismo número de hijos por mutación de los supervivientes.<br>
+              los 15 agentes por fitness (expectancy neta de costos, ajustada por drawdown y
+              confianza estadística — no ROI ni Calmar Ratio), elimina hasta 9 por cuota dinámica
+              (3 por especie máx., solo fitness ≤ 0) y crea el mismo número de hijos mediante
+              torneo de candidatos + backtest OOS de los supervivientes.<br>
               <span style="color:{DIM};">③ Redistribución de capital:</span> se suma el capital
-              de los 10 agentes activos resultantes y se divide en partes iguales.
-              Todos inician el día siguiente con el mismo capital.
+              de los 15 agentes activos resultantes (incluye cupos recuperados) y se divide en
+              partes iguales. Todos inician el día siguiente con el mismo capital.
               Todo queda registrado en el log de auditoría.<br>
               <span style="color:{DIM};">Los sábados y domingos este ciclo no corre — no hay trading.</span>
             </div>
@@ -1530,18 +1544,20 @@ def _tab_instructions() -> None:
       <div class="ins-card ins-card-left-emerald" style="margin-top:12px;">
         <div style="font-size:10px;color:{EMERALD};letter-spacing:1.5px;
                     text-transform:uppercase;font-weight:700;margin-bottom:10px;">
-          ② El Calmar Ratio (fitness) es un hecho de mercado, no una opinión del agente
+          ② El fitness (expectancy ajustada por riesgo) es un hecho de mercado, no una opinión del agente
         </div>
         <div class="ins-body">
-          La métrica que el Juez usa para clasificar y eliminar es el <b>Calmar Ratio (fitness)</b>,
-          calculado exclusivamente a partir de precios reales — ROI y max drawdown
-          derivados de las operaciones cerradas en la base de datos:<br><br>
+          La métrica que el Juez usa para clasificar y eliminar es el <b>fitness por
+          expectancy neta de costos</b> (desde Sesión 16 — no ROI crudo ni Calmar Ratio),
+          calculada exclusivamente a partir de precios reales — win rate, ganancia/pérdida
+          media y max drawdown derivados de las operaciones cerradas en la base de datos:<br><br>
           &nbsp;• Los precios de entrada y salida provienen de <b>Yahoo Finance</b>
             (fuente externa, no controlada por ningún agente).<br>
-          &nbsp;• El P&L lo calcula el <b>Trade Monitor</b>, no el agente mismo.<br>
+          &nbsp;• El P&L lo calcula el <b>Trade Monitor</b>, no el agente mismo, y ya es
+            neto de fricción (spread + slippage).<br>
           &nbsp;• El cierre de posiciones (SL/TP/EOD) lo ejecuta el Trade Monitor de forma autónoma.<br><br>
           Un agente no puede declarar su propio P&L ni alterar precios de mercado.
-          Su fitness (Calmar Ratio) es un dato objetivo derivado del historial de operaciones cerradas — no de lo que el agente afirma sobre sí mismo.
+          Su fitness es un dato objetivo derivado del historial de operaciones cerradas — no de lo que el agente afirma sobre sí mismo.
         </div>
       </div>
 
@@ -1569,7 +1585,7 @@ def _tab_instructions() -> None:
           ④ Cero comunicación entre agentes inversionistas
         </div>
         <div class="ins-body">
-          Los 10 agentes no se conocen entre sí. Cada uno toma sus decisiones de forma
+          Los 15 agentes no se conocen entre sí. Cada uno toma sus decisiones de forma
           completamente independiente a partir de los mismos datos de mercado públicos.
           No existe ningún canal de comunicación, memoria compartida ni mecanismo de
           coordinación entre agentes. No pueden coaligarse, imitar estrategias ajenas
