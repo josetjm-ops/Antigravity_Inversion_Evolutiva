@@ -1376,8 +1376,23 @@ def _tab_instructions() -> None:
             vacante se generan <b>3 candidatos</b> con genes distintos. Cada uno se
             backtestea sobre los <b>últimos 20 días de historia</b> (el mismo pipeline
             de producción: señales → régimen → SL/TP → fricción, sin LLM).
-            Solo se despliega el candidato con mayor fitness out-of-sample.
-            Los otros 2 se descartan antes de operar en vivo.
+            Solo se despliega el candidato con mayor fitness out-of-sample, si además
+            supera el <b>umbral de calidad</b> (evita desplegar genes que solo tuvieron
+            suerte). Los otros 2 se descartan antes de operar en vivo.<br><br>
+            <b>Umbral de calidad — dos modos (Sesión 27):</b><br>
+            &nbsp;• <code>legacy</code> (modo activo hoy): fitness OOS &gt; 0 y al menos
+            5 trades OOS.<br>
+            &nbsp;• <code>bootstrap</code> (implementado, en espera de datos suficientes
+            antes de activarse): en vez de un umbral fijo, remuestrea 1.000 veces los
+            resultados OOS del candidato y exige que el <b>límite inferior del intervalo
+            de confianza al 80%</b> de su expectancy sea positivo — distingue un edge
+            genuino de una racha de suerte con pocos trades.<br><br>
+            <b>Auditoría del propio proceso de selección (Sesión 27):</b> cada hijo del
+            torneo guarda el <code>fitness_oos_prometido</code> con el que nació. Semanas
+            después, cuando el agente acumula suficientes operaciones reales, ese número
+            se compara contra su fitness real — permite medir si el torneo está
+            seleccionando genes que de verdad funcionan en producción o solo en el
+            backtest.
           </div>
         </div>
         <div class="ins-step">
@@ -1616,6 +1631,13 @@ def _tab_instructions() -> None:
       de cada operación al cerrar — el P&L en la DB es siempre neto de costos.
       El <b style="color:{TEXT};">torneo de candidatos</b> backtestea 3 mutaciones por slot
       sobre los últimos 20 días de historia antes de desplegar al ganador (Sesión 16).
+      El backtester soporta además un <b style="color:{TEXT};">modo multi-fold</b>
+      (Sesión 27, implementado pero aún no activado en producción): 3 tramos históricos
+      deslizantes de 30 días de calentamiento + 10 de validación cada uno, con un día de
+      separación entre ambos, para que un candidato deba demostrar que funciona en varios
+      regímenes de mercado — no solo en el tramo específico de las últimas semanas. Se
+      activará cuando la instrumentación de decaimiento OOS→producción (ver arriba) muestre
+      que vale la pena su costo computacional extra.
       Los workflows (monitor cada 15 min y juez diario lunes–viernes) corren en
       <b style="color:{TEXT};">GitHub Actions</b>, disparados externamente por
       <b style="color:{TEXT};">cron-job.org</b> con precisión ±5 segundos.
