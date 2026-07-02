@@ -414,10 +414,15 @@ def test_classify_eligibility_grace_period():
         {"id": "A_ELIGIBLE_TRADES",
          "operaciones_total": 20, "fecha_nacimiento": date(2026, 5, 13),
          "roi_total": 0},
-        # E. Inmunidad revocada: ops=5<15, age=3bd<7, roi=-10 <= -IMMUNITY_MAX_LOSS_PCT
+        # E. Inmunidad revocada: ops=5<15, age=3bd<7, roi REAL (capital_actual vs
+        # capital_inicial) = -10% <= -IMMUNITY_MAX_LOSS_PCT. Fase 1 (rediseño
+        # 2026-07-02): la revocación ya no lee roi_total (suma aritmética rota
+        # por la redistribución de capital), sino _real_roi_pct sobre capital
+        # real — ver evolution_engine._real_roi_pct.
         {"id": "A_REVOKED",
          "operaciones_total": 5, "fecha_nacimiento": date(2026, 5, 11),
-         "roi_total": -(IMMUNITY_MAX_LOSS_PCT + 2.0)},  # −10.0 %
+         "capital_inicial": 10.0,
+         "capital_actual": 10.0 * (1 - (IMMUNITY_MAX_LOSS_PCT + 2.0) / 100)},  # −10.0 % real
     ]
 
     immune, eligible = engine._classify_eligibility(agents)
