@@ -276,6 +276,8 @@ def test_full_evolution_cycle_on_db():
     _reset_agents()
     _inject_varied_rois()
 
+    poblacion_pre_ciclo = len(_get_active_agents())  # 15 (5 por especie), génesis
+
     from evolution.evolution_engine import EvolutionEngine
     engine = EvolutionEngine(date.today())
     result = engine.run()
@@ -304,15 +306,17 @@ def test_full_evolution_cycle_on_db():
           f"deficit restante: {result.deficit_restante}.")
 
     # Sesión 19 + Fase 2 (rediseño 2026-07-02): la población objetivo ya NO es
-    # fija en 15 — ruptura redujo su cupo a TARGET_AGENTS_RUPTURA (auditoría
-    # 2026-07-01) y REPOBLACION_PERMITE_VACANTES=true deja cupos sin llenar si
-    # ningún candidato supera el gate OOS ese ciclo. La población solo debe
-    # mantenerse entre el piso de especies (3 × _MIN_AGENTS_PER_ESPECIE) y el
-    # nuevo objetivo máximo.
-    from evolution.evolution_engine import (
-        TARGET_AGENTS_PER_ESPECIE, TARGET_AGENTS_RUPTURA, _MIN_AGENTS_PER_ESPECIE,
-    )
-    poblacion_objetivo = 2 * TARGET_AGENTS_PER_ESPECIE + TARGET_AGENTS_RUPTURA
+    # fija en 15. Los objetivos por especie (TARGET_AGENTS_PER_ESPECIE/
+    # TARGET_AGENTS_RUPTURA) solo limitan cuánto puede RELLENAR la
+    # repoblación — una especie que YA tenía más miembros que su objetivo
+    # (ruptura: génesis=5, objetivo=3) no se recorta activamente, solo deja
+    # de rellenarse tras la próxima eliminación. Por eso el techo real de
+    # este ciclo es la población PRE-ciclo (nunca puede crecer más allá de
+    # lo que había), no una fórmula fija por objetivos. El piso sigue siendo
+    # 3 × _MIN_AGENTS_PER_ESPECIE (protección de diversidad en eliminación).
+    # REPOBLACION_PERMITE_VACANTES=true deja cupos sin llenar si ningún
+    # candidato supera el gate OOS ese ciclo.
+    from evolution.evolution_engine import _MIN_AGENTS_PER_ESPECIE
     poblacion_piso = 3 * _MIN_AGENTS_PER_ESPECIE
 
     conn = get_conn()
@@ -320,13 +324,13 @@ def test_full_evolution_cycle_on_db():
     cur.execute("SELECT COUNT(*) FROM agentes WHERE estado = 'activo'")
     n_active = cur.fetchone()[0]
     conn.close()
-    assert poblacion_piso <= n_active <= poblacion_objetivo, (
+    assert poblacion_piso <= n_active <= poblacion_pre_ciclo, (
         f"La población activa final debe estar entre {poblacion_piso} y "
-        f"{poblacion_objetivo} (Fase 2: sin bypass forzado, ruptura reducido), "
-        f"es {n_active}"
+        f"{poblacion_pre_ciclo} (población pre-ciclo — Fase 2: sin bypass "
+        f"forzado, no puede crecer más allá de lo que había), es {n_active}"
     )
     print(f"  [PASS] Población activa final: {n_active} "
-          f"(rango válido {poblacion_piso}-{poblacion_objetivo}).")
+          f"(rango válido {poblacion_piso}-{poblacion_pre_ciclo}).")
 
     # Verificar en DB
     conn = get_conn()
