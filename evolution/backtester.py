@@ -180,6 +180,8 @@ def _walk_forward_trades(
                 trades.append({
                     "accion": accion, "entry": entry, "exit": exit_p,
                     "pnl": pnl, "hit": "SL" if hit_sl else "TP",
+                    "capital_usado": cap_used,
+                    "sl_pips": open_pos.get("sl_pips") or (abs(entry - sl) * 10_000),
                 })
                 open_pos = None
             elif be_r > 0:
@@ -245,6 +247,7 @@ def _walk_forward_trades(
                         trades.append({
                             "accion": accion, "entry": entry, "exit": precio,
                             "pnl": pnl, "hit": "REV",
+                            "capital_usado": cap_used, "sl_pips": r_pips,
                         })
                         open_pos = None
                 continue
@@ -296,6 +299,8 @@ def _walk_forward_trades(
         trades.append({
             "accion": accion, "entry": entry, "exit": precio_final,
             "pnl": round(pnl, 6), "hit": "EOD",
+            "capital_usado": cap_used,
+            "sl_pips": open_pos.get("sl_pips") or (abs(entry - open_pos["stop_loss"]) * 10_000),
         })
 
     return trades
@@ -493,20 +498,50 @@ def run_backtest(data: dict, agent: dict) -> dict:
 
 # ── Métricas OOS ─────────────────────────────────────────────────────────────
 
+def _r_multiple(t: dict) -> float | None:
+    """
+    R = pnl / riesgo_planificado_usd, misma fórmula que _fitness_cte en
+    evolution_engine.py (Fase 1, rediseño 2026-07-02) — "misma fórmula
+    única" entre OOS y producción. riesgo_planificado_usd es la pérdida
+    exacta que el trade hubiera sufrido si tocaba su SL (lo que el sizer de
+    SubAgentRisk usó para dimensionar la posición), así que normaliza cada
+    trade por su propio riesgo, sin importar el capital absoluto del backtest.
+
+    Retorna None si falta algún dato para calcular el riesgo (no debería
+    ocurrir con los 3 puntos de cierre de _walk_forward_trades, que ya
+    adjuntan capital_usado/sl_pips/entry a cada trade).
+    """
+    entry   = t.get("entry") or 0
+    cap     = t.get("capital_usado") or 0
+    sl_pips = t.get("sl_pips") or 0
+    if entry <= 0 or cap <= 0 or sl_pips <= 0:
+        return None
+    riesgo_usd = cap * sl_pips * 0.0001 / entry
+    return t["pnl"] / riesgo_usd if riesgo_usd > 0 else None
+
+
 def _calc_metrics(trades: list[dict]) -> dict:
     if not trades:
         return _empty_result()
 
-    n     = len(trades)
-    wins  = [t["pnl"] for t in trades if t["pnl"] > 0]
-    losses= [t["pnl"] for t in trades if t["pnl"] <= 0]
+    n      = len(trades)
+    n_wins = sum(1 for t in trades if t["pnl"] > 0)
+    win_rate = n_wins / n
 
-    win_rate   = len(wins) / n
-    avg_win    = sum(wins)           / len(wins)   if wins   else 0.0
-    avg_loss   = abs(sum(losses)     / len(losses)) if losses else 0.0
-    expectancy = win_rate * avg_win - (1 - win_rate) * avg_loss
+    # Magnitud en R (win/loss se clasifica por el pnl real, como en producción;
+    # se promedia en R, ignorando trades sin datos de riesgo — igual que el
+    # AVG(...) FILTER de _fitness_cte ignora NULL).
+    wins_r   = [r for t in trades if t["pnl"] > 0  and (r := _r_multiple(t)) is not None]
+    losses_r = [r for t in trades if t["pnl"] <= 0 and (r := _r_multiple(t)) is not None]
 
-    # Max drawdown sobre la curva de capital (base = 10.0 por agente)
+    avg_win_r  = sum(wins_r)   / len(wins_r)   if wins_r   else 0.0
+    avg_loss_r = abs(sum(losses_r) / len(losses_r)) if losses_r else 0.0
+    expectancy = win_rate * avg_win_r - (1 - win_rate) * avg_loss_r
+
+    # Max drawdown sobre la curva de capital en dólares (base = 10.0 por
+    # agente, fija e idéntica para todos los candidatos del backtest — a
+    # diferencia de producción, aquí no hace falta normalizar por capital_r
+    # inicial variable porque todos parten del mismo valor).
     _CAPITAL_BASE = 10.0
     acum   = _CAPITAL_BASE
     peak   = _CAPITAL_BASE

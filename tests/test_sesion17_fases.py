@@ -39,33 +39,43 @@ def test_tournament_threshold_strictly_greater():
 # ─── (b) Inmunidad revocada por drawdown ─────────────────────────────────────
 
 def test_immunity_revoked_by_drawdown():
-    """Fase 3: agente inmune por muestra pierde inmunidad si roi <= -IMMUNITY_MAX_LOSS_PCT."""
+    """
+    Fase 3: agente inmune por muestra pierde inmunidad si su ROI REAL
+    (capital_actual vs capital_inicial) <= -IMMUNITY_MAX_LOSS_PCT.
+
+    Fase 1 del rediseño 2026-07-02: la revocación ya no lee roi_total (suma
+    aritmética rota por la redistribución de capital) sino _real_roi_pct
+    sobre el capital real del agente — ver evolution_engine._real_roi_pct.
+    """
     from evolution.evolution_engine import EvolutionEngine, IMMUNITY_MAX_LOSS_PCT
 
     today = date(2026, 6, 9)   # martes
     engine = EvolutionEngine(today)
 
     agents = [
-        # immune_sample=True (trades=5<15, age=3bd<7bd) PERO roi=-10 <= -8 → revocada
+        # immune_sample=True (trades=5<15, age=3bd<7bd) PERO roi real=-10 <= -8 → revocada
         {
             "id": "A_REVOKED",
             "operaciones_total": 5,
             "fecha_nacimiento": date(2026, 6, 4),
-            "roi_total": -(IMMUNITY_MAX_LOSS_PCT + 2.0),  # -10.0 %
+            "capital_inicial": 10.0,
+            "capital_actual": 10.0 * (1 - (IMMUNITY_MAX_LOSS_PCT + 2.0) / 100),  # -10.0 % real
         },
-        # immune_sample=True, roi=-5 > -8 → sigue inmune (no revocada)
+        # immune_sample=True, roi real=-5 > -8 → sigue inmune (no revocada)
         {
             "id": "A_IMMUNE_OK",
             "operaciones_total": 5,
             "fecha_nacimiento": date(2026, 6, 4),
-            "roi_total": -(IMMUNITY_MAX_LOSS_PCT - 3.0),  # -5.0 %
+            "capital_inicial": 10.0,
+            "capital_actual": 10.0 * (1 - (IMMUNITY_MAX_LOSS_PCT - 3.0) / 100),  # -5.0 % real
         },
         # ops=0, Periodo de Gracia Operativa — inviolable aunque roi sea devastador
         {
             "id": "A_GRACE_INVIOLABLE",
             "operaciones_total": 0,
             "fecha_nacimiento": date(2026, 6, 8),
-            "roi_total": -99.0,
+            "capital_inicial": 10.0,
+            "capital_actual": 0.1,  # -99 % real
         },
     ]
 

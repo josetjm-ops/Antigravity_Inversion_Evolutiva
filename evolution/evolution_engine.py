@@ -237,32 +237,61 @@ REPOPULATION_TIME_BUDGET_SECONDS = int(
 )
 
 
-# ── Fitness: Expectancy ajustada por riesgo (Fase 1) ────────────────────────
+# ── Fitness: Expectancy en R ajustada por riesgo (Fase 1 rediseño 2026-07-02) ─
 #
 # Fórmula:
-#   expectancy_por_trade = win_rate × avg_win − (1−win_rate) × avg_loss
-#   (ya incluye fricción: el P&L en DB es neto de spread+slippage desde Fase 0)
+#   R_trade = pnl / riesgo_planificado_usd
+#   riesgo_planificado_usd = capital_usado × pips_sl × 0.0001 / precio_entrada
+#     (= la pérdida exacta si el SL se hubiera tocado; ya es lo que el sizer
+#     de SubAgentRisk usa para dimensionar la posición, así que "1R" siempre
+#     significa "el riesgo que este trade específico llevaba planeado")
+#   expectancy_R = win_rate × avg_win_R − (1−win_rate) × avg_loss_R
 #
 #   confianza_estadistica = LEAST(1.0, n_trades / MIN_SAMPLE_TRADES)
 #   (escala de 0→1 mientras el agente acumula su muestra mínima)
 #
-#   fitness = (expectancy / (max_drawdown + 0.01))
-#             × confianza_estadistica
-#             − penalidad_overtrading
+#   max_drawdown = pico a valle sobre la curva de capital REAL del agente
+#   (capital_inicial fijo de nacimiento + SUM(pnl) acumulado), no una suma
+#   sin base — antes arrancaba en 0 y no representaba una curva de equity real.
 #
-# Ventajas sobre el Calmar-ROI previo:
-#   - Expectancy es por-trade: no se infla con pocas operaciones ganadoras.
-#   - confianza_estadistica impide que 3 trades de suerte den fitness alto.
-#   - max_drawdown penaliza el riesgo real tomado.
+#   fitness = (expectancy_R / (max_drawdown + 1))
+#             × confianza_estadistica
+#             − penalidad_overtrading_continua
+#
+# Por qué expectancy en R y no en USD (hallazgo F1, auditoría 2026-07-01):
+#   el capital de cada agente cambia con el tiempo (redistribución nocturna),
+#   así que el pnl en dólares de un mismo agente no es comparable entre sí
+#   mismo en distintas fechas, ni entre agentes con capital distinto. R
+#   normaliza cada trade por SU PROPIO riesgo planeado — invariante a la
+#   escala de capital, comparable entre agentes y a través del tiempo.
+#
+# Penalidad de overtrading continua (hallazgo F4): reemplaza el acantilado
+# binario (-0.5 si ops/día>3 y winrate<50%) por una función continua que
+# crece con el exceso de frecuencia y con qué tan mal es el winrate, sin
+# discontinuidad — antes era ~25x la escala típica de la señal.
+#
+# Ventajas sobre el diseño previo (dólares + DD sin base):
+#   - Expectancy en R es escala-invariante: comparable entre agentes y en
+#     el tiempo pese a la redistribución de capital.
+#   - confianza_estadistica impide que pocos trades de suerte den fitness alto.
+#   - max_drawdown ahora refleja la curva de equity real del agente.
 #   - El P&L ya es neto de costos → la evolución selecciona edges genuinos.
 
-def _build_fitness_sql(min_sample: int) -> str:
+def _fitness_cte(min_sample: int) -> str:
+    """
+    CTE compartida que calcula fitness_score por agente activo. Antes vivía
+    duplicada (con fórmula en dólares) en _build_fitness_sql() y en el SQL
+    inline de _get_active_agents_ranked() — una sola fuente de verdad ahora.
+    """
     return f"""
-    WITH capital_series AS (
-        SELECT agente_id, timestamp_entrada,
-               SUM(pnl) OVER (PARTITION BY agente_id ORDER BY timestamp_entrada)
-                   AS capital_acumulado
-        FROM operaciones WHERE estado = 'cerrada'
+    capital_series AS (
+        SELECT o.agente_id, o.timestamp_entrada,
+               a.capital_inicial + SUM(o.pnl) OVER (
+                   PARTITION BY o.agente_id ORDER BY o.timestamp_entrada
+               ) AS capital_acumulado
+        FROM operaciones o
+        JOIN agentes a ON a.id = o.agente_id
+        WHERE o.estado = 'cerrada'
     ),
     drawdown_calc AS (
         SELECT agente_id,
@@ -289,44 +318,53 @@ def _build_fitness_sql(min_sample: int) -> str:
     ),
     ops_stats AS (
         SELECT agente_id,
-               COUNT(*)                                         AS n_trades,
-               COUNT(*) FILTER (WHERE pnl > 0)                 AS n_wins,
-               COALESCE(AVG(pnl)       FILTER (WHERE pnl > 0), 0) AS avg_win,
-               COALESCE(AVG(ABS(pnl))  FILTER (WHERE pnl < 0), 0) AS avg_loss
+               COUNT(*)                        AS n_trades,
+               COUNT(*) FILTER (WHERE pnl > 0) AS n_wins,
+               -- R = pnl / riesgo_planificado_usd; NULLIF evita división por 0
+               -- cuando falta pips_sl/capital_usado/precio_entrada (trades
+               -- previos a esa instrumentación) — AVG ignora los NULL.
+               COALESCE(AVG(
+                   pnl / NULLIF(capital_usado * pips_sl * 0.0001
+                                / NULLIF(precio_entrada, 0), 0)
+               ) FILTER (WHERE pnl > 0), 0)       AS avg_win_r,
+               COALESCE(AVG(ABS(
+                   pnl / NULLIF(capital_usado * pips_sl * 0.0001
+                                / NULLIF(precio_entrada, 0), 0)
+               )) FILTER (WHERE pnl < 0), 0)       AS avg_loss_r
         FROM operaciones
         WHERE estado = 'cerrada'
         GROUP BY agente_id
+    ),
+    fitness AS (
+        SELECT a.id,
+               COALESCE(s.n_trades, 0) AS n_trades_fitness,
+               (
+                   CASE WHEN COALESCE(s.n_trades, 0) > 0 THEN
+                       (s.n_wins::float / s.n_trades)        * s.avg_win_r
+                       - (1.0 - s.n_wins::float / s.n_trades) * s.avg_loss_r
+                   ELSE 0 END
+                   / (COALESCE(d.max_drawdown, 0.01) + 1)
+                   * LEAST(1.0, COALESCE(s.n_trades, 0)::float / {min_sample})
+               )
+               - LEAST(0.3, GREATEST(0, COALESCE(o.avg_ops_dia, 0) - 3) * 0.03
+                       * GREATEST(0, 0.5 - COALESCE(
+                           s.n_wins::float / NULLIF(s.n_trades, 0), 0.5)))
+                 AS fitness_score
+        FROM agentes a
+        LEFT JOIN max_dd      d ON a.id = d.agente_id
+        LEFT JOIN ops_diarias o ON a.id = o.agente_id
+        LEFT JOIN ops_stats   s ON a.id = s.agente_id
+        WHERE a.estado = 'activo'
     )
-    SELECT
-        a.id,
-        a.roi_total,
-        COALESCE(d.max_drawdown,  0) AS max_drawdown,
-        COALESCE(o.avg_ops_dia,   0) AS avg_ops_dia,
-        COALESCE(s.n_trades,      0) AS n_trades,
-        -- Expectancy neta por operacion
-        CASE WHEN COALESCE(s.n_trades, 0) > 0 THEN
-            (s.n_wins::float / s.n_trades)        * s.avg_win
-            - (1.0 - s.n_wins::float / s.n_trades) * s.avg_loss
-        ELSE 0 END                                AS expectancy_per_trade,
-        -- Fitness = expectancy / drawdown * confianza_estadistica - overtrading
-        (
-            CASE WHEN COALESCE(s.n_trades, 0) > 0 THEN
-                (s.n_wins::float / s.n_trades)        * s.avg_win
-                - (1.0 - s.n_wins::float / s.n_trades) * s.avg_loss
-            ELSE 0 END
-            / (COALESCE(d.max_drawdown, 0.01) + 1)
-            * LEAST(1.0, COALESCE(s.n_trades, 0)::float / {min_sample})
-        )
-        - CASE
-            WHEN o.avg_ops_dia > 3
-                 AND (a.operaciones_ganadoras::float
-                      / NULLIF(a.operaciones_total, 0)) < 0.5
-            THEN 0.5 ELSE 0
-          END AS fitness_score
+    """
+
+
+def _build_fitness_sql(min_sample: int) -> str:
+    return f"""
+    WITH {_fitness_cte(min_sample)}
+    SELECT a.id, f.fitness_score
     FROM agentes a
-    LEFT JOIN max_dd      d ON a.id = d.agente_id
-    LEFT JOIN ops_diarias o ON a.id = o.agente_id
-    LEFT JOIN ops_stats   s ON a.id = s.agente_id
+    JOIN fitness f ON a.id = f.id
     WHERE a.estado = 'activo'
 """
 
@@ -357,6 +395,32 @@ def calc_fitness_scores(conn, agent_ids: list[str] | None = None) -> dict[str, f
 
 def _clamp(value: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, value))
+
+
+def _real_roi_pct(agent: dict) -> float:
+    """
+    ROI real del agente en % — (capital_actual - capital_inicial) / capital_inicial.
+
+    Reemplaza el uso de `agentes.roi_total` para decisiones (Fase 1, rediseño
+    2026-07-02): esa columna es una SUMA ARITMÉTICA de pnl_pct de cada trade
+    (investor_agent.py:close_operation) sobre una base de capital que cambia
+    cada noche por la redistribución equitativa — no es un ROI real y puede
+    marcar -354%/+476% mientras el capital de todos los agentes es idéntico.
+    capital_inicial es fijo desde el nacimiento del agente (solo lo actualiza
+    _redistribute_capital una vez, al insertar), así que esta razón sí es un
+    ROI geométrico válido sobre la vida del agente.
+    """
+    # OJO: NO usar `agent.get(k, default) or default` — un capital_inicial/
+    # capital_actual legítimamente en 0.0 es falsy en Python y ese patrón lo
+    # confundiría con "ausente", pisándolo con el default (bug encontrado por
+    # test_real_roi_pct_capital_inicial_cero_no_explota).
+    cap_ini_raw = agent.get("capital_inicial")
+    cap_ini = float(cap_ini_raw) if cap_ini_raw is not None else 10.0
+    cap_act_raw = agent.get("capital_actual")
+    cap_act = float(cap_act_raw) if cap_act_raw is not None else cap_ini
+    if cap_ini <= 0:
+        return 0.0
+    return round((cap_act - cap_ini) / cap_ini * 100, 4)
 
 
 def _mutate_value(value: float, sigma: float, is_int: bool,
@@ -525,7 +589,7 @@ def breed_agent(
     (lectura del .env). El motor evolutivo puede pasar valores boosteados
     cuando detecta baja diversidad genética en el pool de supervivientes.
 
-    p1_weight opcional: por defecto el padre de mejor ROI domina el cruce
+    p1_weight opcional: por defecto el padre de mejor fitness domina el cruce
     (60/40). El cruce forzado entre especies lo sobreescribe para que el
     genoma de la especie correcta (parent1) sea siempre el dominante.
     """
@@ -533,11 +597,17 @@ def breed_agent(
     sp = SIGMA_PERIODS if sigma_periods is None else sigma_periods
     sr = SIGMA_RISK    if sigma_risk    is None else sigma_risk
 
-    # Crossover con sesgo hacia el padre de mejor ROI (salvo override)
+    # Crossover con sesgo hacia el padre de mejor fitness (salvo override).
+    # Antes usaba roi_total, que es una suma aritmética rota por la
+    # redistribución de capital (ver _real_roi_pct) — fitness_score es la
+    # métrica ajustada por riesgo que ya decide selección/eliminación, así
+    # que domina el cruce con el mismo criterio. Los padres "virtuales" del
+    # Hall of Fame también llevan fitness_score (fitness_registro persistido
+    # al momento de su inscripción) desde la migración 013.
     if p1_weight is None:
-        roi1 = float(parent1.get("roi_total", 0))
-        roi2 = float(parent2.get("roi_total", 0))
-        p1_weight = 0.6 if roi1 >= roi2 else 0.4
+        fit1 = float(parent1.get("fitness_score", 0) or 0)
+        fit2 = float(parent2.get("fitness_score", 0) or 0)
+        p1_weight = 0.6 if fit1 >= fit2 else 0.4
 
     tec_child  = crossover(parent1["params_tecnicos"], parent2["params_tecnicos"], p1_weight)
     mac_child  = crossover(parent1["params_macro"],    parent2["params_macro"],    p1_weight)
@@ -649,83 +719,28 @@ class EvolutionEngine:
         Retorna los agentes activos ordenados por fitness descendente.
 
         Criterios de desempate (en orden):
-          1. roi_total DESC        — mejor rendimiento acumulado primero
-          2. fecha_nacimiento DESC — en empate de ROI, el agente más joven sobrevive
+          1. fitness_score DESC    — mejor desempeño ajustado por riesgo primero
+          2. fecha_nacimiento DESC — en empate, el agente más joven sobrevive
           3. id DESC               — mismo día de nacimiento: el creado después (índice mayor) sobrevive
+
+        Incluye capital_inicial (fijo desde el nacimiento del agente): lo usan
+        _classify_eligibility (roi real, no el roi_total aditivo roto) para el
+        tope de pérdida que revoca inmunidad por muestra.
         """
         with get_conn() as conn:
             cur = get_dict_cursor(conn)
-            # CTE con Expectancy ajustada por riesgo — ranking por fitness
+            # CTE compartida con _build_fitness_sql (_fitness_cte) — ranking por fitness
             cur.execute(f"""
-                WITH capital_series AS (
-                    SELECT agente_id, timestamp_entrada,
-                           SUM(pnl) OVER (PARTITION BY agente_id ORDER BY timestamp_entrada)
-                               AS capital_acumulado
-                    FROM operaciones WHERE estado = 'cerrada'
-                ),
-                drawdown_calc AS (
-                    SELECT agente_id,
-                           MAX(capital_acumulado) OVER (
-                               PARTITION BY agente_id
-                               ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
-                           ) AS peak,
-                           capital_acumulado
-                    FROM capital_series
-                ),
-                max_dd AS (
-                    SELECT agente_id,
-                           MAX((peak - capital_acumulado) / NULLIF(peak, 0)) AS max_drawdown
-                    FROM drawdown_calc GROUP BY agente_id
-                ),
-                ops_diarias AS (
-                    SELECT agente_id, AVG(ops_dia) AS avg_ops_dia
-                    FROM (
-                        SELECT agente_id, DATE(timestamp_entrada) AS dia, COUNT(*) AS ops_dia
-                        FROM operaciones
-                        WHERE estado IN ('cerrada', 'abierta')
-                        GROUP BY agente_id, DATE(timestamp_entrada)
-                    ) sub GROUP BY agente_id
-                ),
-                ops_stats AS (
-                    SELECT agente_id,
-                           COUNT(*)                                         AS n_trades,
-                           COUNT(*) FILTER (WHERE pnl > 0)                 AS n_wins,
-                           COALESCE(AVG(pnl)      FILTER (WHERE pnl > 0), 0) AS avg_win,
-                           COALESCE(AVG(ABS(pnl)) FILTER (WHERE pnl < 0), 0) AS avg_loss
-                    FROM operaciones WHERE estado = 'cerrada'
-                    GROUP BY agente_id
-                ),
-                fitness AS (
-                    SELECT a.id,
-                           (
-                               CASE WHEN COALESCE(s.n_trades, 0) > 0 THEN
-                                   (s.n_wins::float / s.n_trades)          * s.avg_win
-                                   - (1.0 - s.n_wins::float / s.n_trades)  * s.avg_loss
-                               ELSE 0 END
-                               / (COALESCE(d.max_drawdown, 0.01) + 1)
-                               * LEAST(1.0, COALESCE(s.n_trades, 0)::float / {MIN_SAMPLE_TRADES})
-                           )
-                           - CASE
-                               WHEN o.avg_ops_dia > 3
-                                    AND (a.operaciones_ganadoras::float
-                                         / NULLIF(a.operaciones_total, 0)) < 0.5
-                               THEN 0.5 ELSE 0
-                             END AS fitness_score
-                    FROM agentes a
-                    LEFT JOIN max_dd      d ON a.id = d.agente_id
-                    LEFT JOIN ops_diarias o ON a.id = o.agente_id
-                    LEFT JOIN ops_stats   s ON a.id = s.agente_id
-                    WHERE a.estado = 'activo'
-                )
-                SELECT a.id, a.generacion, a.fecha_nacimiento, a.capital_actual,
+                WITH {_fitness_cte(MIN_SAMPLE_TRADES)}
+                SELECT a.id, a.generacion, a.fecha_nacimiento,
+                       a.capital_actual, a.capital_inicial,
                        a.roi_total, a.operaciones_total, a.operaciones_ganadoras,
                        a.params_tecnicos, a.params_macro, a.params_riesgo, a.params_smc,
                        COALESCE(a.especie, 'tendencia') AS especie,
                        COALESCE(f.fitness_score, 0) AS fitness_score,
-                       COALESCE(s.n_trades, 0) AS n_trades
+                       COALESCE(f.n_trades_fitness, 0) AS n_trades
                 FROM agentes a
-                LEFT JOIN fitness    f ON a.id = f.id
-                LEFT JOIN ops_stats  s ON a.id = s.agente_id
+                LEFT JOIN fitness f ON a.id = f.id
                 WHERE a.estado = 'activo'
                 ORDER BY COALESCE(f.fitness_score, 0) DESC, a.fecha_nacimiento DESC, a.id DESC
             """)
@@ -790,10 +805,13 @@ class EvolutionEngine:
              tenga pocos trades (especie en régimen adverso, baja frecuencia).
 
           Excepción (Fase 3 Sesión 17 — tope de pérdida):
-             Si B aplica pero roi_total <= -IMMUNITY_MAX_LOSS_PCT (%), la
-             inmunidad se revoca: el agente pasa a eligible con fitness negativo
-             y es candidato a eliminación. Documentado en razon_eliminacion.
+             Si B aplica pero el ROI real (_real_roi_pct, capital_actual vs
+             capital_inicial) <= -IMMUNITY_MAX_LOSS_PCT (%), la inmunidad se
+             revoca: el agente pasa a eligible con fitness negativo y es
+             candidato a eliminación. Documentado en razon_eliminacion.
              No afecta la inmunidad A (Periodo de Gracia).
+             (Antes usaba agentes.roi_total, una suma aritmética de pnl_pct
+             sin relación con la pérdida real del agente — ver _real_roi_pct.)
         """
         immune: list[dict] = []
         eligible: list[dict] = []
@@ -822,8 +840,8 @@ class EvolutionEngine:
             # Fase 3: tope de pérdida revoca inmunidad por muestra (no la de gracia)
             immunity_revoked = False
             if immune_sample and not immune_grace:
-                roi = float(a.get("roi_total", 0) or 0)
-                if roi <= -IMMUNITY_MAX_LOSS_PCT:
+                roi_real = _real_roi_pct(a)
+                if roi_real <= -IMMUNITY_MAX_LOSS_PCT:
                     immune_sample = False
                     immunity_revoked = True
 
@@ -1020,7 +1038,23 @@ class EvolutionEngine:
             )
 
     def _save_hall_of_fame(self, conn, survivors: list[dict]) -> None:
-        """Registra en estrategias_exitosas los supervivientes con muestra suficiente y ROI > umbral."""
+        """
+        Registra en estrategias_exitosas los supervivientes con muestra
+        suficiente y fitness > umbral (Fase 1, rediseño 2026-07-02).
+
+        MIN_ROI_HALL_OF_FAME (env MIN_ROI_FOR_HALL_OF_FAME, default 0.05) ahora
+        se compara contra fitness_score (expectancy en R ajustada por riesgo),
+        no contra roi_total: ese umbral era prácticamente trivial en la escala
+        de % (0.05% de ROI acumulado dejaba pasar casi cualquier agente vivo).
+        En la escala de fitness (~±1 típico) 0.05 exige un edge modesto real.
+
+        roi_que_genero pasa a guardar el ROI real ((capital_actual -
+        capital_inicial)/capital_inicial, ver _real_roi_pct) en vez de la suma
+        aritmética rota de roi_total — queda como campo informativo/auditoría.
+        fitness_registro (migración 013) persiste el fitness_score real: lo
+        usa _get_hof_parents para ponderar y dominar cruces, igual que
+        fitness_score hace con los agentes vivos.
+        """
         cur = conn.cursor()
         for agent in survivors:
             n_trades = int(agent.get("n_trades", 0) or 0)
@@ -1035,7 +1069,8 @@ class EvolutionEngine:
             has_enough_sample = (n_trades >= MIN_SAMPLE_TRADES or age_bd >= MIN_SAMPLE_DAYS)
             if not has_enough_sample:
                 continue  # muestra insuficiente: no inscribir en Hall of Fame aún
-            if float(agent.get("roi_total", 0)) >= MIN_ROI_HALL_OF_FAME:
+            fitness_val = float(agent.get("fitness_score", 0) or 0)
+            if fitness_val >= MIN_ROI_HALL_OF_FAME:
                 ops = int(agent.get("operaciones_total", 0))
                 won = int(agent.get("operaciones_ganadoras", 0))
                 win_rate = round(won / ops, 4) if ops > 0 else None
@@ -1043,9 +1078,10 @@ class EvolutionEngine:
                     """
                     INSERT INTO estrategias_exitosas (
                         agente_origen_id, fecha_registro, roi_que_genero,
-                        win_rate, params_tecnicos, params_macro, params_riesgo
+                        fitness_registro, win_rate,
+                        params_tecnicos, params_macro, params_riesgo
                     )
-                    SELECT %s, %s, %s, %s, %s, %s, %s
+                    SELECT %s, %s, %s, %s, %s, %s, %s, %s
                     WHERE NOT EXISTS (
                         SELECT 1 FROM estrategias_exitosas
                         WHERE agente_origen_id = %s AND fecha_registro = %s
@@ -1053,7 +1089,8 @@ class EvolutionEngine:
                     """,
                     (
                         agent["id"], self.today,
-                        float(agent["roi_total"]),
+                        _real_roi_pct(agent),
+                        fitness_val,
                         win_rate,
                         json.dumps(agent["params_tecnicos"]),
                         json.dumps(agent["params_macro"]),
@@ -1083,12 +1120,23 @@ class EvolutionEngine:
         entradas en estrategias_exitosas, y devolver duplicados rompía la
         selección de segundo padre (IndexError en random.choice — jun 10/11)
         además de inflar el conteo de "padres" disponibles.
+
+        fitness_score (Fase 1, rediseño 2026-07-02): viene de
+        estrategias_exitosas.fitness_registro (migración 013), persistido al
+        inscribir en el Hall of Fame — así breed_agent()/_species_dominant_pair
+        pueden comparar padres reales y padres "virtuales" de HoF con la misma
+        vara. Entradas anteriores a la migración 013 no tienen fitness_registro
+        (NULL); se usa roi_que_genero como aproximación de respaldo SOLO para
+        esos registros legacy (conviven en distinta escala, es un fallback
+        pragmático, no una equivalencia real — documentado, no se resuelve
+        retroactivamente por falta de datos históricos).
         """
         _SELECT_HOF = """
             SELECT * FROM (
                 SELECT DISTINCT ON (e.agente_origen_id)
                        e.agente_origen_id AS id,
                        e.roi_que_genero   AS roi_total,
+                       COALESCE(e.fitness_registro, e.roi_que_genero, 0) AS fitness_score,
                        e.params_tecnicos,
                        e.params_macro,
                        e.params_riesgo,
@@ -1098,9 +1146,10 @@ class EvolutionEngine:
                 FROM estrategias_exitosas e
                 JOIN agentes a ON e.agente_origen_id = a.id
                 {where}
-                ORDER BY e.agente_origen_id, e.roi_que_genero DESC
+                ORDER BY e.agente_origen_id,
+                         COALESCE(e.fitness_registro, e.roi_que_genero, 0) DESC
             ) t
-            ORDER BY t.roi_total DESC
+            ORDER BY t.fitness_score DESC
             LIMIT 10
         """
         with get_conn() as conn:
@@ -1861,7 +1910,7 @@ class EvolutionEngine:
                             _log.warning("[EvolutionEngine] HoF query falló: %s", _he)
                             hof_parents = []
                         if len(hof_parents) >= 2:
-                            hof_scores = [max(float(p.get("roi_total", 0) or 0), 0.0001)
+                            hof_scores = [max(float(p.get("fitness_score", p.get("roi_total", 0)) or 0), 0.0001)
                                           for p in hof_parents]
                             hof_total  = sum(hof_scores)
                             hof_w = [s / hof_total for s in hof_scores]
@@ -1999,10 +2048,10 @@ class EvolutionEngine:
                 razones_extra: dict[str, str] = {}
                 for a in eliminated:
                     if a.get("_immunity_revoked"):
-                        roi = float(a.get("roi_total", 0) or 0)
+                        roi_real = _real_roi_pct(a)
                         razones_extra[a["id"]] = (
                             f"Inmunidad revocada por drawdown "
-                            f"(roi={roi:.1f}% <= -{IMMUNITY_MAX_LOSS_PCT:.1f}%). "
+                            f"(roi={roi_real:.1f}% <= -{IMMUNITY_MAX_LOSS_PCT:.1f}%). "
                             + razon_elim_base
                         )
                 self._eliminate_agents(conn, eliminated, razon_elim_base, razones_extra)
