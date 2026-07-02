@@ -118,11 +118,19 @@ def test_repopulation_skips_without_backtest():
 # ─── (3) Sin tope: se llenan TODOS los cupos hasta la población objetivo ──────
 
 def test_repopulation_fills_all_deficits_no_cap():
-    """Sesión 19: sin tope por ciclo, se llenan los 15 cupos (5 por especie)."""
-    from evolution.evolution_engine import EvolutionEngine
+    """
+    Sesión 19: sin tope por ciclo, se llenan todos los cupos objetivo.
+
+    Fase 2 (rediseño 2026-07-02): el total ya no es 15 (5 por especie) — el
+    objetivo de "ruptura" se redujo a TARGET_AGENTS_RUPTURA=3 (auditoría
+    2026-07-01: 24.8% WR, 68% de la pérdida total), así que el total esperado
+    es 5 (tendencia) + 5 (reversion) + 3 (ruptura) = 13.
+    """
+    from evolution.evolution_engine import EvolutionEngine, TARGET_AGENTS_PER_ESPECIE, TARGET_AGENTS_RUPTURA
 
     engine = EvolutionEngine(date(2026, 6, 9))
-    # Déficit máximo: 0 agentes en cada especie → 5+5+5=15 slots vacantes
+    # Déficit máximo: 0 agentes en cada especie → total = objetivo por especie
+    total_esperado = 2 * TARGET_AGENTS_PER_ESPECIE + TARGET_AGENTS_RUPTURA
     current: list[dict] = []
     parents = [_agent(f"X_{i}", "tendencia") for i in range(3)]
 
@@ -144,10 +152,10 @@ def test_repopulation_fills_all_deficits_no_cap():
             sw=0.05, sp=0.08, sr=0.10,
         )
 
-    assert len(recovered) == 15, (
-        f"Sin tope debe llenar los 15 cupos, obtuvo {len(recovered)}"
+    assert len(recovered) == total_esperado, (
+        f"Sin tope debe llenar los {total_esperado} cupos, obtuvo {len(recovered)}"
     )
-    assert len(slots_rec_log) == 15
+    assert len(slots_rec_log) == total_esperado
     assert deficit_restante == {}
 
 
@@ -231,12 +239,17 @@ def test_repopulation_hof_fallback():
 
 # ─── (5) Nadie pasa el umbral → entra el MEJOR CANDIDATO de cruce ─────────────
 
-def test_repopulation_best_candidate_when_no_one_passes():
-    """Sesión 21: si tras todas las rondas nadie pasa el umbral OOS, se
-    despliega el mejor hijo de CRUCE visto (origen='mejor_candidato_oos'),
-    nunca un clon. Los padres del hijo deben ser distintos."""
+def test_repopulation_best_candidate_when_no_one_passes(monkeypatch):
+    """Sesión 21 (kill-switch REPOBLACION_PERMITE_VACANTES=False, Fase 2): si
+    tras todas las rondas nadie pasa el umbral OOS, se despliega el mejor
+    hijo de CRUCE visto (origen='mejor_candidato_oos'), nunca un clon. Los
+    padres del hijo deben ser distintos. Con el default de Fase 2 (True) el
+    mismo escenario deja el cupo vacante — ver
+    test_repopulation_vacante_por_default_sin_bypass en test_fase2_presion_selectiva.py."""
+    from evolution import evolution_engine as ee
     from evolution.evolution_engine import EvolutionEngine
 
+    monkeypatch.setattr(ee, "REPOBLACION_PERMITE_VACANTES", False)
     engine = EvolutionEngine(date(2026, 6, 9))
     # Solo falta 1 tendencia; las otras especies están completas.
     current = (
@@ -284,12 +297,15 @@ def test_repopulation_best_candidate_when_no_one_passes():
 
 # ─── (6) Último recurso: cruce forzado de los 2 mejores genomas distintos ─────
 
-def test_repopulation_forced_cruce_two_distinct_genomes():
-    """Sesión 21: si ningún pool tiene 2 padres para torneo, se cruzan los
-    dos mejores genomas distintos disponibles (origen='forzado_cruce') —
-    jamás el mismo agente como padre y madre."""
+def test_repopulation_forced_cruce_two_distinct_genomes(monkeypatch):
+    """Sesión 21 (kill-switch REPOBLACION_PERMITE_VACANTES=False, Fase 2): si
+    ningún pool tiene 2 padres para torneo, se cruzan los dos mejores genomas
+    distintos disponibles (origen='forzado_cruce') — jamás el mismo agente
+    como padre y madre."""
+    from evolution import evolution_engine as ee
     from evolution.evolution_engine import EvolutionEngine
 
+    monkeypatch.setattr(ee, "REPOBLACION_PERMITE_VACANTES", False)
     engine = EvolutionEngine(date(2026, 6, 9))
     # Población vacía en tendencia, pool de padres con UN solo agente.
     current = (
@@ -370,11 +386,14 @@ def test_repopulation_eliminated_never_sole_genome():
 
 # ─── (8) Auto-clon SOLO cuando existe un único genoma activo ──────────────────
 
-def test_repopulation_self_clone_only_with_single_active_genome():
-    """Sesión 21: con un solo genoma ACTIVO en todo el sistema, el auto-clon
-    es inevitable y se marca origen='forzado_clon_unico'."""
+def test_repopulation_self_clone_only_with_single_active_genome(monkeypatch):
+    """Sesión 21 (kill-switch REPOBLACION_PERMITE_VACANTES=False, Fase 2): con
+    un solo genoma ACTIVO en todo el sistema, el auto-clon es inevitable y se
+    marca origen='forzado_clon_unico'."""
+    from evolution import evolution_engine as ee
     from evolution.evolution_engine import EvolutionEngine
 
+    monkeypatch.setattr(ee, "REPOBLACION_PERMITE_VACANTES", False)
     engine = EvolutionEngine(date(2026, 6, 9))
     current = (
         [_agent(f"T_{i}", "tendencia")  for i in range(4)]  # déficit de 1
@@ -410,11 +429,14 @@ def test_repopulation_self_clone_only_with_single_active_genome():
 
 # ─── (9) Coherencia de especie en el cruce forzado ────────────────────────────
 
-def test_repopulation_forced_cruce_prefers_species_parent():
-    """Sesión 21: en el cruce forzado, el padre dominante (p1) debe ser el
-    de la especie del cupo aunque otro genoma global tenga mejor puntuación."""
+def test_repopulation_forced_cruce_prefers_species_parent(monkeypatch):
+    """Sesión 21 (kill-switch REPOBLACION_PERMITE_VACANTES=False, Fase 2): en
+    el cruce forzado, el padre dominante (p1) debe ser el de la especie del
+    cupo aunque otro genoma global tenga mejor puntuación."""
+    from evolution import evolution_engine as ee
     from evolution.evolution_engine import EvolutionEngine
 
+    monkeypatch.setattr(ee, "REPOBLACION_PERMITE_VACANTES", False)
     engine = EvolutionEngine(date(2026, 6, 9))
     current = (
         [_agent(f"T_{i}", "tendencia")  for i in range(5)]

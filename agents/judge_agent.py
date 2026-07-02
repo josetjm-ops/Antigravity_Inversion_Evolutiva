@@ -202,7 +202,8 @@ class JudgeAgent(BaseAgent):
                     f"{len(result.new_agents)} nuevos agentes. "
                     f"Pool redistribuido: ${result.capital_pool_total:.4f} / "
                     f"{len(result.survivors) + len(result.new_agents)} agentes "
-                    f"= ${result.capital_por_agente:.4f} c/u."
+                    f"(cuota base ${result.capital_por_agente:.4f}, ponderada por "
+                    f"fitness — Fase 2: ya no es reparto equitativo)."
                 )
                 if result.slots_vacantes:
                     descripcion += (

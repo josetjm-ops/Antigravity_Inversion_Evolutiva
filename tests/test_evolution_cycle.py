@@ -283,7 +283,18 @@ def test_full_evolution_cycle_on_db():
     assert not result.errors, f"Errores en el ciclo: {result.errors}"
     assert len(result.survivors)  > 0, "No hubo supervivientes"
     assert len(result.eliminated) > 0, "No se eliminó ningún agente"
-    assert len(result.new_agents) > 0, "No se crearon nuevos agentes"
+    # Fase 2 (rediseño 2026-07-02): con REPOBLACION_PERMITE_VACANTES=true, 0
+    # nuevos agentes es un resultado LEGÍTIMO si ningún candidato de cruce
+    # superó el umbral OOS con datos reales de mercado ese día — ya no se
+    # fuerza un genoma sin evidencia de edge. Esta prueba usa Yahoo real, así
+    # que el resultado depende del mercado del momento; solo se exige que la
+    # ausencia de nuevos quede EXPLICADA por vacantes/déficit, no sea un
+    # silencio inexplicado (que sí sería indicio de un bug).
+    if not result.new_agents:
+        assert result.slots_vacantes or result.deficit_restante, (
+            "0 nuevos agentes sin slots_vacantes ni deficit_restante que lo "
+            "explique — esto sí sería un bug, no una vacante legítima."
+        )
 
     print(f"  [PASS] Ciclo evolutivo: "
           f"{len(result.survivors)} supervivientes, "
@@ -292,15 +303,30 @@ def test_full_evolution_cycle_on_db():
           f"{len(result.slots_vacantes)} slots vacantes, "
           f"deficit restante: {result.deficit_restante}.")
 
-    # Garantía Sesión 19: población activa final = 15 (5 por especie)
+    # Sesión 19 + Fase 2 (rediseño 2026-07-02): la población objetivo ya NO es
+    # fija en 15 — ruptura redujo su cupo a TARGET_AGENTS_RUPTURA (auditoría
+    # 2026-07-01) y REPOBLACION_PERMITE_VACANTES=true deja cupos sin llenar si
+    # ningún candidato supera el gate OOS ese ciclo. La población solo debe
+    # mantenerse entre el piso de especies (3 × _MIN_AGENTS_PER_ESPECIE) y el
+    # nuevo objetivo máximo.
+    from evolution.evolution_engine import (
+        TARGET_AGENTS_PER_ESPECIE, TARGET_AGENTS_RUPTURA, _MIN_AGENTS_PER_ESPECIE,
+    )
+    poblacion_objetivo = 2 * TARGET_AGENTS_PER_ESPECIE + TARGET_AGENTS_RUPTURA
+    poblacion_piso = 3 * _MIN_AGENTS_PER_ESPECIE
+
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("SELECT COUNT(*) FROM agentes WHERE estado = 'activo'")
     n_active = cur.fetchone()[0]
     conn.close()
-    assert n_active == 15, \
-        f"La población activa final debe ser 15, es {n_active}"
-    print(f"  [PASS] Población activa final: {n_active}/15.")
+    assert poblacion_piso <= n_active <= poblacion_objetivo, (
+        f"La población activa final debe estar entre {poblacion_piso} y "
+        f"{poblacion_objetivo} (Fase 2: sin bypass forzado, ruptura reducido), "
+        f"es {n_active}"
+    )
+    print(f"  [PASS] Población activa final: {n_active} "
+          f"(rango válido {poblacion_piso}-{poblacion_objetivo}).")
 
     # Verificar en DB
     conn = get_conn()
