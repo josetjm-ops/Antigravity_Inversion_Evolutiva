@@ -75,6 +75,27 @@ _FRICTION_PIPS = float(os.getenv("TRADE_FRICTION_PIPS", "1.4"))
 # En NEUTRAL sigue operando (régimen indefinido / sin datos de ADX).
 _RUPTURA_SOLO_TENDENCIA = os.getenv("RUPTURA_SOLO_TENDENCIA", "true").lower() != "false"
 
+# Sesión de trading como gen (Fase 3, rediseño 2026-07-02): ventanas en UTC
+# por sesión — "cualquiera" (sin restricción adicional) es el default de
+# nacimiento; "londres"/"ny"/"overlap" acotan la entrada a la sesión de mayor
+# liquidez de EUR/USD. Mismas ventanas que evolution/backtester.py (paridad
+# vivo↔OOS, ver Fase 0).
+_SESSION_WINDOWS_UTC = {
+    "londres": (7, 16),
+    "ny":      (12, 21),
+    "overlap": (12, 16),
+}
+
+
+def _within_session(sesion: str, hour_utc: int) -> bool:
+    """True si hour_utc cae dentro de la ventana de la sesión del gen. Un
+    valor no reconocido (incl. 'cualquiera') no restringe."""
+    window = _SESSION_WINDOWS_UTC.get(sesion)
+    if window is None:
+        return True
+    start, end = window
+    return start <= hour_utc < end
+
 
 def _parse_hhmm(value: str, fallback: str) -> dtime:
     """Parsea un string 'HH:MM' a datetime.time. Si falla, usa el fallback."""
@@ -261,6 +282,24 @@ def _verify_position_intrabar(op: dict, fallback_price: float | None) -> dict:
             log.debug("[TradeMonitor] Op %d sin velas y sin snapshot — skip.", op_id)
             return {"closed": False, "candles_checked": 0, "fallback": True}
 
+        # Salida parcial (Fase 3) con el snapshot único — sin OHLC no se puede
+        # saber si se tocó el nivel intra-vela, solo si el precio actual ya
+        # lo superó (aproximación consistente con el resto del fallback).
+        partial_r = float(op.get("partial_tp_r", 0) or 0)
+        if not op.get("parcial_ejecutada") and partial_r > 0:
+            r_pips = op.get("pips_sl") or (abs(op["precio_entrada"] - op["stop_loss"]) * 10_000)
+            profit_pips_partial = (
+                (fallback_price - op["precio_entrada"]) * 10_000 if accion == "BUY"
+                else (op["precio_entrada"] - fallback_price) * 10_000
+            )
+            if r_pips > 0 and profit_pips_partial >= partial_r * r_pips:
+                dist_precio = partial_r * r_pips * 0.0001
+                precio_parcial = (
+                    round(op["precio_entrada"] + dist_precio, 5) if accion == "BUY"
+                    else round(op["precio_entrada"] - dist_precio, 5)
+                )
+                _partial_close_op(op, precio_parcial, ts_salida=None)
+
         # Aplicar trailing una vez con el snapshot
         nuevo_sl, nuevo_extremo = _apply_trailing_stop(op, fallback_price)
         _persist_trailing(op, nuevo_sl, nuevo_extremo, since_ts=None)
@@ -317,6 +356,26 @@ def _verify_position_intrabar(op: dict, fallback_price: float | None) -> dict:
                 "candles_checked": candles.index(candle) + 1,
                 "fallback": False,
             }
+
+        # (a2) Sin hit de SL/TP: salida parcial (Fase 3) si aún no se ejecutó
+        # y el gen partial_tp_r > 0. Ejecuta al precio exacto del nivel (misma
+        # convención que SL/TP), no al close de la vela — evita "pagar de más"
+        # en una mecha que toca el nivel y retrocede en la misma vela.
+        partial_r = float(op.get("partial_tp_r", 0) or 0)
+        if not op.get("parcial_ejecutada") and partial_r > 0:
+            r_pips = op.get("pips_sl") or (abs(op["precio_entrada"] - op["stop_loss"]) * 10_000)
+            favorable_partial = float(candle["high"]) if accion == "BUY" else float(candle["low"])
+            profit_pips_partial = (
+                (favorable_partial - op["precio_entrada"]) * 10_000 if accion == "BUY"
+                else (op["precio_entrada"] - favorable_partial) * 10_000
+            )
+            if r_pips > 0 and profit_pips_partial >= partial_r * r_pips:
+                dist_precio = partial_r * r_pips * 0.0001
+                precio_parcial = (
+                    round(op["precio_entrada"] + dist_precio, 5) if accion == "BUY"
+                    else round(op["precio_entrada"] - dist_precio, 5)
+                )
+                _partial_close_op(op, precio_parcial, ts_salida=last_candle_ts)
 
         # (b) Sin hit en esta vela → aplicar trailing con el extremo favorable
         favorable_extreme = float(candle["low"]) if accion == "SELL" else float(candle["high"])
@@ -395,6 +454,42 @@ def _close_op(op: dict, precio_salida: float, ts_salida, resultado: str) -> None
         "[TradeMonitor] Op %d %s → %s: salida=%.5f pnl=%.4f capital=%.4f",
         op["id"], op["accion"], resultado,
         precio_salida, result.get("pnl", 0), result.get("nuevo_capital", 0),
+    )
+
+
+def _partial_close_op(op: dict, precio_salida: float, ts_salida) -> None:
+    """
+    Ejecuta la salida parcial (Fase 3, rediseño 2026-07-02) reusando
+    InvestorAgent.partial_close_operation. Actualiza `op` in-memory
+    (capital_usado reducido, parcial_ejecutada=True) para que el resto del
+    ciclo (BE/trailing/cierre final) opere sobre el runner correcto.
+    """
+    from agents.investor_agent import InvestorAgent
+    from db.connection import get_conn, get_dict_cursor
+
+    with get_conn() as conn:
+        cur = get_dict_cursor(conn)
+        cur.execute(
+            "SELECT capital_actual FROM agentes WHERE id = %s",
+            (op["agente_id"],),
+        )
+        row = cur.fetchone()
+        capital_actual = float(row["capital_actual"]) if row else 10.0
+
+    agent = InvestorAgent(op["agente_id"], {})
+    result = agent.partial_close_operation(
+        op_id=op["id"],
+        precio_salida=precio_salida,
+        capital_disponible=capital_actual,
+        timestamp_salida=ts_salida,
+    )
+    if "error" not in result:
+        op["capital_usado"] = result["capital_restante"]
+        op["parcial_ejecutada"] = True
+    log.info(
+        "[TradeMonitor] Op %d %s PARCIAL → salida=%.5f pnl=%.4f runner=%.4f",
+        op["id"], op["accion"], precio_salida,
+        result.get("pnl", 0), result.get("capital_restante", 0),
     )
 
 
@@ -485,7 +580,9 @@ def sync_once() -> dict:
                     o.precio_entrada)::float                            AS precio_extremo_favorable,
                 (o.decision_riesgo->>'trailing_activation_pips')::float AS trailing_activation_pips,
                 (o.decision_riesgo->>'trailing_distance_pips')::float   AS trailing_distance_pips,
-                COALESCE((a.params_smc->>'be_activation_r')::float, 0)  AS be_activation_r
+                COALESCE((a.params_smc->>'be_activation_r')::float, 0)  AS be_activation_r,
+                COALESCE((a.params_smc->>'partial_tp_r')::float, 0)     AS partial_tp_r,
+                o.parcial_ejecutada
             FROM operaciones o
             JOIN agentes a ON a.id = o.agente_id
             WHERE o.estado = 'abierta'
@@ -785,6 +882,17 @@ def _evaluate_new_positions() -> dict:
                 log.info(
                     "[TradeMonitor] %s — QUARANTINE (%dmin) por '%s' — HOLD forzado.",
                     agent_id, quarantine_min, evento_q,
+                )
+                evaluated += 1
+                continue
+
+            # Sesión de trading — gen propio del agente (Fase 3, 2026-07-02)
+            sesion_gen = str(smc_params.get("sesion_trading", "cualquiera"))
+            hour_utc_now = datetime.now(timezone.utc).hour
+            if not _within_session(sesion_gen, hour_utc_now):
+                log.info(
+                    "[TradeMonitor] %s — fuera de sesión '%s' (hora UTC=%d). HOLD.",
+                    agent_id, sesion_gen, hour_utc_now,
                 )
                 evaluated += 1
                 continue

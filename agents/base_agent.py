@@ -19,6 +19,19 @@ _client = OpenAI(
 
 _MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
 
+# ── LLM fuera del camino de ejecución (Fase 3, rediseño 2026-07-02) ──────────
+# Antes SubAgentTechnical/SubAgentRisk podían invocar al LLM en producción
+# (banda de confianza ambigua / toda decisión BUY-SELL), pero el backtester
+# SIEMPRE corre con reason() stubeado a HOLD determinista (ver
+# evolution/backtester.py:_walk_forward_trades). Esa divergencia significa
+# que el fitness OOS mide una política distinta a la desplegada, y además el
+# LLM es no-determinista, no-backtesteable y con costo/latencia recurrente.
+# Con este flag en False (default), SubAgentTechnical/SubAgentRisk usan
+# SIEMPRE su heurística determinista — igual que el backtester. El Agente
+# Juez (razonamiento narrativo post-hoc, no decide trades) NO usa este flag:
+# sigue llamando a DeepSeek siempre, vía BaseAgent.reason() directamente.
+LLM_EXECUTION_ENABLED = os.getenv("LLM_EXECUTION_ENABLED", "false").lower() == "true"
+
 
 class BaseAgent:
     """

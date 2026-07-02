@@ -68,6 +68,11 @@ jobs:
       # La ventana cruza la medianoche UTC; _within_trading_hours() lo maneja.
       TRADING_START_TIME_UTC:   "06:30"
       TRADING_CUTOFF_TIME_UTC:  "04:00"
+      # Fase 3 (rediseño 2026-07-02): LLM fuera del camino de ejecución — el
+      # backtester siempre corre determinista (reason() stubeado a HOLD), así
+      # que dejar el LLM activo en producción medía una política distinta a
+      # la evaluada en el torneo OOS. "true" restaura el comportamiento legacy.
+      LLM_EXECUTION_ENABLED:    "false"
       LOG_LEVEL:                "INFO"
       ENVIRONMENT:              "production"
 

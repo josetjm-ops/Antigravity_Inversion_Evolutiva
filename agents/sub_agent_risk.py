@@ -307,7 +307,8 @@ class SubAgentRisk(BaseAgent):
             f"TP={take_profit} (R:R {rr:.1f}x)"
         )
 
-        if accion_final != "HOLD":
+        from agents.base_agent import LLM_EXECUTION_ENABLED
+        if LLM_EXECUTION_ENABLED and accion_final != "HOLD":
             prompt = (
                 f"SEÑAL TÉCNICA: {rec_tec} (confianza={conf_tec:.2f})\n"
                 f"RSI={ind.get('rsi','N/A')}, EMA_cross={ind.get('ema_cross_alcista','N/A')}, "

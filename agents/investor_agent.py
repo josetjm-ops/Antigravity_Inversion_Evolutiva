@@ -326,6 +326,147 @@ class InvestorAgent:
             log.error("[InvestorAgent] Error persistiendo operación: %s", exc)
             return None
 
+    # ── Salida parcial + runner (Fase 3, rediseño 2026-07-02) ────────────────
+
+    def partial_close_operation(
+        self,
+        op_id: int,
+        precio_salida: float,
+        capital_disponible: float,
+        fraccion: float = 0.5,
+        timestamp_salida: datetime | None = None,
+    ) -> dict[str, Any]:
+        """
+        Cierra una FRACCIÓN de una posición abierta al alcanzar partial_tp_r
+        × R, dejando correr el resto (runner) hacia el TP/trailing normal.
+
+        Ataca la firma "avg_win≈avg_loss pese a R:R objetivo 2.0" de la
+        auditoría 2026-07-01: el sistema cortaba ganadores antes de que
+        corrieran. Al reservar la ganancia parcial, el runner puede
+        alcanzar 2-3R sin que el trader pierda lo ya ganado si el precio
+        retrocede.
+
+        Inserta una NUEVA fila 'cerrada' representando la porción vendida
+        (su propio trade para el cálculo de expectancy en R de Fase 1: un
+        cierre parcial es una observación R válida por derecho propio, igual
+        que en un diario de trading profesional de scale-out). La posición
+        original queda abierta con capital_usado reducido (el runner) y
+        parcial_ejecutada=true para no volver a dispararse (migración 014).
+
+        Llamado por TradeMonitor cuando el profit intra-vela alcanza
+        partial_tp_r × R (gen propio del agente, ver params_smc.partial_tp_r).
+        """
+        ts_salida = timestamp_salida or datetime.now(timezone.utc)
+        with get_conn() as conn:
+            cur = get_dict_cursor(conn)
+            cur.execute(
+                """
+                SELECT precio_entrada, capital_usado, accion, pips_sl,
+                       timestamp_entrada, senal_tecnico, senal_macro, decision_riesgo
+                FROM operaciones WHERE id = %s
+                """,
+                (op_id,),
+            )
+            row = cur.fetchone()
+
+        if not row or row["precio_entrada"] is None:
+            return {"error": f"Operación {op_id} no encontrada o sin precio_entrada"}
+
+        precio_entrada = float(row["precio_entrada"])
+        capital_usado  = float(row["capital_usado"])
+        accion         = row["accion"]
+        capital_parcial = round(capital_usado * fraccion, 4)
+        capital_restante = round(capital_usado - capital_parcial, 4)
+
+        if accion == "BUY":
+            pnl = round((precio_salida - precio_entrada) / precio_entrada * capital_parcial, 4)
+        else:
+            pnl = round((precio_entrada - precio_salida) / precio_entrada * capital_parcial, 4)
+        friccion = round(_FRICTION_PIPS * 0.0001 / precio_entrada * capital_parcial, 4)
+        pnl = round(pnl - friccion, 4)
+
+        pnl_pct = round(pnl / capital_disponible * 100, 4) if capital_disponible > 0 else 0.0
+        nuevo_capital = round(capital_disponible + pnl, 4)
+
+        with get_conn() as conn:
+            cur = conn.cursor()
+            # Fila nueva: la porción vendida, cerrada — mismo pips_sl/precio_entrada
+            # que el original (el riesgo planificado por unidad no cambió).
+            cur.execute(
+                """
+                INSERT INTO operaciones (
+                    agente_id, timestamp_entrada, par, accion,
+                    precio_entrada, capital_usado, pips_sl,
+                    senal_tecnico, senal_macro, decision_riesgo, estado,
+                    timestamp_salida, precio_salida, pnl, pnl_porcentaje
+                ) VALUES (
+                    %s, %s, 'EUR/USD', %s,
+                    %s, %s, %s, %s, %s, %s, 'cerrada',
+                    %s, %s, %s, %s
+                )
+                """,
+                (
+                    self.agent_id, row["timestamp_entrada"], accion,
+                    precio_entrada, capital_parcial, row["pips_sl"],
+                    json.dumps(row["senal_tecnico"]) if row["senal_tecnico"] else None,
+                    json.dumps(row["senal_macro"]) if row["senal_macro"] else None,
+                    json.dumps(row["decision_riesgo"]) if row["decision_riesgo"] else None,
+                    ts_salida, precio_salida, pnl, pnl_pct,
+                ),
+            )
+            # Posición original: reduce capital_usado al runner, marca parcial_ejecutada.
+            cur.execute(
+                """
+                UPDATE operaciones SET
+                    capital_usado          = %s,
+                    capital_usado_original = COALESCE(capital_usado_original, %s),
+                    parcial_ejecutada      = TRUE
+                WHERE id = %s
+                """,
+                (capital_restante, capital_usado, op_id),
+            )
+            cur.execute(
+                """
+                UPDATE agentes SET
+                    capital_actual        = %s,
+                    roi_total             = roi_total + %s,
+                    operaciones_ganadoras = operaciones_ganadoras
+                                           + CASE WHEN %s > 0 THEN 1 ELSE 0 END
+                WHERE id = %s
+                """,
+                (nuevo_capital, pnl_pct, pnl, self.agent_id),
+            )
+
+        try:
+            with get_conn() as conn:
+                cur = get_dict_cursor(conn)
+                cur.execute(
+                    "SELECT roi_total, operaciones_total, operaciones_ganadoras FROM agentes WHERE id = %s",
+                    (self.agent_id,),
+                )
+                ag = cur.fetchone()
+            if ag:
+                SheetsLogger().update_agent_live(
+                    agent_id=self.agent_id,
+                    capital=nuevo_capital,
+                    roi=float(ag["roi_total"]),
+                    ops=int(ag["operaciones_total"]),
+                    ops_ganadoras=int(ag["operaciones_ganadoras"]),
+                )
+        except Exception as e:
+            log.error("[InvestorAgent] Error updating sheets (partial close): %s", e)
+
+        log.info(
+            "[InvestorAgent] Op %d PARCIAL (%.0f%%): accion=%s entrada=%.5f "
+            "salida=%.5f pnl=%.4f — runner con capital_usado=%.4f",
+            op_id, fraccion * 100, accion, precio_entrada, precio_salida,
+            pnl, capital_restante,
+        )
+        return {
+            "op_id": op_id, "pnl": pnl, "pnl_pct": pnl_pct,
+            "nuevo_capital": nuevo_capital, "capital_restante": capital_restante,
+        }
+
     # ── Cierre de posición ────────────────────────────────────────────────────
 
     def close_operation(

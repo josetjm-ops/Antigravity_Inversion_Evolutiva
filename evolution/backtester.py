@@ -42,6 +42,24 @@ N_CANDIDATE_CHILDREN   = int(os.getenv("N_CANDIDATE_CHILDREN",    "3"))
 # Coherencia entre backtest y producción es crítica para la validez del fitness OOS.
 _RUPTURA_SOLO_TENDENCIA = os.getenv("RUPTURA_SOLO_TENDENCIA", "true").lower() != "false"
 
+# Sesión de trading como gen (Fase 3, rediseño 2026-07-02) — mismas ventanas
+# UTC que cron/trade_monitor.py (paridad vivo↔OOS, ver Fase 0).
+_SESSION_WINDOWS_UTC = {
+    "londres": (7, 16),
+    "ny":      (12, 21),
+    "overlap": (12, 16),
+}
+
+
+def _within_session(sesion: str, hour_utc: int) -> bool:
+    """True si hour_utc cae dentro de la ventana de la sesión del gen. Un
+    valor no reconocido (incl. 'cualquiera') no restringe."""
+    window = _SESSION_WINDOWS_UTC.get(sesion)
+    if window is None:
+        return True
+    start, end = window
+    return start <= hour_utc < end
+
 # ── Fase 2 PLAN_DE_MEJORA.md: gate estadístico del torneo ────────────────────
 # legacy    : umbral débil actual (fitness OOS > 0 & n_trades >= 5).
 # bootstrap : exige que el límite inferior del IC de la expectancy sea > 0.
@@ -141,6 +159,9 @@ def _walk_forward_trades(
     exit_rev      = int(params_smc.get("exit_on_reversal", 0) or 0)
     min_profit_r  = float(params_smc.get("min_profit_for_exit_r", 0.4) or 0.4)
     umbral_conf   = float(params_riesgo.get("umbral_confianza_minima", 0.60) or 0.60)
+    # Salida parcial + runner y sesión de trading (Fase 3, rediseño 2026-07-02)
+    partial_r     = float(params_smc.get("partial_tp_r", 0) or 0)
+    sesion_gen    = str(params_smc.get("sesion_trading", "cualquiera"))
 
     sub_tec  = SubAgentTechnical("bt", params_tec, params_smc)
     sub_risk = SubAgentRisk("bt", params_riesgo, params_smc)
@@ -184,22 +205,56 @@ def _walk_forward_trades(
                     "sl_pips": open_pos.get("sl_pips") or (abs(entry - sl) * 10_000),
                 })
                 open_pos = None
-            elif be_r > 0:
+            else:
+                # ── Salida parcial + runner (Fase 3) — misma convención que
+                # SL/TP: ejecuta al precio exacto del nivel, no al close de
+                # la vela. Se registra como trade propio (su propio R) y el
+                # resto de la posición sigue corriendo con capital reducido.
+                if not open_pos.get("parcial_ejecutada") and partial_r > 0:
+                    r_pips = open_pos.get("sl_pips") or (abs(entry - sl) * 10_000)
+                    favorable_partial = candle_hi if accion == "BUY" else candle_lo
+                    profit_pips_partial = (
+                        (favorable_partial - entry) * 10_000 if accion == "BUY"
+                        else (entry - favorable_partial) * 10_000
+                    )
+                    if r_pips > 0 and profit_pips_partial >= partial_r * r_pips:
+                        dist_precio = partial_r * r_pips * 0.0001
+                        precio_parcial = (
+                            round(entry + dist_precio, 5) if accion == "BUY"
+                            else round(entry - dist_precio, 5)
+                        )
+                        cap_parcial = round(cap_used * 0.5, 6)
+                        pnl_parcial = (
+                            (precio_parcial - entry) / entry * cap_parcial if accion == "BUY"
+                            else (entry - precio_parcial) / entry * cap_parcial
+                        )
+                        pnl_parcial -= friction_pips * 0.0001 / entry * cap_parcial
+                        pnl_parcial = round(pnl_parcial, 6)
+                        capital += pnl_parcial
+                        trades.append({
+                            "accion": accion, "entry": entry, "exit": precio_parcial,
+                            "pnl": pnl_parcial, "hit": "PARCIAL",
+                            "capital_usado": cap_parcial, "sl_pips": r_pips,
+                        })
+                        open_pos["capital_usado"] = round(cap_used - cap_parcial, 6)
+                        open_pos["parcial_ejecutada"] = True
+
                 # ── Break-even stop (Sesión 22) — igual que trade_monitor:
                 # tras el chequeo de hits, si el extremo favorable de la vela
                 # alcanza be_r × R, el SL sube a entrada ± fricción.
-                r_pips = open_pos.get("sl_pips") or (abs(entry - sl) * 10_000)
-                favorable = candle_hi if accion == "BUY" else candle_lo
-                profit_pips = (
-                    (favorable - entry) * 10_000 if accion == "BUY"
-                    else (entry - favorable) * 10_000
-                )
-                if r_pips > 0 and profit_pips >= be_r * r_pips:
-                    fr = friction_pips * 0.0001
-                    if accion == "BUY":
-                        open_pos["stop_loss"] = max(sl, round(entry + fr, 5))
-                    else:
-                        open_pos["stop_loss"] = min(sl, round(entry - fr, 5))
+                if be_r > 0:
+                    r_pips = open_pos.get("sl_pips") or (abs(entry - sl) * 10_000)
+                    favorable = candle_hi if accion == "BUY" else candle_lo
+                    profit_pips = (
+                        (favorable - entry) * 10_000 if accion == "BUY"
+                        else (entry - favorable) * 10_000
+                    )
+                    if r_pips > 0 and profit_pips >= be_r * r_pips:
+                        fr = friction_pips * 0.0001
+                        if accion == "BUY":
+                            open_pos["stop_loss"] = max(sl, round(entry + fr, 5))
+                        else:
+                            open_pos["stop_loss"] = min(sl, round(entry - fr, 5))
 
         # ── 2. Cada N velas: evaluar señal (entrada o salida por reversa) ─
         cadence = (i - oos_start) % _CHECK_EVERY == 0
@@ -262,6 +317,14 @@ def _walk_forward_trades(
                     continue
                 if especie == "ruptura" and r_estado == "RANGO" and _RUPTURA_SOLO_TENDENCIA:
                     continue
+
+            # Gate de sesión de trading (Fase 3, igual que trade_monitor).
+            # "timestamp" siempre está presente en datos reales (fetch_ohlcv);
+            # tolera su ausencia (fixtures sintéticas de tests) sin restringir.
+            if "timestamp" in df_15m.columns and not _within_session(
+                sesion_gen, df_15m["timestamp"].iloc[i].hour
+            ):
+                continue
 
             senal = sub_tec.analyze(signals, especie=especie)
             if senal["recomendacion"] not in ("BUY", "SELL"):

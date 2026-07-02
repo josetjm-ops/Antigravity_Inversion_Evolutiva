@@ -1460,6 +1460,24 @@ def _tab_instructions() -> None:
           gaussianamente; <code>exit_on_reversal</code> (0/1) muta por <b>bit-flip</b>
           (10% de probabilidad) en vez de ruido gaussiano — mantiene el rasgo
           re-descubrible si se extingue de la población.<br>
+          &nbsp;• <b>Salida parcial + runner (Fase 3, 2026-07-02):</b>
+          <code>partial_tp_r</code> (0.5–2.0, mutación gaussiana) — al alcanzar ese
+          múltiplo de R se cierra el 50% de la posición (booking de ganancia real)
+          y el resto sigue corriendo hacia el TP/trailing normal. Ataca la firma
+          "avg_win≈avg_loss pese a R:R objetivo 2.0" de la auditoría 2026-07-01:
+          antes el sistema cortaba ganadores antes de que corrieran.<br>
+          &nbsp;• <b>Sesión de trading (Fase 3, 2026-07-02):</b> <code>sesion_trading</code>
+          — "cualquiera" (default), "londres" (07:00–16:00 UTC), "ny" (12:00–21:00 UTC)
+          u "overlap" (12:00–16:00 UTC, máxima liquidez EUR/USD). Gen categórico:
+          muta por <b>sorteo</b> (10% de probabilidad) entre sus 4 opciones, no
+          gaussianamente.<br>
+          &nbsp;• <b>LLM fuera del camino de ejecución (Fase 3, 2026-07-02):</b> con
+          <code>LLM_EXECUTION_ENABLED=false</code> (default), el Técnico y el Riesgo
+          usan siempre su heurística determinista — igual que el backtester, que
+          nunca invoca al LLM. Antes el LLM podía intervenir en producción y no en
+          el backtest, midiendo una política distinta a la evaluada en el torneo
+          OOS. El Agente Juez (razonamiento narrativo post-hoc) no se ve afectado:
+          sigue llamando a DeepSeek siempre.<br>
           &nbsp;• Genes nuevos (Sesión 15): <code>rsi_zona_muerta</code> (1.0–15.0, técnico),
           <code>peso_sesgo_tendencia</code> (0.20–0.65, macro). El gen <code>htf_filter_enabled</code>
           es entero 0/1 — decisión estratégica, no mutable gaussianamente.

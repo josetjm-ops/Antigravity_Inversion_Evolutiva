@@ -129,6 +129,18 @@ _DEFAULT_SMC_PARAMS: dict = {
     "be_activation_r":          0.6,    # mover SL a break-even al ganar este múltiplo de R
     "exit_on_reversal":         0,      # 1=salir ante señal contraria fuerte; 0/1, muta por bit-flip
     "min_profit_for_exit_r":    0.4,    # ganancia mínima (en R) para permitir salida por señal
+    # Salida parcial + runner (Fase 3, rediseño 2026-07-02): al alcanzar este
+    # múltiplo de R se cierra el 50% de la posición (fricción propia + BE en
+    # el resto), dejando correr el resto hacia el TP/trailing normal. Ataca
+    # la firma "avg_win≈avg_loss pese a R:R objetivo 2.0" de la auditoría
+    # 2026-07-01 — el sistema cortaba ganadores antes de que corrieran.
+    "partial_tp_r":              1.0,
+    # Sesión de trading (Fase 3, rediseño 2026-07-02): "cualquiera" (default,
+    # sin restricción horaria más allá de la ventana global de trading),
+    # "londres" (07:00-16:00 UTC), "ny" (12:00-21:00 UTC), "overlap"
+    # (12:00-16:00 UTC, máxima liquidez EUR/USD). Gen categórico — no se muta
+    # gaussianamente, muta por sorteo (ver _CATEGORICAL_GENE_MUTATION_PROB).
+    "sesion_trading":            "cualquiera",
 }
 
 _BOUNDS_SMC = {
@@ -156,13 +168,25 @@ _BOUNDS_SMC = {
     # Salidas inteligentes (Sesión 22) — mutables
     "be_activation_r":          (0.3,   1.0,  False),
     "min_profit_for_exit_r":    (0.2,   1.0,  False),
+    # Salida parcial + runner (Fase 3) — mutable
+    "partial_tp_r":              (0.5,   2.0,  False),
     # exit_on_reversal NO va aquí: es 0/1 y muta por bit-flip en breed_agent.
+    # sesion_trading NO va aquí: es categórico, muta por sorteo (ver abajo).
 }
 
 # Probabilidad de invertir genes booleanos 0/1 en cada crianza (Sesión 22).
 # Mantiene el rasgo re-descubrible si se extingue de la población; la
 # selección natural decide si la salida por señal contraria aporta edge.
 _BOOLEAN_GENE_FLIP_PROB = {"exit_on_reversal": 0.10}
+
+# ── Genes categóricos (Fase 3, rediseño 2026-07-02) ─────────────────────────
+# Como los booleanos, no se mutan gaussianamente: con probabilidad
+# _CATEGORICAL_GENE_MUTATION_PROB, el gen sortea un valor nuevo (puede ser
+# el mismo) de sus opciones — mantiene el rasgo explorable si se extingue.
+_CATEGORICAL_GENE_OPTIONS = {
+    "sesion_trading": ["cualquiera", "londres", "ny", "overlap"],
+}
+_CATEGORICAL_GENE_MUTATION_PROB = {"sesion_trading": 0.10}
 
 # Mínimo de agentes por especie para garantizar diversidad real.
 # El motor evolutivo no elimina un agente si hacerlo bajaría su especie de este umbral.
@@ -673,6 +697,13 @@ def breed_agent(
     for _bool_gene, _flip_p in _BOOLEAN_GENE_FLIP_PROB.items():
         if random.random() < _flip_p:
             smc_child[_bool_gene] = 1 - int(smc_child.get(_bool_gene, 0) or 0)
+
+    # Mutación por sorteo de genes categóricos (Fase 3): con probabilidad
+    # baja, el gen sortea un valor nuevo de sus opciones (puede repetir el
+    # heredado) — mismo espíritu que el bit-flip, para genes no numéricos.
+    for _cat_gene, _cat_p in _CATEGORICAL_GENE_MUTATION_PROB.items():
+        if random.random() < _cat_p:
+            smc_child[_cat_gene] = random.choice(_CATEGORICAL_GENE_OPTIONS[_cat_gene])
 
     # Normalizar pesos y aplicar constraints
     tec_child  = _normalize_weights(tec_child, ["peso_rsi", "peso_ema", "peso_macd"])

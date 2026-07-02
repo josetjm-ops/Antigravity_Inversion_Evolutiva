@@ -273,9 +273,12 @@ class SubAgentTechnical(BaseAgent):
             rec, conf,
         )
 
-        # Validate with LLM only when confidence is ambiguous (0.45–0.65)
+        # Validate with LLM only when confidence is ambiguous (0.45–0.65) — y
+        # solo si LLM_EXECUTION_ENABLED=true (Fase 3: off por defecto, ver
+        # agents/base_agent.py — el backtester siempre corre determinista).
         llm_razon = None
-        if 0.45 <= conf <= 0.65:
+        from agents.base_agent import LLM_EXECUTION_ENABLED
+        if LLM_EXECUTION_ENABLED and 0.45 <= conf <= 0.65:
             prompt = (
                 f"Especie={especie}. "
                 f"RSI={signals.rsi:.2f} ({rsi_rec} conf={rsi_conf:.2f}), "
