@@ -52,8 +52,23 @@ BOOTSTRAP_MIN_TRADES    = int(os.getenv("BOOTSTRAP_MIN_TRADES", "8"))
 
 # Velas 15m por día de trading (≈6.5h × 4 velas/h)
 _CANDLES_PER_DAY = 26
-# Evaluar nueva posición cada N velas (= cadencia del cron de producción)
-_CHECK_EVERY     = 4
+# Evaluar nueva posición cada N velas de 15m.
+#
+# DIVERGENCIA CONOCIDA (2026-07-02, evaluación de arquitectura): el cron real
+# de producción (trade_monitor.yml + cron-job.org) dispara cada 15 minutos =
+# cada 1 vela, no cada 4 (1h) como el default histórico de esta constante
+# asumía. Con _CHECK_EVERY=4 el backtest evalúa el genoma con 4× menos
+# oportunidades de entrada que las que realmente tiene en producción, por lo
+# que el fitness OOS mide una política más conservadora que la desplegada.
+#
+# Se deja configurable (default=4, comportamiento histórico sin cambios) en
+# vez de flipear directamente a 1: bajar a 1 cuadruplica las llamadas a
+# calc_signals() por candidato dentro del walk-forward y puede acercar el
+# costo del backtest al timeout de 25 min de judge_daily.yml (ver hallazgo 3
+# y Fase 3 de PLAN_DE_MEJORA.md sobre el costo de más evaluaciones por
+# candidato). Medir el tiempo real con BACKTEST_CHECK_EVERY_CANDLES=1 en la
+# sandbox antes de activarlo en producción.
+_CHECK_EVERY     = int(os.getenv("BACKTEST_CHECK_EVERY_CANDLES", "4"))
 # Máximo lookback para el slice de señales (limita O(N) por llamada)
 _LOOKBACK        = 300
 
