@@ -460,7 +460,7 @@ def _kpis(df_active: pd.DataFrame, df_all: pd.DataFrame) -> None:
         d, dc = _delta(wr - 50)
         st.metric("Win Rate Global", f"{wr:.1f}%", delta=d, delta_color=dc)
     with c6:
-        st.metric("Mejor Fitness (Calmar)", f"{best_fitness:.4f}")
+        st.metric("Mejor Fitness (Expectancy)", f"{best_fitness:.4f}")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
