@@ -86,11 +86,17 @@ def test_time_budget_no_afecta_modo_single_default():
 
 
 def test_time_budget_activo_en_multifold_salta_a_degradacion(monkeypatch):
-    """Con BACKTEST_MODE=multifold y presupuesto agotado, se salta el torneo/HoF
-    y se llena el cupo vía cruce forzado, sin gastar backtests de más."""
+    """
+    Con BACKTEST_MODE=multifold y presupuesto agotado, se salta el torneo/HoF
+    y (con el kill-switch REPOBLACION_PERMITE_VACANTES=False, Fase 2) se llena
+    el cupo vía cruce forzado, sin gastar backtests de más. Con el default de
+    Fase 2 (True) el mismo salto de rondas deja el cupo vacante en vez de
+    forzar un genoma — ver test_time_budget_vacante_por_default abajo.
+    """
     from evolution import evolution_engine as ee
     import evolution.backtester as bt_mod
 
+    monkeypatch.setattr(ee, "REPOBLACION_PERMITE_VACANTES", False)
     monkeypatch.setattr(bt_mod, "BACKTEST_MODE", "multifold")
     # Primera llamada = captura de _repop_t_start (0.0); todas las siguientes
     # ya exceden el presupuesto, para cualquier cupo evaluado.
@@ -122,7 +128,7 @@ def test_time_budget_activo_en_multifold_salta_a_degradacion(monkeypatch):
             start_idx=10, max_gen=1, sw=0.05, sp=0.08, sr=0.10,
         )
 
-    # Los 4 cupos de tendencia se llenan igual: la cascada nunca deja vacante.
+    # Kill-switch activo (legacy): los 4 cupos se llenan igual, nunca vacante.
     assert len(recovered) == 4
     assert deficit_restante == {}
     # Ninguno vino de rondas de torneo/HoF (se saltaron); todos por cruce forzado.
@@ -130,3 +136,58 @@ def test_time_budget_activo_en_multifold_salta_a_degradacion(monkeypatch):
     # Un solo backtest por cupo (el del cruce forzado), no N_CANDIDATE_CHILDREN
     # candidatos × rondas de reintento.
     assert call_count["n"] == 4
+
+
+def test_time_budget_vacante_por_default():
+    """
+    Fase 2 (rediseño 2026-07-02): con REPOBLACION_PERMITE_VACANTES=true
+    (default) Y presupuesto de tiempo agotado en multifold, las rondas de
+    torneo/HoF se saltan IGUAL (sin gastar backtests de más) pero el cupo
+    queda vacante en vez de forzar un cruce sin evidencia de edge.
+    """
+    from evolution import evolution_engine as ee
+    import evolution.backtester as bt_mod
+
+    assert ee.REPOBLACION_PERMITE_VACANTES is True  # default, sin monkeypatch
+
+    original_bt_mode = bt_mod.BACKTEST_MODE
+    bt_mod.BACKTEST_MODE = "multifold"
+    try:
+        times = iter([0.0] + [ee.REPOPULATION_TIME_BUDGET_SECONDS + 100.0] * 50)
+        original_monotonic = ee.time.monotonic
+        ee.time.monotonic = lambda: next(times)
+        try:
+            current = (
+                [_agent(f"T_{i}", "tendencia") for i in range(1)]
+                + [_agent(f"R_{i}", "reversion") for i in range(5)]
+                + [_agent(f"B_{i}", "ruptura")   for i in range(5)]
+            )
+
+            def _mock_breed(p1, p2, child_id, today, gen, **kw):
+                return _agent(child_id, kw.get("especie", "tendencia"))
+
+            call_count = {"n": 0}
+
+            def _mock_run_backtest(data, agent):
+                call_count["n"] += 1
+                return {"fitness": 0.05, "n_trades": 10, "oos_trades": []}
+
+            engine = ee.EvolutionEngine(date(2026, 7, 1))
+            with patch("evolution.evolution_engine.breed_agent", side_effect=_mock_breed), \
+                 patch("evolution.backtester.run_backtest", side_effect=_mock_run_backtest), \
+                 patch.object(engine, "_get_hof_parents", return_value=[]):
+                recovered, slots_rec_log, deficit_restante = engine._try_repopulate(
+                    current_population=current, parent_pool=current,
+                    backtest_data={"df_15m": None, "df_1h": None},
+                    start_idx=10, max_gen=1, sw=0.05, sp=0.08, sr=0.10,
+                )
+        finally:
+            ee.time.monotonic = original_monotonic
+    finally:
+        bt_mod.BACKTEST_MODE = original_bt_mode
+
+    assert recovered == [], "Sin bypass, el presupuesto agotado no debe forzar genomas"
+    assert deficit_restante.get("tendencia", 0) == 4
+    # El salto de rondas por presupuesto sigue sin gastar backtests de más:
+    # cero llamadas a run_backtest (no hubo candidato de cruce que evaluar).
+    assert call_count["n"] == 0

@@ -211,10 +211,52 @@ IMMUNITY_MAX_LOSS_PCT = float(os.getenv("IMMUNITY_MAX_LOSS_PCT", "8.0"))
 # (p.ej. tendencia en régimen RANGO crónico) queden perpetuamente inmunes.
 MIN_SAMPLE_DAYS = int(os.getenv("MIN_SAMPLE_DAYS", "7"))
 
+# ── Regla de bleeder crónico (Fase 2, rediseño 2026-07-02) ───────────────────
+# Elimina SIEMPRE (sin importar cuota ni piso de especie) a un agente con
+# fitness catastrófico y muestra grande — un bleeder confirmado no debe
+# sobrevivir solo porque su especie está en el mínimo. Ver auditoría
+# 2026-07-01, hallazgo 3: el piso de especie blindaba a 2026-06-12_08 (ROI
+# real -354%, fitness apenas -0.005 en la escala vieja comprimida en dólares).
+# Con el fitness en R (Fase 1) -0.3 ya es una expectancy claramente mala.
+BLEEDER_FITNESS_THRESHOLD = float(os.getenv("BLEEDER_FITNESS_THRESHOLD", "-0.3"))
+BLEEDER_MIN_TRADES        = int(os.getenv("BLEEDER_MIN_TRADES", "20"))
+
+# ── Capital proporcional a fitness (Fase 2, rediseño 2026-07-02) ────────────
+# Reemplaza la redistribución equitativa (mismo capital para todos, ganador y
+# perdedor) — auditoría 2026-07-01, hallazgo P0-2: "la redistribución
+# equitativa de capital APAGA la selección natural". El peso multiplicador de
+# cada agente es clamp(1 + fitness_score, FLOOR, CAP); el capital final se
+# normaliza para que la suma siga siendo exactamente el pool total (no se
+# crea ni destruye capital). FLOOR=CAP=1.0 colapsa al reparto equitativo
+# anterior — es el kill-switch si hace falta revertir sin re-desplegar código.
+CAPITAL_WEIGHT_FLOOR = float(os.getenv("CAPITAL_WEIGHT_FLOOR", "0.5"))
+CAPITAL_WEIGHT_CAP   = float(os.getenv("CAPITAL_WEIGHT_CAP",   "2.0"))
+
 # ── Recuperación de cupos vacantes (Sesión 18 / 19) ──────────────────────────
-# Objetivo de agentes activos por especie; el motor SIEMPRE intenta llenar todos
-# los cupos faltantes (3 especies × 5 = población objetivo de 15 agentes).
+# Objetivo de agentes activos por especie; el motor intenta llenar todos los
+# cupos faltantes (3 especies × 5 = población objetivo de 15 agentes) PERO ya
+# no fuerza genomas sin evidencia de edge (ver REPOBLACION_PERMITE_VACANTES).
 TARGET_AGENTS_PER_ESPECIE  = int(os.getenv("TARGET_AGENTS_PER_ESPECIE",  "5"))
+# Objetivo específico para "ruptura" (Fase 2): auditoría 2026-07-01 — 24.8%
+# WR, responsable del 68% de la pérdida total. Se reduce su cupo objetivo en
+# vez de mantenerlo artificialmente en 5 mientras no demuestre edge real;
+# override opcional por especie, cae al valor general si no se define.
+TARGET_AGENTS_RUPTURA = int(os.getenv("TARGET_AGENTS_RUPTURA", "3"))
+
+# ── Gate OOS sin bypass forzado (Fase 2, rediseño 2026-07-02) ────────────────
+# Antes, si ningún candidato de cruce superaba el umbral OOS Y las rondas
+# torneo/HoF se agotaban, el motor recurría a "forzado_cruce"/"forzado_clon_
+# unico": desplegar el mejor genoma disponible SIN evidencia de edge, solo
+# para garantizar 15 agentes. Eso es precisamente "cantidad sobre calidad" —
+# la causa de que sobrevivan especies sin edge real (ver PLAN_REDISENO_
+# RENTABILIDAD.md, hallazgo S3). Con este flag en True (default), un cupo sin
+# candidato que demuestre edge queda VACANTE (población flotante, piso
+# implícito = 2 por especie × 3 = 6, protegido por _MIN_AGENTS_PER_ESPECIE en
+# la eliminación) en vez de forzar un genoma sin evidencia. False reproduce el
+# comportamiento anterior (kill-switch operativo sin re-desplegar código).
+REPOBLACION_PERMITE_VACANTES = (
+    os.getenv("REPOBLACION_PERMITE_VACANTES", "true").lower() != "false"
+)
 # DEPRECADO (Sesión 19): el tope por ciclo se eliminó para garantizar los 15.
 # Se conserva el símbolo por compatibilidad con .env / imports antiguos.
 REPOPULATION_MAX_PER_CYCLE = int(os.getenv("REPOPULATION_MAX_PER_CYCLE", "3"))
@@ -228,10 +270,11 @@ REPOPULATION_MAX_ATTEMPTS_PER_SLOT = int(
 # El multi-fold cuesta ~1.68× un backtest single (medido). Este presupuesto
 # SOLO se aplica cuando BACKTEST_MODE=multifold — en modo single (default)
 # no se activa ninguna comprobación de tiempo (comportamiento legacy intacto).
-# Si se agota, los cupos restantes saltan directo a la cascada de degradación
-# (forzado_cruce / forzado_clon_unico) en vez de intentar rondas completas de
-# torneo→HoF — así el ciclo nunca deja un cupo vacante ni agota el timeout de
-# judge_daily.yml (25 min) por exceso de backtests multi-fold.
+# Si se agota, los cupos restantes saltan directo a la degradación configurada
+# (por defecto: cupo vacante; con REPOBLACION_PERMITE_VACANTES=false, cascada
+# forzado_cruce/forzado_clon_unico) en vez de intentar rondas completas de
+# torneo→HoF — así el ciclo no agota el timeout de judge_daily.yml (25 min)
+# por exceso de backtests multi-fold.
 REPOPULATION_TIME_BUDGET_SECONDS = int(
     os.getenv("REPOPULATION_TIME_BUDGET_SECONDS", "900")
 )
@@ -861,25 +904,42 @@ class EvolutionEngine:
         self, agents: list[dict]
     ) -> tuple[list[dict], list[dict]]:
         """
-        Selección con CUOTA DINÁMICA: nunca elimina agentes con Fitness > 0
-        solo para cumplir la cuota de N_ELIMINATE.
+        Selección con CUOTA DINÁMICA + regla de bleeder crónico (Fase 2).
 
         Espera `agents` ya filtrados (sin inmunes) y ordenados por fitness
-        DESC. La función ordena internamente por el criterio de eliminación:
-          fitness_score ASC, fecha_nacimiento ASC, id ASC
-        de modo que los primeros candidatos a salir son los veteranos
-        rezagados con peor fitness.
+        DESC.
 
-        Solo se eliminan agentes cuyo fitness_score <= 0. Si todos los
-        elegibles tienen fitness > 0, retorna (todos como supervivientes, []).
+        1. Bleeder crónico (incondicional, Fase 2 rediseño 2026-07-02):
+           cualquier agente con fitness_score <= BLEEDER_FITNESS_THRESHOLD y
+           n_trades >= BLEEDER_MIN_TRADES se elimina SIEMPRE, sin importar
+           cuota ni piso de especie. Un bleeder confirmado con muestra grande
+           no es "mala suerte" — es evidencia de que ese genoma no tiene edge.
+           No cuenta contra N_ELIMINATE (es adicional, no compite por cupo).
+
+        2. Cuota dinámica (comportamiento previo, sobre el resto): nunca
+           elimina agentes con fitness > 0 solo para cumplir la cuota de
+           N_ELIMINATE. Ordena por fitness_score ASC, fecha_nacimiento ASC,
+           id ASC — los primeros candidatos a salir son los veteranos
+           rezagados con peor fitness. Solo elimina fitness_score <= 0,
+           protegido por el piso de especie _MIN_AGENTS_PER_ESPECIE.
         """
         if not agents:
             return [], []
 
+        # ── 1. Bleeder crónico: incondicional, fuera de la cuota ──────────────
+        bleeders = [
+            a for a in agents
+            if float(a.get("fitness_score", 0) or 0) <= BLEEDER_FITNESS_THRESHOLD
+            and int(a.get("n_trades", 0) or 0) >= BLEEDER_MIN_TRADES
+        ]
+        bleeder_ids = {a["id"] for a in bleeders}
+        remaining = [a for a in agents if a["id"] not in bleeder_ids]
+
+        # ── 2. Cuota dinámica sobre el resto ──────────────────────────────────
         # Orden inverso para identificar a los peores: fitness ASC,
         # veteranos primero (fecha_nacimiento ASC, id ASC).
         ordered_for_elim = sorted(
-            agents,
+            remaining,
             key=lambda a: (
                 float(a.get("fitness_score", 0) or 0),
                 a.get("fecha_nacimiento") or date.min,
@@ -894,13 +954,18 @@ class EvolutionEngine:
             if float(a.get("fitness_score", 0) or 0) <= 0
         ]
 
-        # Protección de diversidad de especies (Fase 2): no eliminar un agente
-        # si hacerlo bajaría su especie por debajo de _MIN_AGENTS_PER_ESPECIE.
-        # Contamos cuántos activos hay por especie ANTES de eliminar nadie.
+        # Protección de diversidad de especies: no eliminar un agente si
+        # hacerlo bajaría su especie por debajo de _MIN_AGENTS_PER_ESPECIE.
+        # Los bleeders ya eliminados en el paso 1 se descuentan del conteo
+        # inicial — su especie ya perdió esos miembros incondicionalmente,
+        # no deben "sostener" artificialmente el piso para proteger al resto.
         especie_counts: dict[str, int] = {}
         for a in agents:
             esp = str(a.get("especie") or "tendencia")
             especie_counts[esp] = especie_counts.get(esp, 0) + 1
+        for b in bleeders:
+            esp = str(b.get("especie") or "tendencia")
+            especie_counts[esp] = especie_counts.get(esp, 0) - 1
 
         protected_eliminable: list[dict] = []
         temp_counts = dict(especie_counts)
@@ -912,7 +977,7 @@ class EvolutionEngine:
             # Si la especie ya está en el mínimo, este agente queda protegido.
 
         n = min(N_ELIMINATE, len(protected_eliminable))
-        eliminated = protected_eliminable[:n]
+        eliminated = bleeders + protected_eliminable[:n]
 
         elim_ids = {a["id"] for a in eliminated}
         survivors = [a for a in agents if a["id"] not in elim_ids]
@@ -1239,12 +1304,28 @@ class EvolutionEngine:
     # ── Redistribución de capital ────────────────────────────────────────────
 
     def _redistribute_capital(
-        self, conn, new_agent_ids: list[str], pool_override: float | None = None
+        self, conn, new_agent_ids: list[str], pool_override: float | None = None,
+        fitness_map: dict[str, float] | None = None,
     ) -> tuple[float, float]:
         """
-        Reparte el pool de capital equitativamente entre todos los agentes activos.
+        Reparte el pool de capital entre los agentes activos PONDERADO POR FITNESS
+        (Fase 2, rediseño 2026-07-02) — reemplaza el reparto equitativo anterior.
 
-        pool_override debe ser el SUM(capital_actual) de los 10 agentes ANTES de que
+        Auditoría 2026-07-01, hallazgo P0-2: "la redistribución equitativa de
+        capital APAGA la selección natural" — perdedor y ganador terminaban con
+        el mismo capital cada noche, sin importar el fitness. Ahora el peso de
+        cada agente veterano es clamp(1 + fitness_score, CAPITAL_WEIGHT_FLOOR,
+        CAPITAL_WEIGHT_CAP); el capital final se normaliza para que la suma siga
+        siendo EXACTAMENTE pool_total (no se crea ni destruye capital, solo se
+        redistribuye). Los agentes recién nacidos este ciclo (new_agent_ids) no
+        tienen fitness en vivo aún — reciben peso 1.0 (cuota equitativa estándar),
+        igual que antes.
+
+        fitness_map: {agente_id: fitness_score} de los agentes veteranos ANTES
+        de este ciclo (ya lo calcula _get_active_agents_ranked al inicio de
+        run()) — evita recalcular fitness con una query aparte.
+
+        pool_override debe ser el SUM(capital_actual) de los agentes ANTES de que
         el ciclo evolutivo elimine/nazca ninguno — es decir, el pool real post-EOD.
         Sin override (fallback), re-consulta la DB (incluye nuevos a $10, valor incorrecto).
 
@@ -1252,14 +1333,20 @@ class EvolutionEngine:
         Los agentes nuevos reciben su cuota del pool existente (capital_inicial = cuota).
         Los supervivientes mantienen su capital_inicial histórico; solo cambia capital_actual.
 
-        Retorna (pool_total, capital_por_agente).
+        Retorna (pool_total, cuota_base) — cuota_base es la cuota EQUITATIVA de
+        referencia (pool_total/n), útil para logs/auditoría aunque el capital
+        real de cada agente ya no sea uniforme.
         """
         import logging
         log_r = logging.getLogger(__name__)
 
+        fitness_map = fitness_map or {}
+        new_ids_set = set(new_agent_ids or [])
+
         cur = conn.cursor()
-        cur.execute("SELECT COUNT(*) FROM agentes WHERE estado = 'activo'")
-        n_agentes = int(cur.fetchone()[0])
+        cur.execute("SELECT id FROM agentes WHERE estado = 'activo' ORDER BY id")
+        active_ids = [r[0] for r in cur.fetchall()]
+        n_agentes = len(active_ids)
 
         if pool_override is not None:
             pool_total = pool_override
@@ -1272,24 +1359,48 @@ class EvolutionEngine:
         if n_agentes == 0:
             return 0.0, 0.0
 
-        capital_por_agente = round(pool_total / n_agentes, 4)
+        cuota_base = round(pool_total / n_agentes, 4)
 
-        # Todos los agentes activos quedan con el mismo capital para mañana
-        cur.execute(
-            "UPDATE agentes SET capital_actual = %s WHERE estado = 'activo'",
-            (capital_por_agente,),
-        )
+        # Peso por agente: newborn=1.0 (equitativo estándar); veterano=clamp(1+fitness).
+        weights: list[float] = []
+        for aid in active_ids:
+            if aid in new_ids_set:
+                weights.append(1.0)
+            else:
+                fit = float(fitness_map.get(aid, 0.0) or 0.0)
+                weights.append(_clamp(1.0 + fit, CAPITAL_WEIGHT_FLOOR, CAPITAL_WEIGHT_CAP))
+        total_weight = sum(weights) or float(n_agentes)  # defensivo: nunca 0
+
+        capitales = [round(w / total_weight * pool_total, 4) for w in weights]
+        # El redondeo puede dejar un remanente de centésimas; el último agente
+        # lo absorbe para que sum(capitales) == pool_total EXACTO (no se crea
+        # ni destruye capital en la redistribución).
+        remanente = round(pool_total - sum(capitales), 4)
+        if capitales:
+            capitales[-1] = round(capitales[-1] + remanente, 4)
+
+        id_to_capital = dict(zip(active_ids, capitales))
+        for aid, cap in id_to_capital.items():
+            cur.execute(
+                "UPDATE agentes SET capital_actual = %s WHERE id = %s",
+                (cap, aid),
+            )
 
         # Los agentes nuevos registran su capital_inicial real (no el hardcoded 10.0)
         if new_agent_ids:
-            cur.execute(
-                "UPDATE agentes SET capital_inicial = %s WHERE id = ANY(%s)",
-                (capital_por_agente, new_agent_ids),
-            )
+            for aid in new_agent_ids:
+                if aid in id_to_capital:
+                    cur.execute(
+                        "UPDATE agentes SET capital_inicial = %s WHERE id = %s",
+                        (id_to_capital[aid], aid),
+                    )
 
         log_r.info(
-            "[EvolutionEngine] Capital redistribuido: pool=%.4f / %d agentes = %.4f c/u",
-            pool_total, n_agentes, capital_por_agente,
+            "[EvolutionEngine] Capital redistribuido (ponderado por fitness): "
+            "pool=%.4f / %d agentes — cuota base=%.4f, rango real=[%.4f, %.4f]",
+            pool_total, n_agentes, cuota_base,
+            min(capitales) if capitales else 0.0,
+            max(capitales) if capitales else 0.0,
         )
 
         # Reflejar nuevo capital de cada agente en Google Sheets
@@ -1306,7 +1417,7 @@ class EvolutionEngine:
                 try:
                     sl.update_agent_live(
                         agent_id=ag[0],
-                        capital=capital_por_agente,
+                        capital=id_to_capital.get(ag[0], cuota_base),
                         roi=float(ag[1] or 0),
                         ops=int(ag[2] or 0),
                         ops_ganadoras=int(ag[3] or 0),
@@ -1316,7 +1427,7 @@ class EvolutionEngine:
         except Exception as e_sheets:
             log_r.error("[EvolutionEngine] Error actualizando Sheets tras redistribución: %s", e_sheets)
 
-        return pool_total, capital_por_agente
+        return pool_total, cuota_base
 
     # ── Recuperación de cupos vacantes (Sesión 18) ───────────────────────────
 
@@ -1332,17 +1443,24 @@ class EvolutionEngine:
         sr: float,
     ) -> tuple[list[dict], list[dict], dict]:
         """
-        Recupera TODOS los cupos vacantes por especie hasta la población objetivo
-        (Sesión 19: garantía de 15 agentes activos).
+        Intenta cubrir los cupos vacantes por especie hasta la población objetivo
+        (Sesión 19: 15 agentes si target_by_especie lo permite — ruptura reducido
+        a TARGET_AGENTS_RUPTURA desde Fase 2, ver auditoría 2026-07-01).
 
         Pipeline por cupo:
           1. Hasta REPOPULATION_MAX_ATTEMPTS_PER_SLOT rondas de
              (torneo N candidatos → umbral OOS) seguido de (HoF N candidatos → OOS).
              Se detiene en cuanto un candidato supera el umbral.
-          2. Si tras agotar las rondas nadie pasa → CLON FORZADO del mejor agente
-             del Hall of Fame (genética probada, origen='forzado_hof'); si no hay
-             HoF, del mejor del pool de torneo (origen='forzado_pool'). Esto
-             garantiza llenar el cupo sin insertar genética aleatoria.
+          2. Con REPOBLACION_PERMITE_VACANTES=true (default, Fase 2 rediseño
+             2026-07-02): si nadie pasa, el cupo queda VACANTE — sin insertar
+             genoma sin evidencia de edge. La población flota por debajo del
+             objetivo hasta que un candidato real lo cubra en un ciclo futuro.
+          3. Con REPOBLACION_PERMITE_VACANTES=false (kill-switch, comportamiento
+             legacy): degradación a "mejor_candidato_oos" (mejor cruce sin pasar
+             el umbral) y, si ni eso hay, a "forzado_cruce"/"forzado_clon_unico"
+             (cruce o clon del mejor genoma disponible en HoF/pool) — garantiza
+             llenar el cupo a costa de posiblemente insertar genética sin edge
+             confirmado.
 
         Sin tope por ciclo: se intentan todos los cupos faltantes.
 
@@ -1353,9 +1471,11 @@ class EvolutionEngine:
           (recovered, slots_rec_log, deficit_restante)
           - recovered: agentes listos para insertar en DB.
           - slots_rec_log: [{id, especie, fitness_oos, origen}] para trazabilidad.
-            origen ∈ {torneo, hall_of_fame, forzado_hof, forzado_pool}.
-          - deficit_restante: {especie: n} cupos que no pudieron cubrirse (solo en
-            casos degenerados sin pool ni HoF).
+            origen ∈ {torneo, hall_of_fame, mejor_candidato_oos, forzado_cruce,
+            forzado_clon_unico} (los últimos tres solo si el kill-switch está off).
+          - deficit_restante: {especie: n} cupos que no pudieron cubrirse — ahora
+            el caso esperado por defecto cuando ningún candidato supera el gate,
+            no solo el caso degenerado sin pool ni HoF.
         """
         import logging
         _log = logging.getLogger(__name__)
@@ -1368,6 +1488,13 @@ class EvolutionEngine:
 
         ESPECIES = ("tendencia", "reversion", "ruptura")
 
+        # Objetivo por especie (Fase 2): ruptura tiene un cupo reducido — 24.8%
+        # WR, responsable del 68% de la pérdida total (auditoría 2026-07-01).
+        target_by_especie = {
+            esp: (TARGET_AGENTS_RUPTURA if esp == "ruptura" else TARGET_AGENTS_PER_ESPECIE)
+            for esp in ESPECIES
+        }
+
         count_by_especie: dict[str, int] = {esp: 0 for esp in ESPECIES}
         for a in current_population:
             esp = str(a.get("especie") or "tendencia")
@@ -1375,7 +1502,7 @@ class EvolutionEngine:
                 count_by_especie[esp] += 1
 
         deficit_by_especie: dict[str, int] = {
-            esp: max(0, TARGET_AGENTS_PER_ESPECIE - count_by_especie[esp])
+            esp: max(0, target_by_especie[esp] - count_by_especie[esp])
             for esp in ESPECIES
         }
         total_deficit = sum(deficit_by_especie.values())
@@ -1502,80 +1629,94 @@ class EvolutionEngine:
                         if best_cand_bt is None or bt["fitness"] > best_cand_bt["fitness"]:
                             best_cand, best_cand_bt = cand, bt
 
-                # ── Degradación 1: mejor candidato de cruce sin umbral ─────────
-                # Nadie pasó el filtro estricto (fitness>0 Y n_trades>=MIN), pero
-                # hubo hijos de cruce real: entra el de mayor fitness OOS. Mejor
-                # un hijo de dos padres con muestra corta que un clon sin cruce.
-                if child is None and best_cand is not None:
-                    child, best_bt = best_cand, best_cand_bt
-                    origen = "mejor_candidato_oos"
-                    _log.warning(
-                        "[EvolutionEngine] Repopulación %s (%s): sin candidato sobre "
-                        "umbral tras %d rondas → MEJOR CANDIDATO de cruce "
-                        "(fitness=%.5f, n=%d).",
-                        child_id, esp, REPOPULATION_MAX_ATTEMPTS_PER_SLOT,
-                        best_bt["fitness"], best_bt["n_trades"],
-                    )
-
-                # ── Degradación 2 (último recurso real): cruce forzado ─────────
-                # Ningún pool tiene 2 padres — se cruzan los DOS MEJORES genomas
-                # distintos disponibles entre HoF y pool (60% el de la especie
-                # correcta / mejor puntuado). Un agente eliminado puede aportar
-                # como uno de los dos padres, pero nunca ser el genoma único.
-                # Auto-clon SOLO si existe literalmente un genoma en el sistema.
-                if child is None:
-                    sources: dict[str, dict] = {}
-                    for p in list(hof_parents) + list(tourn_pool):
-                        if p["id"] not in sources:
-                            sources[p["id"]] = p
-
-                    def _score(p: dict) -> tuple:
-                        return (
-                            str(p.get("especie") or "tendencia") == esp,
-                            p.get("estado", "activo") != "eliminado",
-                            float(p.get("fitness_score") or p.get("roi_total") or 0),
-                        )
-
-                    ranked_src = sorted(sources.values(), key=_score, reverse=True)
-                    if len(ranked_src) >= 2:
-                        fp1, fp2 = ranked_src[0], ranked_src[1]
-                        # fp1 (mejor de la especie correcta si existe) domina
-                        # el cruce con el 60% del genoma, sin importar su ROI.
-                        child = breed_agent(
-                            fp1, fp2, child_id, self.today, max_gen + 1,
-                            sigma_weights=sw, sigma_periods=sp, sigma_risk=sr,
-                            especie=esp, p1_weight=0.6,
-                        )
-                        origen = "forzado_cruce"
+                # ── Degradaciones forzadas (kill-switch REPOBLACION_PERMITE_VACANTES) ──
+                # Antes (comportamiento legacy, flag=False): si nadie pasaba el
+                # umbral, se desplegaba igual el mejor candidato de cruce sin
+                # evidencia de edge ("mejor_candidato_oos"), y si ni siquiera
+                # había 2 padres disponibles, se forzaba un cruce/clon con
+                # cualquier genoma existente ("forzado_cruce"/"forzado_clon_
+                # unico"). Fase 2 (rediseño 2026-07-02, flag=True por defecto):
+                # ningún candidato sin evidencia de edge se despliega — el cupo
+                # queda vacante y la población flota por debajo de 15 hasta que
+                # un candidato real supere el gate. Ver hallazgo S3,
+                # PLAN_REDISENO_RENTABILIDAD.md: forzar genomas sin edge para
+                # "completar 15" es precisamente la causa de que sobrevivan
+                # especies sin edge real.
+                if not REPOBLACION_PERMITE_VACANTES:
+                    # ── Degradación 1: mejor candidato de cruce sin umbral ─────
+                    if child is None and best_cand is not None:
+                        child, best_bt = best_cand, best_cand_bt
+                        origen = "mejor_candidato_oos"
                         _log.warning(
-                            "[EvolutionEngine] Repopulación %s (%s): pools sin 2 padres "
-                            "→ CRUCE FORZADO %s × %s.",
-                            child_id, esp, fp1["id"], fp2["id"],
+                            "[EvolutionEngine] Repopulación %s (%s): sin candidato sobre "
+                            "umbral tras %d rondas → MEJOR CANDIDATO de cruce "
+                            "(fitness=%.5f, n=%d).",
+                            child_id, esp, REPOPULATION_MAX_ATTEMPTS_PER_SLOT,
+                            best_bt["fitness"], best_bt["n_trades"],
                         )
-                    elif len(ranked_src) == 1 and ranked_src[0].get("estado", "activo") != "eliminado":
-                        fp1 = ranked_src[0]
-                        child = breed_agent(
-                            fp1, fp1, child_id, self.today, max_gen + 1,
-                            sigma_weights=sw, sigma_periods=sp, sigma_risk=sr,
-                            especie=esp,
-                        )
-                        origen = "forzado_clon_unico"
-                        _log.warning(
-                            "[EvolutionEngine] Repopulación %s (%s): UN SOLO genoma "
-                            "disponible (%s) → auto-clon inevitable.",
-                            child_id, esp, fp1["id"],
-                        )
-                    if child is not None:
-                        try:
-                            best_bt = run_backtest(backtest_data, child)
-                        except Exception:
-                            best_bt = {"fitness": 0.0, "n_trades": 0}
+
+                    # ── Degradación 2 (último recurso real): cruce forzado ─────
+                    # Ningún pool tiene 2 padres — se cruzan los DOS MEJORES
+                    # genomas distintos disponibles entre HoF y pool (60% el de
+                    # la especie correcta / mejor puntuado). Un agente eliminado
+                    # puede aportar como uno de los dos padres, pero nunca ser
+                    # el genoma único. Auto-clon SOLO si hay literalmente un
+                    # genoma en el sistema.
+                    if child is None:
+                        sources: dict[str, dict] = {}
+                        for p in list(hof_parents) + list(tourn_pool):
+                            if p["id"] not in sources:
+                                sources[p["id"]] = p
+
+                        def _score(p: dict) -> tuple:
+                            return (
+                                str(p.get("especie") or "tendencia") == esp,
+                                p.get("estado", "activo") != "eliminado",
+                                float(p.get("fitness_score") or p.get("roi_total") or 0),
+                            )
+
+                        ranked_src = sorted(sources.values(), key=_score, reverse=True)
+                        if len(ranked_src) >= 2:
+                            fp1, fp2 = ranked_src[0], ranked_src[1]
+                            # fp1 (mejor de la especie correcta si existe) domina
+                            # el cruce con el 60% del genoma, sin importar su ROI.
+                            child = breed_agent(
+                                fp1, fp2, child_id, self.today, max_gen + 1,
+                                sigma_weights=sw, sigma_periods=sp, sigma_risk=sr,
+                                especie=esp, p1_weight=0.6,
+                            )
+                            origen = "forzado_cruce"
+                            _log.warning(
+                                "[EvolutionEngine] Repopulación %s (%s): pools sin 2 padres "
+                                "→ CRUCE FORZADO %s × %s.",
+                                child_id, esp, fp1["id"], fp2["id"],
+                            )
+                        elif len(ranked_src) == 1 and ranked_src[0].get("estado", "activo") != "eliminado":
+                            fp1 = ranked_src[0]
+                            child = breed_agent(
+                                fp1, fp1, child_id, self.today, max_gen + 1,
+                                sigma_weights=sw, sigma_periods=sp, sigma_risk=sr,
+                                especie=esp,
+                            )
+                            origen = "forzado_clon_unico"
+                            _log.warning(
+                                "[EvolutionEngine] Repopulación %s (%s): UN SOLO genoma "
+                                "disponible (%s) → auto-clon inevitable.",
+                                child_id, esp, fp1["id"],
+                            )
+                        if child is not None:
+                            try:
+                                best_bt = run_backtest(backtest_data, child)
+                            except Exception:
+                                best_bt = {"fitness": 0.0, "n_trades": 0}
 
                 if child is None:
-                    # Degenerado: ningún genoma utilizable disponible.
+                    # Sin bypass forzado (default) o degenerado incluso con
+                    # bypass activado: cupo vacante, la especie queda con
+                    # déficit hasta el próximo ciclo.
                     _log.warning(
-                        "[EvolutionEngine] Repopulación %s (%s): sin pool ni HoF; "
-                        "cupo queda vacante.", child_id, esp,
+                        "[EvolutionEngine] Repopulación %s (%s): sin candidato con "
+                        "edge confirmado — cupo queda vacante.", child_id, esp,
                     )
                     continue
 
@@ -1637,6 +1778,12 @@ class EvolutionEngine:
             if len(agents) < 2:
                 result.errors.append("Menos de 2 agentes activos. Ciclo omitido.")
                 return result
+
+            # Fase 2: fitness de cada agente ANTES del ciclo (veteranos), para
+            # ponderar la redistribución de capital — evita una query aparte.
+            fitness_map: dict[str, float] = {
+                a["id"]: float(a.get("fitness_score", 0) or 0) for a in agents
+            }
 
             # ── PASO A: Periodo de Gracia Operativa ──────────────────────────
             immune, eligible = self._classify_eligibility(agents)

@@ -1190,21 +1190,25 @@ def _tab_instructions() -> None:
       <div class="ins-card ins-card-left-amber" style="margin-top:12px;">
         <div style="font-size:10px;color:{AMBER};letter-spacing:1.5px;
                     text-transform:uppercase;font-weight:700;margin-bottom:10px;">
-          💰 Pool de capital compartido — Igualdad de condiciones cada día
+          💰 Pool de capital compartido — Ponderado por fitness (desde Fase 2, 2026-07-02)
         </div>
         <div class="ins-body">
           El sistema arrancó con <b>$100 USD virtuales</b> divididos en 10 partes iguales.
-          Al expandirse a <b>15 agentes (5 por especie)</b> el pool se redistribuyó:
-          <b>≈$6.58 por agente</b>. A partir de ese momento, el pool fluctúa únicamente
-          por las ganancias y pérdidas reales de trading — no se inyecta ni retira capital externo.<br><br>
+          Al expandirse a <b>15 agentes (5 por especie)</b> el pool se redistribuyó en partes
+          iguales. A partir de ese momento, el pool fluctúa únicamente por las ganancias y
+          pérdidas reales de trading — no se inyecta ni retira capital externo.<br><br>
           Al cierre de cada jornada (<b>11:00 pm Bogotá, lunes a viernes</b>), tras el ciclo
-          evolutivo, el sistema suma el <code>capital_actual</code> de los 15 agentes activos
-          resultantes y lo divide en partes iguales. <b>Todos los agentes inician el día
-          siguiente con exactamente el mismo capital</b>, independientemente de su especie,
-          generación o si ganaron, perdieron o fueron recién creados.<br><br>
-          Esto garantiza que la competencia sea <em>puramente estratégica</em>: ningún agente
-          llega al día siguiente con ventaja de capital. El único mérito que importa
-          es la calidad de la estrategia.
+          evolutivo, el sistema suma el <code>capital_actual</code> de los agentes activos
+          resultantes y lo reparte <b>ponderado por fitness</b>: cada agente veterano recibe
+          <code>clamp(1 + fitness_score, 0.5×, 2.0×)</code> la cuota equitativa de referencia —
+          un agente con buen fitness parte el día siguiente con hasta el doble de capital que
+          uno con mal fitness. Los recién nacidos reciben la cuota equitativa estándar (aún sin
+          fitness en vivo). La suma total nunca cambia: solo se redistribuye.<br><br>
+          Antes (hasta la Fase 1) el reparto era 100% igualitario — ganador y perdedor
+          terminaban con el mismo capital, lo que apagaba la selección natural (auditoría
+          2026-07-01). Ahora el capital mismo es una segunda fuerza selectiva: quien opera
+          mejor administra más capital al día siguiente, sin que la evolución tenga que
+          esperar a que un agente sea eliminado para que deje de pesar en el pool.
         </div>
       </div>
     </div>
@@ -1347,24 +1351,27 @@ def _tab_instructions() -> None:
         <div class="ins-step">
           <div class="ins-step-num">1</div>
           <div class="ins-step-text">
-            <b>Fitness por Expectancy neta (desde Sesión 16)</b> — Los agentes se ordenan
-            por <code>fitness = (expectancy/trade / (max_drawdown+1)) × confianza_estadística</code>.
-            La <b>expectancy</b> es <code>win_rate × ganancia_media − loss_rate × pérdida_media</code>
-            (ya neta de spread+slippage). La <b>confianza estadística</b> escala de 0 a 1
-            según cuántos trades cerrados tiene el agente vs. la muestra mínima de 15.
-            Un agente con ROI 5% en 2 trades no supera a uno con ROI 3% en 30 trades.
+            <b>Fitness por Expectancy en R (desde Fase 1, 2026-07-02)</b> — Los agentes se
+            ordenan por <code>fitness = (expectancy_R / (max_drawdown+1)) × confianza_estadística
+            − penalidad_overtrading</code>. La <b>expectancy en R</b> mide cada trade en
+            múltiplos de <em>su propio riesgo planificado</em> (<code>pnl / riesgo_usd</code>),
+            no en dólares absolutos — así es comparable entre agentes con capital distinto y a
+            través del tiempo, pese a que el capital de cada agente ya no es igual (ver punto 5).
+            La <b>confianza estadística</b> escala de 0 a 1 según cuántos trades cerrados tiene
+            el agente vs. la muestra mínima de 15.
           </div>
         </div>
         <div class="ins-step">
           <div class="ins-step-num">2</div>
           <div class="ins-step-text">
-            <b>Cuota dinámica + muestra mínima + protección de especies</b> —
-            Son <b>inmunes</b> (no elegibles para eliminación): agentes con &lt; 15 trades
-            cerrados (muestra insuficiente) o recién nacidos sin operaciones.
-            Solo son eliminables los elegibles con <b>fitness ≤ 0</b>.
-            Máximo <b>9 por día</b> (3 por especie × 3 especies).
-            <b>Protección de diversidad:</b> con 5 agentes por especie y mínimo 2,
-            el máximo real por especie es 3 — ninguna especie puede colapsar en un solo ciclo.
+            <b>Bleeder crónico + cuota dinámica + muestra mínima + protección de especies
+            (Fase 2, 2026-07-02)</b> — Son <b>inmunes</b> (no elegibles para eliminación):
+            agentes con &lt; 15 trades cerrados (muestra insuficiente) o recién nacidos sin
+            operaciones. Un <b>bleeder crónico</b> (fitness ≤ -0.3 con ≥ 20 trades) se elimina
+            <em>siempre</em>, sin importar cuota ni piso de especie — la evidencia de que ese
+            genoma no tiene edge ya es suficiente. Sobre el resto, la cuota dinámica solo
+            elimina elegibles con <b>fitness ≤ 0</b>, máximo <b>9 por día</b> (3 por especie ×
+            3 especies), protegidos por un mínimo de 2 agentes por especie.
           </div>
         </div>
         <div class="ins-step">
@@ -1398,15 +1405,22 @@ def _tab_instructions() -> None:
             después, cuando el agente acumula suficientes operaciones reales, ese número
             se compara contra su fitness real — permite medir si el torneo está
             seleccionando genes que de verdad funcionan en producción o solo en el
-            backtest.
+            backtest.<br><br>
+            <b>Cupos vacantes sin bypass forzado (Fase 2, 2026-07-02):</b> si ningún candidato
+            supera el umbral de calidad tras agotar las rondas de torneo y Hall of Fame, el
+            cupo queda <em>vacante</em> ese día — ya no se fuerza un cruce o clon sin evidencia
+            de edge solo para completar 15 agentes. La población puede flotar entre 6 (piso de
+            2 por especie) y 15; se recupera sola en cuanto un candidato real demuestra edge.
           </div>
         </div>
         <div class="ins-step">
           <div class="ins-step-num">5</div>
           <div class="ins-step-text">
-            <b>Redistribución igualitaria de capital</b> — Se suma el <code>capital_actual</code>
-            de los 15 agentes activos resultantes y se divide en partes iguales.
-            Todos inician el día siguiente con <b>exactamente el mismo capital</b>.
+            <b>Redistribución ponderada por fitness (Fase 2, 2026-07-02)</b> — Se suma el
+            <code>capital_actual</code> de los agentes activos resultantes y se reparte
+            <code>clamp(1 + fitness_score, 0.5×, 2.0×)</code> la cuota equitativa por agente
+            veterano (los recién nacidos reciben la cuota estándar). Ya no es un reparto
+            igualitario: quien opera mejor administra más capital al día siguiente.
           </div>
         </div>
       </div>
@@ -1494,14 +1508,16 @@ def _tab_instructions() -> None:
               <span style="color:{DIM};">① 10:45 pm — Cierre forzado:</span> todas las posiciones abiertas
               se cierran al precio de mercado del momento.<br>
               <span style="color:{DIM};">② 11:00 pm — Selección natural:</span> el Agente Juez clasifica
-              los 15 agentes por fitness (expectancy neta de costos, ajustada por drawdown y
-              confianza estadística — no ROI ni Calmar Ratio), elimina hasta 9 por cuota dinámica
-              (3 por especie máx., solo fitness ≤ 0) y crea el mismo número de hijos mediante
-              torneo de candidatos + backtest OOS de los supervivientes.<br>
+              a los agentes activos por fitness (expectancy en R ajustada por drawdown y
+              confianza estadística — no ROI ni Calmar Ratio), elimina siempre a los bleeders
+              crónicos (fitness ≤ -0.3 con ≥ 20 trades) y hasta 9 más por cuota dinámica
+              (3 por especie máx., solo fitness ≤ 0), y cría un hijo por cada cupo mediante
+              torneo de candidatos + backtest OOS — un cupo sin candidato que demuestre edge
+              queda vacante en vez de forzarse.<br>
               <span style="color:{DIM};">③ Redistribución de capital:</span> se suma el capital
-              de los 15 agentes activos resultantes (incluye cupos recuperados) y se divide en
-              partes iguales. Todos inician el día siguiente con el mismo capital.
-              Todo queda registrado en el log de auditoría.<br>
+              de los agentes activos resultantes (incluye cupos recuperados) y se reparte
+              ponderado por fitness — quien opera mejor administra más capital al día
+              siguiente. Todo queda registrado en el log de auditoría.<br>
               <span style="color:{DIM};">Los sábados y domingos este ciclo no corre — no hay trading.</span>
             </div>
           </div>

@@ -75,10 +75,26 @@ jobs:
       MIN_SAMPLE_DAYS:             "7"
       # Bloquear especie ruptura en régimen RANGO (coherencia backtest ↔ prod)
       RUPTURA_SOLO_TENDENCIA:      "true"
-      # ── Sesión 18 / 19: Recuperación de cupos vacantes (garantía de 15) ──
+      # ── Sesión 18 / 19: Recuperación de cupos vacantes ───────────────────
       TARGET_AGENTS_PER_ESPECIE:        "5"
       REPOPULATION_MAX_PER_CYCLE:       "3"   # deprecado (Sesión 19)
       REPOPULATION_MAX_ATTEMPTS_PER_SLOT: "8"
+      # ── Fase 2 (rediseño 2026-07-02): presión selectiva real ─────────────
+      # Ruptura: 24.8% WR, 68% de la pérdida total (auditoría 2026-07-01) —
+      # cupo objetivo reducido en vez de mantenerlo en 5 sin edge demostrado.
+      TARGET_AGENTS_RUPTURA:       "3"
+      # Bleeder crónico: elimina siempre (sin cuota ni piso de especie) un
+      # agente con fitness_score <= umbral y muestra grande.
+      BLEEDER_FITNESS_THRESHOLD:   "-0.3"
+      BLEEDER_MIN_TRADES:          "20"
+      # Capital ∝ fitness: reemplaza el reparto equitativo (hallazgo P0-2,
+      # auditoría 2026-07-01). FLOOR=CAP=1.0 revierte al reparto igualitario.
+      CAPITAL_WEIGHT_FLOOR:        "0.5"
+      CAPITAL_WEIGHT_CAP:          "2.0"
+      # Gate OOS sin bypass: cupo sin candidato con edge confirmado queda
+      # vacante en vez de forzar cruce/clon sin evidencia. "false" restaura
+      # el comportamiento legacy (forzado_cruce/forzado_clon_unico).
+      REPOBLACION_PERMITE_VACANTES: "true"
       LOG_LEVEL:                   "INFO"
       ENVIRONMENT:                 "production"
 
