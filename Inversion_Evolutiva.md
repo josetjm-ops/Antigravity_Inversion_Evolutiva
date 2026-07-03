@@ -25,14 +25,16 @@
 
 ## 1. Objetivo del sistema
 
-**Inversión Evolutiva** es un laboratorio de trading algorítmico que aplica algoritmos genéticos al mercado de divisas EUR/USD. El sistema mantiene una población de **15 agentes** de software (5 por cada uno de los 3 arquetipos estratégicos) que compiten entre sí para determinar cuáles estrategias de trading son más rentables ajustadas al riesgo. El sistema **garantiza siempre 15 agentes activos** (Sesión 19): si tras la reproducción normal quedan cupos vacantes, el motor los llena mediante hasta 8 rondas de torneo con umbral OOS y, como último recurso, clona el mejor agente del Hall of Fame. La única excepción es que Yahoo Finance esté completamente caído, en cuyo caso la recuperación se omite y se completa en el siguiente ciclo con datos.
+**Inversión Evolutiva** es un laboratorio de trading algorítmico que aplica algoritmos genéticos al mercado de divisas EUR/USD. El sistema mantiene una población de agentes de software organizados en 3 arquetipos estratégicos que compiten entre sí para determinar cuáles estrategias de trading son más rentables ajustadas al riesgo.
 
-Los agentes **no son configurados manualmente**: nacen con parámetros aleatorios o heredados, operan de forma autónoma durante el día y cada tarde son evaluados. Los peores son eliminados y los mejores reproducen descendencia con mutaciones estocásticas. Con el tiempo, la población converge hacia estrategias más eficientes sin intervención humana.
+**Población objetivo (actualizado en Fase 2 del rediseño de rentabilidad, 2026-07-02):** ya NO es una garantía fija de 15. El objetivo es 5 agentes para `tendencia`, 5 para `reversion` y **3 para `ruptura`** (reducido desde 5 — la auditoría 2026-07-01 encontró que esa especie generaba 24.8% de win rate y era responsable del 68% de la pérdida total del sistema), para un total objetivo de **13**. Además, el motor ya no fuerza un cupo vacante con un genoma sin evidencia de edge (`REPOBLACION_PERMITE_VACANTES=true`, default): si tras las rondas de torneo/HoF ningún candidato supera el umbral OOS, el cupo queda vacante y se reintenta el próximo ciclo. La población real flota entre 6 (piso: 2 agentes mínimo por especie) y 13, según cuántos candidatos demuestren edge cada noche — ver §8 y §10 para el detalle completo.
+
+Los agentes **no son configurados manualmente**: nacen con parámetros aleatorios o heredados, operan de forma autónoma durante el día y cada tarde son evaluados. Los peores son eliminados (incluyendo, sin excepción, cualquier "bleeder crónico" — un agente con expectancy claramente negativa y muestra grande, Fase 2) y los mejores reproducen descendencia con mutaciones estocásticas. Con el tiempo, la población converge hacia estrategias más eficientes sin intervención humana.
 
 **Principios fundamentales:**
 
 - Cada agente opera con capital virtual real en condiciones de mercado reales (precios EUR/USD de Yahoo Finance).
-- La competencia es justa: todos arrancan con el mismo capital cada ciclo evolutivo.
+- La competencia usa una vara objetiva: el capital de cada agente ya NO se reparte en partes iguales cada noche (eso apagaba la selección natural — auditoría 2026-07-01). Desde Fase 2 el capital se pondera por `fitness_score`: quien opera mejor administra más capital al día siguiente, dentro de un rango acotado (`0.5×`–`2.0×` la cuota equitativa de referencia).
 - El broker es simulado: no se ejecutan órdenes en ningún bróker externo. El P&L se calcula sobre variaciones reales del tipo de cambio.
 - El sistema es completamente autónomo: corre sin intervención humana de lunes a viernes.
 
@@ -201,6 +203,8 @@ Cada agente lleva cuatro diccionarios JSON que constituyen su "ADN". Estos pará
 | `be_activation_r` | 0.3–1.0 | Break-even stop: al ganar este múltiplo de R, el SL sube a entrada ± fricción. Gen mutable gaussianamente. (Sesión 22) |
 | `exit_on_reversal` | 0 / 1 | Salida por señal contraria fuerte: 1 = cierra la posición si la señal técnica determinista es opuesta con confianza ≥ umbral propio y la ganancia ≥ `min_profit_for_exit_r` × R. Muta por **bit-flip** (prob. 10% por crianza) — la evolución decide si el rasgo aporta. Sembrado 50/50 en la población por la migración 011. (Sesión 22) |
 | `min_profit_for_exit_r` | 0.2–1.0 | Piso de ganancia (en R) para permitir la salida por señal contraria. Nunca se cierra en pérdida por señal. Gen mutable gaussianamente. (Sesión 22) |
+| `partial_tp_r` | 0.5–2.0 | Salida parcial + runner (Fase 3, 2026-07-02): al alcanzar este múltiplo de R se cierra el 50% de la posición (booking de ganancia real, propio trade para el fitness en R) y el resto sigue corriendo hacia el TP/trailing normal. Ataca la firma "avg_win≈avg_loss pese a R:R objetivo 2.0" de la auditoría 2026-07-01. Gen mutable gaussianamente. |
+| `sesion_trading` | `"cualquiera"` / `"londres"` / `"ny"` / `"overlap"` | Sesión de trading (Fase 3, 2026-07-02): ventana horaria UTC en la que el agente puede abrir posiciones nuevas — "cualquiera" (default, sin restricción adicional a la ventana global), "londres" (07:00–16:00 UTC), "ny" (12:00–21:00 UTC), "overlap" (12:00–16:00 UTC, máxima liquidez EUR/USD). Gen **categórico**: no se muta gaussianamente, muta por **sorteo** (prob. 10% por crianza) entre sus 4 opciones. Mismo gate en `trade_monitor.py` (vivo) y `backtester.py` (OOS). |
 
 #### `especie` — Arquetipo estratégico (columna en `agentes`, no en `params_smc`)
 
@@ -210,13 +214,17 @@ Cada agente lleva cuatro diccionarios JSON que constituyen su "ADN". Estos pará
 | `reversion` | Mean-reversion en extremos RSI + OB/FVG estructural en mercado lateral | ADX < 25 (mercado en rango) | Desactivado (opera deliberadamente contra-tendencia) |
 | `ruptura` | Breakout de estructura (cierre fuera del rango N velas) confirmado por range_spike | ADX ≥ 25 o NEUTRAL — bloqueada en RANGO desde Sesión 17 (`RUPTURA_SOLO_TENDENCIA=true`) | Activo |
 
-La especie es **inmutable por mutación gaussiana**: el hijo hereda siempre la especie del agente eliminado que reemplaza (reproducción como-por-como), preservando la distribución de arquetipos. Solo cambia si la evolución decide que una especie no merece representación (pero el motor garantiza mínimo 2 agentes por especie activos).
+La especie es **inmutable por mutación gaussiana**: el hijo hereda siempre la especie del agente eliminado que reemplaza (reproducción como-por-como), preservando la distribución de arquetipos. Solo cambia si la evolución decide que una especie no merece representación (pero el motor garantiza mínimo 2 agentes por especie activos — `_MIN_AGENTS_PER_ESPECIE`).
+
+**Objetivo de población por especie (Fase 2, rediseño 2026-07-02):** `tendencia` y `reversion` mantienen objetivo 5 cada una (`TARGET_AGENTS_PER_ESPECIE=5`); `ruptura` se redujo a objetivo 3 (`TARGET_AGENTS_RUPTURA=3`) — la auditoría 2026-07-01 encontró que esa especie generaba 24.8% de win rate y era responsable del 68% de la pérdida total del sistema. La población total objetivo ya no es 15 fija, sino hasta 13 (5+5+3), y puede ser menor si algún cupo queda vacante (ver §8).
 
 ### Capital
 
 - **Capital inicial:** $10 USD por agente en la Generación 1 ($100 USD total). Al expandir la población a 15 agentes (Sesión 16), el pool se redistribuyó: **$6.5757 por agente** (~$98.64 total).
 - **Capital actual:** fluctúa con el P&L de cada operación.
-- **Redistribución diaria:** al final de cada ciclo evolutivo el Juez suma el pool total y lo divide en partes iguales entre los 15 agentes activos. El mérito individual es lo único que determina la supervivencia, no el capital acumulado.
+- **Redistribución diaria ponderada por fitness (Fase 2, rediseño 2026-07-02):** al final de cada ciclo evolutivo el Juez suma el `capital_actual` de todos los agentes activos resultantes y lo reparte **ponderado por fitness**, no en partes iguales. Cada agente veterano recibe `clamp(1 + fitness_score, 0.5×, 2.0×)` la cuota equitativa de referencia (`pool_total / n_agentes`); los recién nacidos (sin fitness en vivo aún) reciben la cuota equitativa estándar. La normalización garantiza que la suma total se conserve exacta — no se crea ni destruye capital, solo se redistribuye. `CAPITAL_WEIGHT_FLOOR=CAPITAL_WEIGHT_CAP=1.0` revierte al reparto igualitario anterior (kill-switch).
+  - Antes (hasta Fase 1) el reparto era 100% igualitario: ganador y perdedor terminaban con el mismo capital cada noche, lo que — según la auditoría 2026-07-01 (hallazgo P0-2) — **apagaba la selección natural**. Ahora el capital mismo es una segunda fuerza selectiva.
+  - **Nota de implementación:** `EvolutionEngine._redistribute_capital()` recibe `fitness_map` (calculado al inicio de `run()`, antes de eliminar/criar) como parámetro opcional. Un bug real en producción (2026-07-03) dejó este parámetro sin pasarse en ambas llamadas del método — la ponderación degradaba silenciosamente a reparto igualitario pese a que el log declaraba lo contrario. Corregido con un spy de regresión en `test_full_evolution_cycle_on_db` que verifica que el mapa efectivamente llega poblado.
 
 ---
 
@@ -345,19 +353,31 @@ El campo `capital_usado` en la BD almacena el **nocional en USD** (no lotes). El
 
 ## 6. Cuándo y cómo se consulta el LLM
 
-El LLM **DeepSeek** (`deepseek-chat`) se consulta en tres momentos distintos del sistema:
+**Fase 3 (rediseño 2026-07-02) — LLM fuera del camino de ejecución:** con `LLM_EXECUTION_ENABLED=false`
+(default), el Sub-agente A (Técnico) y el Sub-agente C (Riesgo) **ya no consultan a DeepSeek en
+producción**. Antes el LLM podía intervenir en la ejecución en vivo pero el backtester
+siempre corría con `reason()` stubeado a HOLD determinista — esa divergencia significaba que
+el fitness OOS medía una política distinta a la desplegada, además de introducir
+no-determinismo, costo y latencia recurrente. Con el flag en `false`, A y C usan **siempre**
+su heurística determinista, exactamente la misma lógica que evalúa el torneo walk-forward.
+`LLM_EXECUTION_ENABLED=true` restaura el comportamiento legacy descrito en 6.1 y 6.3 (kill-switch).
 
-### 6.1 Sub-agente A — validación por zona ambigua
+El Sub-agente B (Macro) y el Agente Juez **no están afectados** por este flag — siguen
+llamando a DeepSeek siempre, como se describe en 6.2 y 6.4.
 
-**Cuándo:** Únicamente cuando la confianza de la señal ponderada cae en el rango `[0.45, 0.65]`.
+### 6.1 Sub-agente A — validación por zona ambigua (solo si `LLM_EXECUTION_ENABLED=true`)
+
+**Cuándo:** Únicamente cuando la confianza de la señal ponderada cae en el rango `[0.45, 0.65]`
+**y** el flag de ejecución del LLM está activo. Por defecto (`false`) este paso se omite
+por completo y se usa siempre la señal heurística ponderada.
 
 **Qué se envía:** Todos los valores de indicadores (RSI, EMA, MACD, FVG, OB, range spike) con sus scores individuales y la señal ponderada provisional.
 
 **Qué se espera:** JSON con `{"recomendacion": "BUY"|"SELL"|"HOLD", "confianza": 0.0-1.0, "razon": "..."}`.
 
-**Fallback:** Si el LLM no está disponible, se usa directamente la señal heurística ponderada.
+**Fallback:** Si el LLM no está disponible (o el flag está en `false`), se usa directamente la señal heurística ponderada.
 
-### 6.2 Sub-agente B — análisis macro (siempre)
+### 6.2 Sub-agente B — análisis macro (siempre, sin cambios en Fase 3)
 
 **Cuándo:** En cada ciclo de trading, siempre que haya eventos o titulares disponibles.
 
@@ -367,9 +387,11 @@ El LLM **DeepSeek** (`deepseek-chat`) se consulta en tres momentos distintos del
 
 **Fallback:** Heurística local: si hay muchos eventos de alto impacto → HOLD con confianza baja.
 
-### 6.3 Sub-agente C — confirmación final
+### 6.3 Sub-agente C — confirmación final (solo si `LLM_EXECUTION_ENABLED=true`)
 
-**Cuándo:** Cuando la decisión preliminar es BUY o SELL (no para HOLD).
+**Cuándo:** Cuando la decisión preliminar es BUY o SELL (no para HOLD) **y** el flag de
+ejecución del LLM está activo. Por defecto (`false`) este paso se omite: la decisión final
+(acción, SL, TP) es la que calculó `SubAgentRisk._compute_levels()` sin intervención del LLM.
 
 **Qué se envía:** Señales de A y B completas, precio actual, SL/TP calculados, nocional USD pre-calculado y la acción preliminar con su confianza.
 
@@ -418,7 +440,7 @@ timeout     = 30 seg
 Para cada agente:
   ┌─ ¿Tiene posición abierta?
   │
-  ├── SÍ → Verificación intra-vela de SL/TP (desde Sesión 13):
+  ├── SÍ → Verificación intra-vela de SL/TP + salida parcial (Fase 3):
   │         1. Cargar timestamp_ultima_verificacion de la operación
   │            (o timestamp_entrada si nunca se verificó).
   │         2. Descargar OHLC 1-minuto de Yahoo Finance desde ese
@@ -430,9 +452,19 @@ Para cada agente:
   │                 - HIT_TP: cerrar exactamente al precio del TP.
   │                 - Ambos en la misma vela → SL gana (conservador).
   │                 timestamp_salida = timestamp real de la vela.
-  │              b) Sin hit → aplicar trailing usando el extremo
-  │                 favorable de la vela (low SELL / high BUY).
-  │         4. Si la operación cierra:
+  │              a2) Sin hit + gen partial_tp_r > 0 y aún no ejecutada
+  │                 (Fase 3, 2026-07-02): si el extremo favorable de la
+  │                 vela alcanza partial_tp_r × R, cierra el 50% de la
+  │                 posición al precio exacto del nivel (INSERT de una
+  │                 fila 'cerrada' nueva con su propio pnl/R — cuenta como
+  │                 su propio trade para el fitness) y reduce capital_usado
+  │                 de la posición original (el runner) a la mitad. Marca
+  │                 parcial_ejecutada=true (migración 014) para no volver
+  │                 a dispararse sobre esa posición.
+  │              b) Sin hit → aplicar break-even/trailing usando el extremo
+  │                 favorable de la vela (low SELL / high BUY), sobre el
+  │                 capital_usado ya reducido si hubo parcial.
+  │         4. Si la operación (o el runner reducido) cierra:
   │              - UPDATE operaciones (estado=cerrada, pnl, precio_salida,
   │                timestamp_salida del momento exacto de la mecha)
   │              - UPDATE agentes (capital_actual, roi_total, ops_ganadoras)
@@ -441,13 +473,15 @@ Para cada agente:
   │            y timestamp_ultima_verificacion = última vela procesada.
   │         6. Fallback automático: si Yahoo no devuelve velas (mercado
   │            cerrado, error API), cae al check legacy con snapshot único
+  │            (incluye chequeo de la parcial con el precio del snapshot)
   │            para no bloquear el ciclo. Log warning en ese caso.
   │
   ├── SÍ + gen exit_on_reversal=1 → Salida por señal contraria (Sesión 22):
   │         Con los datos de mercado ya descargados se recalcula la señal
   │         técnica DETERMINISTA del agente (sin LLM, reason() neutralizado
-  │         como en el backtester). La posición se cierra solo si se cumplen
-  │         LAS TRES condiciones:
+  │         como en el backtester — desde Fase 3 esto ya es el comportamiento
+  │         por defecto también en producción, no solo en el backtest). La
+  │         posición se cierra solo si se cumplen LAS TRES condiciones:
   │           1. Señal OPUESTA a la posición (BUY abierto + señal SELL o viceversa).
   │           2. Confianza >= umbral_confianza_minima del propio agente
   │              (la misma vara que exige para ABRIR en contra).
@@ -457,9 +491,14 @@ Para cada agente:
   │
   └── NO → Evaluar si abrir nueva posición:
             1. ¿Estamos en horario de trading? (1:30 am – 11:00 pm Bogotá)
-            2. ¿Cuarentena macro? (eventos críticos próximos)
-            3. Ejecutar pipeline A → B → C
-            4. Si decisión = BUY/SELL → INSERT en operaciones
+            2. ¿Régimen ADX compatible con la especie del agente?
+            3. ¿Sesión de trading del gen `sesion_trading` (Fase 3)?
+               "cualquiera" (sin restricción adicional) / "londres"
+               (07:00–16:00 UTC) / "ny" (12:00–21:00 UTC) / "overlap"
+               (12:00–16:00 UTC). Mismo gate en backtester para paridad OOS.
+            4. ¿Cuarentena macro? (eventos críticos próximos)
+            5. Ejecutar pipeline A → B → C (sin LLM en A/C por defecto, §6)
+            6. Si decisión = BUY/SELL → INSERT en operaciones
 ```
 
 ### Por qué la verificación intra-vela importa para la evolución
@@ -493,6 +532,30 @@ podía devolverlo todo (caso op #9284, 2026-06-12). El break-even stop lo cubre:
    **nunca empeora** un SL ya mejorado por el trailing.
 4. Replicado en `evolution/backtester.py`: el fitness OOS castiga o premia el
    gen con el mismo comportamiento que tendrá en producción.
+
+### Salida parcial + runner (Fase 3, rediseño 2026-07-02 — gen `partial_tp_r`)
+
+La auditoría 2026-07-01 encontró la firma "avg_win≈avg_loss pese a R:R objetivo 2.0": el
+sistema cortaba ganadores (BE/trailing/EOD) sistemáticamente antes de que llegaran al TP
+completo. La salida parcial ataca esto directamente:
+
+1. Al alcanzar `partial_tp_r × R` de ganancia flotante (gen mutable, rango 0.5–2.0) y si
+   aún no se ejecutó sobre esa posición, se cierra el **50% del `capital_usado`** al precio
+   exacto del nivel (misma convención que SL/TP — no al close de la vela).
+2. El cierre parcial se registra como una **fila nueva** en `operaciones` (estado `cerrada`,
+   mismo `precio_entrada`/`pips_sl` que la original — el riesgo por unidad no cambió) para
+   que cuente como su propio trade en el cálculo de expectancy en R (Fase 1): es una
+   observación de R válida por derecho propio, igual que en un diario de trading
+   profesional de scale-out.
+3. La posición original queda **abierta** con `capital_usado` reducido a la mitad (el
+   "runner"), marcada `parcial_ejecutada=true` (migración 014, columnas
+   `operaciones.parcial_ejecutada` / `capital_usado_original`) para no volver a dispararse.
+4. El runner sigue corriendo hacia el TP completo o el trailing/break-even normal, con el
+   capital ya reducido — si el precio revierte después, la pérdida (o el menor beneficio)
+   solo afecta a la mitad restante de la posición.
+5. Replicado en paralelo en `evolution/backtester.py` (misma fórmula, mismo orden de
+   chequeos: SL/TP → salida parcial → break-even/trailing) para mantener la paridad
+   vivo↔OOS que exige el diseño desde Fase 0.
 
 ### Trailing stop dinámico
 
@@ -539,24 +602,52 @@ Para que esto funcione en la "ventana ciega" de 03:30 – 06:30 UTC (11pm – 1:
 ### Secuencia del ciclo evolutivo
 
 ```
-1. EVALUACIÓN DE FITNESS — Expectancy ajustada por riesgo (Fase 1, desde Sesión 16)
-   ────────────────────────────────────────────────────────────────────────────────
-   expectancy = win_rate × avg_win − (1 − win_rate) × avg_loss
+1. EVALUACIÓN DE FITNESS — Expectancy en R ajustada por riesgo (Fase 1, rediseño 2026-07-02)
+   ────────────────────────────────────────────────────────────────────────────────────────
+   R_trade = pnl / riesgo_planificado_usd
+   riesgo_planificado_usd = capital_usado × pips_sl × 0.0001 / precio_entrada
+   (= la pérdida exacta que el trade hubiera sufrido si tocaba su SL — lo mismo
+   que el sizer de SubAgentRisk usó para dimensionar la posición)
+
+   expectancy_R = win_rate × avg_win_R − (1 − win_rate) × avg_loss_R
    (P&L ya es neto de fricción: TRADE_FRICTION_PIPS descontado al cerrar cada op)
 
    confianza_estadistica = LEAST(1.0, n_trades / MIN_SAMPLE_TRADES)
    (escala 0→1 mientras el agente acumula muestra mínima de 15 trades cerrados)
 
-   fitness = (expectancy / (max_drawdown + 0.01))
+   fitness = (expectancy_R / (max_drawdown + 1))
              × confianza_estadistica
-             − penalidad_overtrading
+             − penalidad_overtrading_continua
 
-   Penalidad: −0.5 si avg_ops_dia > 3 Y win_rate < 50%
+   max_drawdown ahora se mide sobre la curva de capital con BASE REAL
+   (capital_inicial del agente + SUM(pnl) acumulado) — antes arrancaba en 0 y
+   no representaba una curva de equity real.
 
-   Por qué expectancy y no ROI: con ROI, 3 trades de suerte inflan el fitness.
-   La expectancy neta por trade es estadísticamente estable y exige que el edge
-   sea real, no acumulable por azar. La confianza estadística bloquea la selección
-   de agentes con muestra insuficiente.
+   Penalidad de overtrading (Fase 1 — antes era un acantilado binario −0.5):
+   LEAST(0.3, GREATEST(0, avg_ops_dia − 3) × 0.03 × GREATEST(0, 0.5 − win_rate))
+   — continua, crece con el exceso de frecuencia y con qué tan malo es el
+   win rate, sin discontinuidad (el acantilado anterior era ~25× la escala
+   típica de la señal en dólares).
+
+   Por qué expectancy en R y no en dólares absolutos (hallazgo F1, auditoría
+   2026-07-01): el capital de cada agente cambia con el tiempo (redistribución
+   ponderada por fitness, ver §10), así que el pnl en dólares de un mismo
+   agente no es comparable entre sí mismo en distintas fechas, ni entre
+   agentes con capital distinto. R normaliza cada trade por SU PROPIO riesgo
+   planeado — invariante a la escala de capital, comparable entre agentes y
+   a través del tiempo. La confianza estadística sigue bloqueando la
+   selección de agentes con muestra insuficiente.
+
+   `roi_total` (columna en `agentes`) se retiró de TODAS las decisiones
+   evolutivas (Fase 1): es una suma aritmética de `pnl_pct` por operación
+   sobre una base de capital que cambia cada noche — no es un ROI real y
+   podía marcar valores como −354%/+476% mientras el capital de todos los
+   agentes era idéntico. Las decisiones que antes leían `roi_total`
+   (dominancia de cruce, revocación de inmunidad, elegibilidad y ponderación
+   de Hall of Fame) ahora usan `fitness_score` y `_real_roi_pct()`
+   (`(capital_actual − capital_inicial) / capital_inicial`, geométricamente
+   correcto porque `capital_inicial` es fijo desde el nacimiento del agente).
+   `roi_total` queda solo como campo informativo (logs, Sheets, dashboard).
 
 2. RANKING + FILTRO DE ELEGIBILIDAD (Muestra mínima + Periodo de Gracia)
    ──────────────────────────────────────────────────────────────────────
@@ -571,25 +662,40 @@ Para que esto funcione en la "ventana ciega" de 03:30 – 06:30 UTC (11pm – 1:
         en producción ya es evaluable aunque tenga pocos trades (especie en régimen
         adverso, baja frecuencia de señales).
 
-        Excepción — tope de pérdida (Fase 3, Sesión 17):
-        Si B aplica pero roi_total ≤ −IMMUNITY_MAX_LOSS_PCT (default 8 %), la
-        inmunidad se revoca: el agente pasa a eligible con flag _immunity_revoked
-        y es candidato a eliminación. Documentado como "Inmunidad revocada por
-        drawdown" en razon_eliminacion. No afecta la inmunidad A.
+        Excepción — tope de pérdida (Fase 3, Sesión 17 · usa ROI real desde
+        Fase 1 del rediseño 2026-07-02):
+        Si B aplica pero el ROI real (_real_roi_pct(), no roi_total) ≤
+        −IMMUNITY_MAX_LOSS_PCT (default 8 %), la inmunidad se revoca: el
+        agente pasa a eligible con flag _immunity_revoked y es candidato a
+        eliminación. Documentado como "Inmunidad revocada por drawdown" en
+        razon_eliminacion. No afecta la inmunidad A.
    Los inmunes mantienen estado 'activo' automáticamente.
 
-3. CUOTA DINÁMICA + PROTECCIÓN DE ESPECIES
-   ─────────────────────────────────────────
-   Sobre los agentes ELEGIBLES (no inmunes):
-     - Se ordenan por (fitness ASC, fecha_nacimiento ASC, id ASC)
-       → primeros candidatos son veteranos rezagados.
-     - Solo eliminables los que tienen fitness_score <= 0.
-     - n_eliminate = min(N_ELIMINATE=9, len(eliminables))  ← máx. 3 por especie × 3 especies
+3. BLEEDER CRÓNICO + CUOTA DINÁMICA + PROTECCIÓN DE ESPECIES
+   ────────────────────────────────────────────────────────────
+   a. Bleeder crónico (Fase 2 del rediseño 2026-07-02 — incondicional, se
+      evalúa PRIMERO y no cuenta contra la cuota de N_ELIMINATE):
+        Cualquier agente elegible con fitness_score <= BLEEDER_FITNESS_THRESHOLD
+        (default −0.3) y n_trades >= BLEEDER_MIN_TRADES (default 20) se
+        elimina SIEMPRE, sin importar cuota ni piso de especie. La especie
+        pierde ese miembro del conteo ANTES de aplicar el piso de especie al
+        resto — un bleeder confirmado con muestra grande no debe sobrevivir
+        solo porque su especie está en el mínimo (hallazgo 3, auditoría
+        2026-07-01: el piso de especie blindaba a 2026-06-12_08, ROI real
+        −354%, fitness apenas −0.005 en la escala vieja en dólares).
 
-   Protección de diversidad de especies (Fase 2): nunca se elimina un agente
+   b. Cuota dinámica, sobre el resto de los elegibles (comportamiento previo):
+        - Se ordenan por (fitness ASC, fecha_nacimiento ASC, id ASC)
+          → primeros candidatos son veteranos rezagados.
+        - Solo eliminables los que tienen fitness_score <= 0.
+        - n_eliminate = min(N_ELIMINATE=9, len(eliminables))  ← máx. 3 por especie × 3 especies
+
+   Protección de diversidad de especies (Sesión 17, Fase 2 — no confundir con
+   la Fase 2 del rediseño 2026-07-02 de arriba): nunca se elimina un agente
    si hacerlo bajaría su especie (tendencia/reversion/ruptura) por debajo de
    MIN_AGENTS_PER_ESPECIE (default 2). Se saltea ese candidato y se toma el
-   siguiente peor de una especie con ≥ 3 agentes.
+   siguiente peor de una especie con ≥ 3 agentes. Los bleeders del paso (a)
+   NO están sujetos a esta protección.
 
 4. ¿CICLO SUSPENDIDO?
    ───────────────────
@@ -649,36 +755,43 @@ Para que esto funcione en la "ventana ciega" de 03:30 – 06:30 UTC (11pm – 1:
        crisis — se prefieren los que el OOS sugiere que son mejores.
    Agentes con < MIN_SAMPLE_TRADES tienen fitness ≈ 0 → raramente seleccionados.
 
-7. RECUPERACIÓN DE CUPOS VACANTES — GARANTÍA DE 15 (Sesión 18 / 19)
-   ────────────────────────────────────────────────────────────────────
+7. RECUPERACIÓN DE CUPOS VACANTES (Sesión 18/19 · gate sin bypass desde Fase 2 del rediseño 2026-07-02)
+   ──────────────────────────────────────────────────────────────────────────────────────────────────────
    Después de la reproducción (o en ciclo suspendido), el motor calcula el déficit
-   por especie: TARGET_AGENTS_PER_ESPECIE − n_activos_especie y llena TODOS los
-   cupos faltantes (Sesión 19: sin tope por ciclo). Para cada cupo:
+   por especie: target_especie − n_activos_especie y trata de llenar todos los
+   cupos faltantes (sin tope por ciclo). `target_especie` es TARGET_AGENTS_PER_ESPECIE
+   (5) para tendencia/reversion y TARGET_AGENTS_RUPTURA (3) para ruptura — el
+   objetivo YA NO es fijo en 15 (ver §4). Para cada cupo:
      a. Usar los mismos datos de backtest ya descargados (sin nueva descarga de red).
      b. Hasta REPOPULATION_MAX_ATTEMPTS_PER_SLOT rondas (default 8) de
         (torneo N candidatos → umbral OOS) seguido de (HoF N candidatos → umbral OOS).
         Se detiene en cuanto un candidato supera el umbral. Cada candidato lleva
         ≥1 padre de la especie (pureza dura, Sesión 25).
-     c. DEGRADACIÓN 1 (Sesión 21): si tras agotar las rondas nadie pasa el umbral
-        estricto, entra el MEJOR CANDIDATO DE CRUCE visto en todas las rondas
-        (origen='mejor_candidato_oos') — un hijo de dos padres distintos con
-        muestra OOS corta vale más que un clon sin cruce. El cruce 60/40 nunca
-        se abandona.
-     d. DEGRADACIÓN 2 — último recurso real (Sesión 21): si ningún pool tiene 2
-        padres para criar candidatos, se cruzan los DOS MEJORES genomas distintos
-        disponibles entre HoF y pool (origen='forzado_cruce'); el de la especie
-        correcta es siempre el padre dominante (60% del genoma, p1_weight=0.6
-        explícito). Un agente eliminado puede aportar como uno de los dos padres,
-        pero NUNCA ser el genoma único. Auto-clon (origen='forzado_clon_unico')
-        SOLO si existe literalmente un genoma activo en el sistema.
-        ⚠️ El clon forzado de Sesión 19 (origen='forzado_hof'/'forzado_pool',
-        padre==madre) queda ELIMINADO: el 2026-06-12 produjo 4 hijos sin cruce,
-        3 de ellos del mismo genoma de otra especie y 1 de un agente eliminado
-        esa misma noche. Ver Sesión 21 en el historial.
+     c. **Sin bypass forzado (`REPOBLACION_PERMITE_VACANTES=true`, default desde
+        Fase 2 del rediseño 2026-07-02):** si tras agotar las rondas ningún
+        candidato supera el umbral, el cupo queda **VACANTE** — ya no se
+        despliega un genoma sin evidencia de edge solo para completar la
+        población. Se reintenta en el próximo ciclo. Esto elimina precisamente
+        la "cantidad sobre calidad" que dejaba sobrevivir especies sin edge
+        real (hallazgo S3, PLAN_REDISENO_RENTABILIDAD.md).
+     d. Kill-switch legacy (`REPOBLACION_PERMITE_VACANTES=false`) — restaura el
+        comportamiento anterior a Fase 2:
+          - DEGRADACIÓN 1 (Sesión 21): si nadie pasa el umbral estricto, entra
+            el MEJOR CANDIDATO DE CRUCE visto en todas las rondas
+            (origen='mejor_candidato_oos') — un hijo de dos padres distintos
+            con muestra OOS corta vale más que un clon sin cruce.
+          - DEGRADACIÓN 2 — último recurso real (Sesión 21): si ningún pool
+            tiene 2 padres, se cruzan los DOS MEJORES genomas distintos
+            disponibles entre HoF y pool (origen='forzado_cruce'); el de la
+            especie correcta domina el 60% del genoma. Un agente eliminado
+            puede aportar como uno de los dos padres, pero nunca ser el
+            genoma único. Auto-clon (origen='forzado_clon_unico') solo si
+            existe literalmente un genoma activo en el sistema.
      e. Si Yahoo Finance no está disponible (sin datos de mercado) → omitir
         silenciosamente: no hay base ni para validar ni para criar (fallback sin Yahoo).
    Los agentes recuperados se insertan en la misma transacción DB y reciben capital
-   de la redistribución de ese mismo ciclo.
+   de la redistribución de ese mismo ciclo. La población real flota entre 6 (piso de
+   especies) y el objetivo (13 con los valores default) según cuántos cupos se cubran.
    Trazabilidad: `slots_recuperados` y `deficit_restante` en `logs_juez.datos_json`.
    Ciclo suspendido: si hay recuperados → la redistribución de capital sí se ejecuta.
 
@@ -686,26 +799,45 @@ Para que esto funcione en la "ventana ciega" de 03:30 – 06:30 UTC (11pm – 1:
 
 9. PERSISTENCIA EN LOGS (logs_juez: evaluacion_diaria, eliminacion, nuevo_agente)
 
-10. REDISTRIBUCIÓN DE CAPITAL
-    pool_total / n_agentes_activos → todos inician el día siguiente igualados.
-    Incluye agentes recuperados en el paso 7.
+10. REDISTRIBUCIÓN DE CAPITAL PONDERADA POR FITNESS (Fase 2 del rediseño 2026-07-02)
+    Reemplaza el reparto igualitario anterior (`pool_total / n_agentes_activos` para
+    todos por igual). Ahora cada agente veterano recibe
+    `clamp(1 + fitness_score, CAPITAL_WEIGHT_FLOOR=0.5, CAPITAL_WEIGHT_CAP=2.0)` veces
+    la cuota equitativa de referencia, normalizado para que la suma total se
+    conserve exacta (no se crea ni destruye capital). Los recién nacidos (incluye
+    los recuperados en el paso 7) reciben la cuota equitativa estándar — aún no
+    tienen fitness en vivo. `CAPITAL_WEIGHT_FLOOR=CAPITAL_WEIGHT_CAP=1.0` revierte
+    al reparto igualitario (kill-switch). Ver §4 (Capital) para el detalle y el
+    bug de acople (`fitness_map` no llegaba a `_redistribute_capital`) corregido
+    el 2026-07-03.
 ```
 
-### Cálculo del Fitness — Expectancy ajustada (Fase 1)
+### Cálculo del Fitness — Expectancy en R ajustada (Fase 1 del rediseño 2026-07-02)
 
 ```sql
 -- Por agente (n_trades = operaciones cerradas):
-expectancy = (n_wins/n_trades) × avg_win − (1 − n_wins/n_trades) × avg_loss
+-- R = pnl / riesgo_planificado_usd, riesgo_planificado_usd = capital_usado
+--     × pips_sl × 0.0001 / precio_entrada. avg_win_r/avg_loss_r promedian el
+--     R de cada trade (no el pnl en dólares) — escala-invariante entre
+--     agentes con capital distinto y a través del tiempo.
+expectancy_R = (n_wins/n_trades) × avg_win_r − (1 − n_wins/n_trades) × avg_loss_r
 
 -- confianza estadística (ramp-up hasta 15 trades):
 confianza = LEAST(1.0, n_trades / 15)
 
 -- fitness final:
-fitness = (expectancy / (max_drawdown + 1)) × confianza − penalidad_overtrading
+fitness = (expectancy_R / (max_drawdown + 1)) × confianza − penalidad_overtrading_continua
 
--- max_drawdown: máxima caída desde pico del capital acumulado
--- avg_win / avg_loss: ya son netos de fricción (1.4 pips descontados al cerrar)
+-- max_drawdown: máxima caída desde pico de la curva de capital REAL
+--   (capital_inicial del agente + SUM(pnl) acumulado) — antes arrancaba en 0.
+-- avg_win_r / avg_loss_r: ya son netos de fricción (1.4 pips descontados al cerrar)
+-- penalidad_overtrading_continua: LEAST(0.3, GREATEST(0, avg_ops_dia-3) × 0.03
+--   × GREATEST(0, 0.5 - win_rate)) — reemplaza el acantilado binario −0.5 anterior.
 ```
+
+La CTE SQL que implementa esta fórmula vive en `evolution/evolution_engine._fitness_cte()`,
+compartida entre `calc_fitness_scores()` y `_get_active_agents_ranked()` (antes duplicada
+con lógica divergente entre ambos — unificada en Fase 1 del rediseño 2026-07-02).
 
 ### Backtester Walk-Forward (Fase 3, Sesión 16 · modo multi-fold añadido Sesión 27)
 
@@ -738,13 +870,29 @@ exactamente:
   - calc_signals() con los mismos genes del candidato
   - Clasificador ADX: S1 bloqueado en RANGO, S2 bloqueado en TENDENCIA,
     S3 bloqueado en RANGO si RUPTURA_SOLO_TENDENCIA=true (Sesión 17)
-  - SubAgentTechnical.analyze(especie=...) — ensamble por arquetipo
+  - Gate de sesión de trading (gen sesion_trading, Fase 3 del rediseño
+    2026-07-02) — misma ventana UTC que trade_monitor.py.
+  - SubAgentTechnical.analyze(especie=...) — ensamble por arquetipo, sin LLM
+    (reason() siempre stubeado a HOLD determinista en el backtester — desde
+    Fase 3 esto también es el comportamiento por defecto en producción, no
+    solo en el backtest, ver §6).
   - SubAgentRisk._compute_levels() — SL ≥ 10 pips, R:R objetivo
   - check_sl_tp_intrabar() sobre cada vela 15m: SL/TP exactos
+  - Salida parcial + runner (gen partial_tp_r, Fase 3): simulada con la misma
+    fórmula que trade_monitor.py — cierra el 50% al alcanzar el múltiplo de R,
+    registrado como su propio trade en `oos_trades`.
+  - Break-even/trailing sobre el capital ya reducido tras la parcial.
   - Fricción TRADE_FRICTION_PIPS descontada por trade
   - Cierre EOD al borde del propio fold/período (nunca al final del dataset
     completo — bug de fuga hacia adelante corregido en Sesión 27 al extraer
     el núcleo walk-forward compartido entre ambos modos)
+
+Cadencia de evaluación de señal (Fase 0 del rediseño 2026-07-02 —
+`BACKTEST_CHECK_EVERY_CANDLES`, default 4 velas de 15m = 1h): el cron real de
+producción dispara cada 15 min (1 vela), no cada hora como asumía el default
+histórico de esta constante — divergencia documentada pero sin corregir aún
+por el riesgo de que bajar a 1 acerque el costo del backtest al timeout de
+`judge_daily.yml` (medir en sandbox antes de activarlo).
 
 Rendimiento medido empíricamente (Sesión 27, EUR/USD real):
   - single    : ~5.7s/candidato (media de 5 corridas)
@@ -870,9 +1018,9 @@ El valor de `genetic_variance_cv` y el flag `sigma_boost_applied` quedan registr
 | **Inicio del sistema** | Script manual de siembra con parámetros fijos o copiados de agentes previos |
 | **Reproducción diaria** | El Juez selecciona 2 padres del pool de supervivientes elegibles (fitness-proporcional; pesos OOS si todos pierden) y los cruza con mutación. Torneo de 3 candidatos backtesteados OOS — solo se despliega el mejor si supera el umbral de calidad (Sesión 17) |
 | **Fallback Hall of Fame** | Si ningún candidato del torneo supera el umbral OOS, se crían 3 candidatos con genes del Hall of Fame (misma especie primero) y se aplica el mismo umbral. Si tampoco pasan: slot vacante (Sesión 17) |
-| **Recuperación de cupos — garantía de 15 (Sesión 18 / 19 / 21)** | En cada ciclo el motor detecta el déficit por especie (`TARGET_AGENTS_PER_ESPECIE − activos`) y llena TODOS los cupos (sin tope). Por cupo: hasta `REPOPULATION_MAX_ATTEMPTS_PER_SLOT` rondas de torneo→HoF con umbral OOS; si nadie pasa, **el mejor candidato de cruce** (`origen='mejor_candidato_oos'` — siempre dos padres distintos); si ningún pool tiene 2 padres, **cruce forzado de los 2 mejores genomas distintos** (`'forzado_cruce'`). Auto-clon solo con un único genoma activo en el sistema. Solo se omite si Yahoo Finance está caído. |
+| **Recuperación de cupos (Sesión 18/19/21 · sin bypass forzado desde Fase 2 del rediseño 2026-07-02)** | En cada ciclo el motor detecta el déficit por especie (`target_especie − activos`, donde `target_especie` es 5 para tendencia/reversión y 3 para ruptura) y trata de llenar todos los cupos (sin tope). Por cupo: hasta `REPOPULATION_MAX_ATTEMPTS_PER_SLOT` rondas de torneo→HoF con umbral OOS; si nadie pasa, el cupo queda **VACANTE** por defecto (`REPOBLACION_PERMITE_VACANTES=true`) — ya no se fuerza un genoma sin evidencia de edge. El kill-switch (`=false`) restaura la cascada legacy: mejor candidato de cruce (`'mejor_candidato_oos'`) → cruce forzado de los 2 mejores genomas (`'forzado_cruce'`) → auto-clon solo con un único genoma activo (`'forzado_clon_unico'`). Solo se omite si Yahoo Finance está caído. |
 | **Reset manual** | Limpieza total de la DB e inserción de nueva generación semilla |
-| **Registro en Hall of Fame** | `estrategias_exitosas` captura los genes de agentes con ROI > 0.05% para herencia futura |
+| **Registro en Hall of Fame** | `estrategias_exitosas` captura los genes de agentes con muestra suficiente y `fitness_score ≥ 0.05` (Fase 1 del rediseño 2026-07-02 — antes era ROI > 0.05%, un umbral prácticamente trivial en esa escala) para herencia futura, junto con el propio `fitness_registro` (migración 013) |
 
 ### Formato del INSERT de un nuevo agente
 
@@ -893,29 +1041,38 @@ INSERT INTO agentes (
 )
 ```
 
-### Eliminación con cuota dinámica
+### Eliminación con bleeder crónico + cuota dinámica
 
-La cuota de eliminación no es rígida. Cada tarde el motor calcula cuántos agentes salen, **con un máximo de N_ELIMINATE (default 9 = 3 por especie × 3 especies) y un mínimo de 0**, aplicando tres salvaguardas:
+**Bleeder crónico (Fase 2 del rediseño 2026-07-02 — incondicional, no cuenta contra la cuota):**
+cualquier agente elegible con `fitness_score <= BLEEDER_FITNESS_THRESHOLD` (default −0.3) y
+`n_trades >= BLEEDER_MIN_TRADES` (default 20) se elimina **siempre**, sin importar cuota ni
+piso de especie. Un genoma con expectancy claramente negativa y muestra grande ya demostró
+que no tiene edge — el piso de especie ya no lo blinda (antes protegía a bleeders confirmados,
+p. ej. 2026-06-12_08 con ROI real −354%).
+
+La cuota de eliminación sobre el resto tampoco es rígida. Cada tarde el motor calcula cuántos
+agentes más salen, **con un máximo de N_ELIMINATE (default 9 = 3 por especie × 3 especies) y
+un mínimo de 0**, aplicando tres salvaguardas:
 
 **Salvaguarda 1 — Periodo de Gracia / Muestra mínima híbrida (Fases 3-4, Sesión 17):**
 - **Periodo de Gracia (inviolable):** `operaciones_total == 0` y edad < `GRACE_PERIOD_DAYS` días hábiles.
 - **Muestra mínima híbrida:** `n_trades < MIN_SAMPLE_TRADES` (15) **Y** `edad < MIN_SAMPLE_DAYS` (7 días hábiles). Si el agente cumple una sola condición ya es elegible, evitando inmunidad perpetua en especies de baja frecuencia.
-- **Tope de pérdida revoca inmunidad por muestra:** si el agente está protegido solo por muestra insuficiente (no por Gracia) y su `roi_total ≤ −IMMUNITY_MAX_LOSS_PCT` (default 8 %), la inmunidad se revoca y pasa a eligible. Documentado en `razon_eliminacion` como "Inmunidad revocada por drawdown".
+- **Tope de pérdida revoca inmunidad por muestra:** si el agente está protegido solo por muestra insuficiente (no por Gracia) y su ROI **real** (`_real_roi_pct()` = `(capital_actual − capital_inicial) / capital_inicial`, Fase 1 del rediseño 2026-07-02 — ya no `roi_total`, la suma aritmética rota) `≤ −IMMUNITY_MAX_LOSS_PCT` (default 8 %), la inmunidad se revoca y pasa a eligible. Documentado en `razon_eliminacion` como "Inmunidad revocada por drawdown".
 
 **Salvaguarda 2 — Protección de fitness positivo:** solo son eliminables los agentes elegibles con `fitness_score <= 0` (negativo o cero). Un veterano rentable nunca se elimina solo para cumplir la cuota.
 
-**Salvaguarda 3 — Diversidad de especies:** nunca se elimina un agente si hacerlo bajaría su especie por debajo de `MIN_AGENTS_PER_ESPECIE` (default 2). Con 5 agentes por especie, el máximo eliminable por especie es 3.
+**Salvaguarda 3 — Diversidad de especies:** nunca se elimina un agente (por cuota dinámica; los bleeders SÍ la ignoran) si hacerlo bajaría su especie por debajo de `MIN_AGENTS_PER_ESPECIE` (default 2).
 
-**Orden de eliminación (desempate generalizado):** los candidatos elegibles se ordenan por `(fitness_score ASC, fecha_nacimiento ASC, id ASC)`. Eso significa que ante empate de fitness, los **veteranos rezagados** salen primero y los **agentes jóvenes** se preservan — un complemento simétrico al desempate del ranking de supervivencia.
+**Orden de eliminación (desempate generalizado):** los candidatos elegibles a cuota dinámica se ordenan por `(fitness_score ASC, fecha_nacimiento ASC, id ASC)`. Eso significa que ante empate de fitness, los **veteranos rezagados** salen primero y los **agentes jóvenes** se preservan — un complemento simétrico al desempate del ranking de supervivencia.
 
-**Tres escenarios posibles cada tarde:**
+**Escenarios posibles cada tarde (población objetivo ya no es 15 fija — ver §4/§8):**
 
 | Escenario | Eliminados | Nacimientos | Razón |
 |---|---|---|---|
-| Día normal con veteranos negativos | 1 a 9 | 0 al mismo número (reproducción) + recuperación de TODO el déficit hasta 15 (mejor candidato de cruce si nadie pasa OOS) | Bottom por fitness, respetando máx 3/especie |
-| Día de HOLD generalizado | 0 | recuperación de TODO el déficit hasta 15, si Yahoo disponible | Todos los activos están en inmunidad/gracia |
-| Veteranos rentables protegidos | 0 | recuperación de TODO el déficit hasta 15, si Yahoo disponible | Todos los elegibles tienen fitness > 0 |
-| Yahoo Finance caído | 0 a 9 | sin recuperación (no hay datos para validar ni clonar) | Población puede quedar < 15 ese día; se recupera al siguiente ciclo con datos |
+| Día normal con bleeders/veteranos negativos | bleeders (siempre) + 0-9 por cuota | 0 al mismo número (reproducción) + recuperación del déficit hasta el objetivo (mejor candidato de cruce o vacante si nadie pasa OOS, según `REPOBLACION_PERMITE_VACANTES`) | Bleeders incondicionales + bottom por fitness, respetando máx 3/especie en la cuota |
+| Día de HOLD generalizado | 0 | recuperación del déficit hasta el objetivo, si Yahoo disponible | Todos los activos están en inmunidad/gracia |
+| Veteranos rentables protegidos | 0 (salvo bleeders) | recuperación del déficit hasta el objetivo, si Yahoo disponible | Todos los elegibles no-bleeder tienen fitness > 0 |
+| Yahoo Finance caído | bleeders + 0-9 por cuota | sin recuperación (no hay datos para validar ni clonar) | Población puede quedar bajo el objetivo ese día; se recupera al siguiente ciclo con datos |
 
 **SQL de la eliminación:**
 
@@ -998,7 +1155,11 @@ Log de cada señal BUY/SELL/HOLD. Una fila por ciclo de decisión.
 | `sl_dinamico` | DECIMAL | SL actual (actualizado por trailing stop) |
 | `precio_extremo_favorable` | DECIMAL | Precio más favorable alcanzado (para trailing) |
 | `timestamp_ultima_verificacion` | TIMESTAMPTZ | Hasta qué momento (UTC) ya se examinó OHLC 1m para esta operación. El monitor descarga velas posteriores a este valor en cada ciclo. Inicialmente = `timestamp_entrada`; avanza con la última vela procesada. Migración 008. |
+| `parcial_ejecutada` | BOOLEAN | Fase 3 (rediseño 2026-07-02): `true` si ya se ejecutó el cierre parcial a `partial_tp_r × R` sobre esta posición — evita re-disparar el cierre parcial en ciclos siguientes. Default `false`. Migración 014. |
+| `capital_usado_original` | NUMERIC | Fase 3: `capital_usado` ANTES del cierre parcial (tamaño original de la posición). `NULL` si la posición nunca tuvo cierre parcial. Migración 014. |
 | `created_at` | TIMESTAMPTZ | Marca de creación del registro |
+
+**Nota sobre la salida parcial (Fase 3):** un cierre parcial no modifica la fila original más allá de reducir `capital_usado` a la mitad y marcar `parcial_ejecutada=true` — la porción vendida se registra como una **fila nueva** independiente (mismo `precio_entrada`/`pips_sl`, propio `precio_salida`/`pnl`/`estado='cerrada'`), de modo que cuenta como su propio trade en el cálculo de expectancy en R (§8).
 
 ### `logs_juez`
 
@@ -1027,7 +1188,7 @@ Audit trail completo del Agente Juez.
 | `sigma_boost_applied` | bool | `true` si se duplicaron las sigmas por baja diversidad |
 | `sigma_used` | object | `{weights, periods, risk}` efectivamente aplicadas |
 | `capital_pool_total` | float | Pool total en USD |
-| `capital_por_agente` | float | Cuota individual tras redistribución |
+| `capital_por_agente` | float | Cuota **equitativa de referencia** (`pool_total / n_agentes`) — desde Fase 2 del rediseño 2026-07-02 ya NO es el capital real de cada agente: cada uno recibe `clamp(1 + fitness_score, 0.5×, 2.0×)` de este valor. El capital real por agente hay que consultarlo en `agentes.capital_actual`. |
 | `slots_vacantes` | array | Slots no cubiertos en la reproducción (Fase 1, Sesión 17): `[{id, especie, razon}]`. Vacío si todos los cupos se llenaron. |
 | `slots_recuperados` | array | Cupos recuperados en este ciclo (Sesión 18 / 19 / 21): `[{id, especie, fitness_oos, origen}]` donde `origen` ∈ `{"torneo", "hall_of_fame", "mejor_candidato_oos", "forzado_cruce", "forzado_clon_unico"}`. `mejor_candidato_oos` = mejor hijo de cruce cuando nadie superó el umbral; `forzado_cruce` = cruce de los 2 mejores genomas distintos cuando no hay pools para torneo; `forzado_clon_unico` = auto-clon con un solo genoma activo (excepcional). Los antiguos `forzado_hof`/`forzado_pool` (clones padre==madre, Sesión 19) fueron eliminados en Sesión 21. Vacío si no hubo recuperación. |
 | `deficit_restante` | object | Déficit por especie no cubierto tras la recuperación (Sesión 18): `{especie: n}`. Vacío si no quedó déficit. |
@@ -1042,11 +1203,29 @@ Snapshot diario de posición, ROI y capital de cada agente al final del día. Al
 
 ### `estrategias_exitosas`
 
-Hall of Fame: parámetros de agentes que superaron el umbral `MIN_ROI_FOR_HALL_OF_FAME` (default 0.05%). Reserva de "genes buenos" para herencia futura.
+Hall of Fame: parámetros de agentes que superaron el umbral `MIN_ROI_FOR_HALL_OF_FAME`
+(default 0.05, **en unidades de `fitness_score`** desde Fase 1 del rediseño 2026-07-02 — antes
+comparaba contra `roi_total`, un umbral prácticamente trivial en esa escala). Reserva de
+"genes buenos" para herencia futura. Columna `fitness_registro` (NUMERIC, migración 013)
+persiste el `fitness_score` real del agente al momento de la inscripción — lo usa
+`_get_hof_parents()` para ponderar y dominar cruces con la misma vara que un agente vivo.
+`roi_que_genero` pasa a guardar el ROI real (`_real_roi_pct()`), no la suma aritmética rota
+de `roi_total` — queda como campo informativo/auditoría. Entradas anteriores a la migración
+013 tienen `fitness_registro = NULL`; `_get_hof_parents()` usa `roi_que_genero` como
+aproximación de respaldo solo para esos registros legacy.
 
-### `v_decaimiento_oos` (vista, Sesión 27)
+### `v_decaimiento_oos` (vista, Sesión 27 · fórmula actualizada a R en Fase 1 del rediseño 2026-07-02)
 
-Compara `fitness_oos_prometido` (promesa del torneo al nacer) contra el fitness real ya en producción, solo para agentes con `n_trades >= 15` (muestra madura). Instrumento de auditoría del propio proceso de selección: permite calcular el decaimiento promedio (`realizado − prometido`), la correlación prometido↔realizado y la tasa de falsos positivos del torneo (candidatos con promesa positiva que terminan con fitness real negativo). Es el criterio de datos que debe consultarse antes de decidir activar `TOURNAMENT_GATE_MODE=bootstrap` o `BACKTEST_MODE=multifold` (ver `PLAN_DE_MEJORA.md`).
+Compara `fitness_oos_prometido` (promesa del torneo al nacer) contra el fitness real ya en
+producción, solo para agentes con `n_trades >= 15` (muestra madura). Ambos lados de la
+comparación usan ahora la misma fórmula de expectancy en R (migración 013 actualiza la vista
+en paralelo al cambio de fórmula en `evolution_engine.py` — antes de eso el "realizado" de la
+vista comparaba en dólares mientras el backtester ya prometía en R, una comparación inválida).
+Instrumento de auditoría del propio proceso de selección: permite calcular el decaimiento
+promedio (`realizado − prometido`), la correlación prometido↔realizado y la tasa de falsos
+positivos del torneo (candidatos con promesa positiva que terminan con fitness real
+negativo). Es el criterio de datos que debe consultarse antes de decidir activar
+`TOURNAMENT_GATE_MODE=bootstrap` o `BACKTEST_MODE=multifold` (ver `PLAN_DE_MEJORA.md`).
 
 ---
 
@@ -1305,7 +1484,7 @@ Todas las variables se definen en `.env` local (desarrollo) o en **GitHub Secret
 | `MUTATION_SIGMA_WEIGHTS` | Sigma de mutación para pesos (default: `0.05`) |
 | `MUTATION_SIGMA_PERIODS` | Sigma de mutación para períodos (default: `0.08`) |
 | `MUTATION_SIGMA_RISK` | Sigma de mutación para riesgo/SMC (default: `0.10`) |
-| `MIN_ROI_FOR_HALL_OF_FAME` | ROI mínimo para entrar al Hall of Fame (default: `0.05`) |
+| `MIN_ROI_FOR_HALL_OF_FAME` | Umbral mínimo de `fitness_score` (**no** ROI, pese al nombre — Fase 1 del rediseño 2026-07-02) para entrar al Hall of Fame (default: `0.05`) |
 | `GRACE_PERIOD_DAYS` | Días HÁBILES (lun-vie) de inmunidad para agentes recién nacidos sin operaciones (default: `2`) |
 | `DIVERSITY_VARIANCE_THRESHOLD` | Coeficiente de variación mínimo del ADN antes de activar el sigma boost. Subir a `0.05` para criterio más estricto (default: `0.01`) |
 | `SIGMA_BOOST_FACTOR` | Multiplicador aplicado a las sigmas cuando la diversidad cae bajo el umbral (default: `2.0`) |
@@ -1319,12 +1498,18 @@ Todas las variables se definen en `.env` local (desarrollo) o en **GitHub Secret
 | `N_CANDIDATE_CHILDREN` | Candidatos generados por slot vacante en el torneo de reproducción. Default: `3`. **Fase 3, desde Sesión 16.** |
 | `TOURNAMENT_MIN_OOS_FITNESS` | Fitness OOS mínimo (estrictamente mayor) para desplegar un hijo del torneo. Default: `0.0` (cualquier fitness positivo pasa). **Fase 1, desde Sesión 17.** |
 | `TOURNAMENT_MIN_OOS_TRADES` | Trades OOS mínimos para desplegar un hijo del torneo. Default: `5`. **Fase 1, desde Sesión 17.** |
-| `IMMUNITY_MAX_LOSS_PCT` | Revoca la inmunidad por muestra insuficiente si `roi_total ≤ −IMMUNITY_MAX_LOSS_PCT` (%). Default: `8.0`. No afecta el Periodo de Gracia. **Fase 3, desde Sesión 17.** |
+| `IMMUNITY_MAX_LOSS_PCT` | Revoca la inmunidad por muestra insuficiente si el ROI real (`_real_roi_pct()`, Fase 1 del rediseño 2026-07-02 — antes `roi_total`) `≤ −IMMUNITY_MAX_LOSS_PCT` (%). Default: `8.0`. No afecta el Periodo de Gracia. **Fase 3, desde Sesión 17.** |
 | `MIN_SAMPLE_DAYS` | Días hábiles mínimos alternativos a `MIN_SAMPLE_TRADES` (condición híbrida OR). Default: `7`. **Fase 4, desde Sesión 17.** |
 | `RUPTURA_SOLO_TENDENCIA` | Si `true`, la especie `ruptura` no abre posiciones en régimen `RANGO` (ni en el monitor de producción ni en el backtester OOS). NEUTRAL siempre opera. Default: `true`. **Fase 5, desde Sesión 17.** |
-| `TARGET_AGENTS_PER_ESPECIE` | Objetivo de agentes activos por especie. El motor llena TODO el déficit cada ciclo (3 × 5 = 15 garantizados). Default: `5`. **Sesión 18 / 19.** |
-| `REPOPULATION_MAX_PER_CYCLE` | **DEPRECADO (Sesión 19).** El tope por ciclo se eliminó para garantizar los 15. Default: `3` (sin efecto). **Sesión 18.** |
-| `REPOPULATION_MAX_ATTEMPTS_PER_SLOT` | Rondas de reintento (torneo→HoF) por cupo antes de desplegar el mejor candidato de cruce. Acota el costo de backtests del cron. Default: `8`. **Sesión 19 / 21.** |
+| `TARGET_AGENTS_PER_ESPECIE` | Objetivo de agentes activos para `tendencia` y `reversion`. El motor intenta llenar el déficit cada ciclo, pero desde Fase 2 del rediseño 2026-07-02 ya no fuerza genomas sin edge (ver `REPOBLACION_PERMITE_VACANTES`). Default: `5`. **Sesión 18 / 19.** |
+| `TARGET_AGENTS_RUPTURA` | Objetivo de agentes activos específico para `ruptura` (Fase 2 del rediseño 2026-07-02): auditoría 2026-07-01 — 24.8% WR, responsable del 68% de la pérdida total. Cupo reducido en vez de mantenerlo en 5 sin edge demostrado. Default: `3`. Con los defaults, la población objetivo total es `5+5+3=13`, no 15. |
+| `REPOPULATION_MAX_PER_CYCLE` | **DEPRECADO (Sesión 19).** El tope por ciclo se eliminó para intentar llenar todo el déficit. Default: `3` (sin efecto). **Sesión 18.** |
+| `REPOPULATION_MAX_ATTEMPTS_PER_SLOT` | Rondas de reintento (torneo→HoF) por cupo antes de degradar (vacante por defecto, o mejor candidato de cruce con el kill-switch legacy). Acota el costo de backtests del cron. Default: `8`. **Sesión 19 / 21.** |
+| `BLEEDER_FITNESS_THRESHOLD` | Fase 2 del rediseño 2026-07-02: umbral de `fitness_score` para la regla de bleeder crónico — por debajo de este valor (con muestra suficiente) el agente se elimina siempre, sin importar cuota ni piso de especie. Default: `-0.3`. |
+| `BLEEDER_MIN_TRADES` | Trades cerrados mínimos para que un agente sea candidato a bleeder crónico (evita marcar como bleeder una racha corta de mala suerte). Default: `20`. **Fase 2 del rediseño 2026-07-02.** |
+| `CAPITAL_WEIGHT_FLOOR` | Fase 2 del rediseño 2026-07-02: peso mínimo (multiplicador de la cuota equitativa) que puede recibir un agente veterano en la redistribución de capital ponderada por fitness. Default: `0.5`. `FLOOR=CAP=1.0` revierte al reparto igualitario (kill-switch). |
+| `CAPITAL_WEIGHT_CAP` | Peso máximo (multiplicador de la cuota equitativa) en la redistribución ponderada por fitness. Default: `2.0`. **Fase 2 del rediseño 2026-07-02.** |
+| `REPOBLACION_PERMITE_VACANTES` | Fase 2 del rediseño 2026-07-02: `true` (default) — un cupo sin candidato que supere el umbral OOS queda vacante, sin forzar cruce/clon sin evidencia de edge. `false` restaura la cascada legacy (`mejor_candidato_oos` → `forzado_cruce` → `forzado_clon_unico`). |
 | `TOURNAMENT_GATE_MODE` | `legacy` (default, sin cambio) o `bootstrap` (Sesión 27): exige que el límite inferior del IC de la expectancy OOS sea > 0 en vez del umbral débil `fitness>0 & n>=5`. Pendiente de activar en producción — ver criterio en `PLAN_DE_MEJORA.md`. **Sesión 27.** |
 | `BOOTSTRAP_ITERS` | Iteraciones de resample con reemplazo para el gate bootstrap. Default: `1000`. **Sesión 27.** |
 | `BOOTSTRAP_CI` | Nivel de confianza del intervalo bootstrap. Default: `0.80`. **Sesión 27.** |
@@ -1337,6 +1522,8 @@ Todas las variables se definen en `.env` local (desarrollo) o en **GitHub Secret
 | `MULTIFOLD_STEP_DAYS` | Días de avance entre folds consecutivos. Default: `10`. **Sesión 27.** |
 | `MULTIFOLD_LAMBDA` | Penalización por varianza entre folds en la agregación del fitness (`mean − λ×stdev`). Default: `0.5`. **Sesión 27.** |
 | `REPOPULATION_TIME_BUDGET_SECONDS` | Presupuesto de tiempo de repoblación en segundos, activo SOLO si `BACKTEST_MODE=multifold` (sin efecto en modo single). Evita agotar el timeout del cron por el costo extra del multi-fold. Default: `900`. **Sesión 27.** |
+| `BACKTEST_CHECK_EVERY_CANDLES` | Fase 0 del rediseño 2026-07-02: cadencia (en velas de 15m) con la que el backtester evalúa nueva entrada dentro del walk-forward. El cron real de producción dispara cada 15 min (1 vela), pero el default histórico de esta constante asumía 1h (4 velas) — divergencia documentada, sin corregir aún por riesgo de acercar el costo del backtest al timeout de `judge_daily.yml` (medir en sandbox antes de bajarlo a 1). Default: `4`. |
+| `LLM_EXECUTION_ENABLED` | Fase 3 del rediseño 2026-07-02: `false` (default) — `SubAgentTechnical` y `SubAgentRisk` usan siempre su heurística determinista, sin invocar a DeepSeek, igual que el backtester. `true` restaura el comportamiento legacy (LLM en la zona de confianza ambigua de A y en la confirmación final de C). No afecta al Sub-agente Macro ni al Agente Juez, que siempre usan el LLM. |
 | `LOG_LEVEL` | Nivel de logs (default: `INFO`) |
 | `ENVIRONMENT` | Ambiente (`production` / `development`) |
 
@@ -1492,6 +1679,16 @@ Antigravity_Inversion_Evolutiva/
 *Documento actualizado el 2026-06-12 (Sesión 22 — salidas inteligentes como genes evolutivos: break-even stop `be_activation_r`, salida por señal contraria `exit_on_reversal`/`min_profit_for_exit_r`, techo `MAX_SL_PIPS` y recorte de `atr_factor` a 1.8; replicado en backtester, migración 011 en producción).*
 
 ## Historial de cambios mayores
+
+- **2026-07-02/03 (rediseño de rentabilidad — 4 fases + hotfix, evaluación de arquitectura vía `/goal`) · PRs #17-#21 mergeados a `master` · en producción:**
+  - **Contexto:** evaluación exhaustiva solicitada por el usuario (ejecución intradía, función de fitness, selección/evolución) — veredicto: el sistema cumplía mecánicamente (agentes compiten, se califican, se eliminan, se recrían) pero no económicamente (auditoría 2026-07-01: WR 39%, payoff 1.12, expectancy negativa). Roadmap completo en `PLAN_REDISENO_RENTABILIDAD.md` (raíz del repo), implementado íntegramente la misma sesión a pedido explícito del usuario ("continua con la totalidad de los pasos en forma ordenada y automática").
+  - **Fase 0 (PR #17):** cadencia de evaluación del backtester (`_CHECK_EVERY`) convertida en `BACKTEST_CHECK_EVERY_CANDLES` (default 4, sin cambio de comportamiento) — documenta que producción dispara cada 15 min pero el backtest asumía 1h.
+  - **Fase 1 — fitness honesto (PR #18):** fitness pasa de expectancy en dólares absolutos a **expectancy en R** (`pnl / riesgo_planificado_usd`) — escala-invariante entre agentes con capital distinto y en el tiempo, algo que los dólares absolutos no garantizaban dado que el capital de cada agente cambia con la redistribución. Drawdown medido sobre la curva de capital con base real (`capital_inicial`), no una suma sin base. Penalización de overtrading: acantilado binario (−0.5) → función continua. `roi_total` (suma aritmética rota por la redistribución de capital — podía marcar −354%/+476% con capital idéntico) retirado de TODAS las decisiones evolutivas (dominancia de cruce, revocación de inmunidad, Hall of Fame); reemplazado por `fitness_score` y el nuevo helper `_real_roi_pct()`. Refactor `_fitness_cte()` unifica la fórmula SQL, antes duplicada con lógica divergente entre `calc_fitness_scores()` y `_get_active_agents_ranked()`. Migración `013_fitness_honesto.sql`: `estrategias_exitosas.fitness_registro` + `v_decaimiento_oos` actualizada a la misma fórmula en R.
+  - **Fase 2 — presión selectiva real (PR #19):** (1) **bleeder crónico** — `fitness_score ≤ BLEEDER_FITNESS_THRESHOLD` (−0.3) con `n_trades ≥ BLEEDER_MIN_TRADES` (20) elimina siempre, sin importar cuota ni piso de especie (antes el piso blindaba bleeders confirmados, ej. 2026-06-12_08 con ROI real −354%); (2) **capital ∝ fitness** reemplaza la redistribución equitativa — peso `clamp(1+fitness_score, CAPITAL_WEIGHT_FLOOR=0.5, CAPITAL_WEIGHT_CAP=2.0)`, normalizado para conservar el pool total exacto (hallazgo P0-2 de la auditoría: "la redistribución equitativa APAGA la selección natural"); (3) **gate OOS sin bypass forzado** (`REPOBLACION_PERMITE_VACANTES=true` default) — se elimina la cascada `forzado_cruce`/`forzado_clon_unico` que garantizaba población a costa de insertar genomas sin evidencia de edge; un cupo sin candidato válido queda vacante; (4) `TARGET_AGENTS_RUPTURA=3` (antes 5, igual que las otras especies) — ruptura es 24.8% WR, responsable del 68% de la pérdida total. Dashboard Streamlit actualizado (antes describía explícitamente el reparto igualitario que este cambio reemplaza).
+  - **Fase 3 — payoff intradía (PR #20):** (1) **salida parcial + runner** — gen `partial_tp_r` (0.5–2.0): al alcanzar ese múltiplo de R se cierra el 50% de la posición (booking real, propio trade para el fitness en R) y el resto corre hacia el TP/trailing normal — ataca la firma "avg_win≈avg_loss pese a R:R objetivo 2.0"; implementado en paralelo en `trade_monitor.py` y `backtester.py` para mantener la paridad vivo↔OOS; migración `014_salida_parcial.sql` (`operaciones.parcial_ejecutada`/`capital_usado_original`); (2) **sesión de trading como gen** — `sesion_trading` categórico (cualquiera/londres/ny/overlap), muta por sorteo (10%) no gaussianamente; (3) **LLM fuera del camino de ejecución** — `LLM_EXECUTION_ENABLED=false` (default): `SubAgentTechnical`/`SubAgentRisk` ya no llaman a DeepSeek en producción, igual que el backtester (que nunca lo hizo); el Agente Juez y el Sub-agente Macro no se ven afectados.
+  - **Hotfix 2026-07-03 (PR #21) — capital ∝ fitness era un no-op:** revisando el primer ciclo real post-Fase 2, los 15 agentes amanecieron con capital idéntico pese a que el log declaraba "ponderada por fitness". Causa: `run()` calculaba `fitness_map` al inicio del ciclo pero nunca lo pasaba a las 2 llamadas de `_redistribute_capital()` — con el parámetro opcional en `None`, todos los pesos degradaban a 1.0 (reparto equitativo silencioso). Fix de 2 líneas; regresión cubierta con un spy en `test_full_evolution_cycle_on_db` que verifica que el mapa efectivamente llega poblado — la lección es que un cambio de comportamiento que viaja por un parámetro opcional necesita un test que verifique el ACOPLE (que el caller lo pasa), no solo la lógica interna de la función.
+  - **Verificación:** 130/130 tests verdes tras cada fase (contra la sandbox Neon), 4 migraciones aditivas (012-014, ya incluía la 012 de Sesión 27) aplicadas y verificadas en Supabase producción antes de cada merge. Bugs reales encontrados y corregidos durante el propio proceso de testing: el patrón `x or default` en `_real_roi_pct` trataba un capital de `0.0` legítimo como "ausente"; el gate de sesión asumía una columna `timestamp` siempre presente (rompía fixtures sintéticas de tests); el techo de población válida no puede ser una fórmula fija de objetivos por especie (una especie que ya tenía más miembros que su nuevo objetivo reducido no se recorta activamente, solo deja de rellenarse — el techo correcto es la población pre-ciclo).
+  - **Pendiente, no completable en una sesión:** activar `TOURNAMENT_GATE_MODE=bootstrap` (sigue diferido — requiere observar ciclos reales primero con `v_decaimiento_oos`); Fase 4 del roadmap propio (evolución offline con historia multi-año) bloqueada por falta de una fuente de datos históricos (Dukascopy/HistData) conectada.
 
 - **2026-07-01 (Sesión 27 — auditoría experta del motor evolutivo + 3 fases de mejora: instrumentación OOS, gate bootstrap, walk-forward multi-fold) · commit `ecad116` (PR #16 mergeado a `master` vía `67655a0`) · en producción:**
   - **Contexto:** auditoría integral solicitada (rol experto Forex/macro/técnico) sobre datos reales de producción (788 trades cerrados): win rate 39%, payoff 1.12, expectancy/op negativa — persiste el veredicto de la auditoría 2026-06-01. Hallazgo adicional sobre por qué sobreviven agentes con ROI muy negativo: `roi_total` es una suma aritmética de `pnl_pct` desacoplada del capital real (la redistribución equitativa reinicia la base), y el fitness comprime toda la señal en ±0.02 — casi indistinguible entre un bleeder crónico y uno break-even. Análisis y roadmap completos en `PLAN_DE_MEJORA.md` (raíz del repo), con 3 fases especificadas y luego implementadas.

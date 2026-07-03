@@ -1081,13 +1081,18 @@ def _tab_instructions() -> None:
           🧬 Tres arquetipos decorrelacionados (desde Sesión 16)
         </div>
         <div class="ins-body">
-          Los 15 agentes activos <b>no son copias del mismo sistema</b>. Pertenecen a tres
-          <b>especies estratégicas</b> genuinamente distintas, 5 agentes cada una, cada
-          especie diseñada para ganar en un régimen de mercado diferente:
+          Los agentes activos <b>no son copias del mismo sistema</b>. Pertenecen a tres
+          <b>especies estratégicas</b> genuinamente distintas, cada una diseñada para ganar
+          en un régimen de mercado diferente. La población objetivo YA NO es fija en 15
+          (Fase 2, 2026-07-02): <b>tendencia</b> y <b>reversión</b> mantienen objetivo 5 cada
+          una, pero <b>ruptura se redujo a objetivo 3</b> — la auditoría 2026-07-01 encontró
+          que esa especie generaba 24.8% de win rate y el 68% de la pérdida total del sistema.
+          La población real flota entre 6 (piso: 2 mínimo por especie) y 13 (objetivo máximo),
+          según cuántos candidatos demuestren edge real cada noche.
         </div>
         <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:14px;">
           <div class="ins-param-box" style="border-left:3px solid {GOLD};">
-            <div class="ins-param-label">📈 Tendencia (5 agentes)</div>
+            <div class="ins-param-label">📈 Tendencia (objetivo: 5)</div>
             <div class="ins-param-items">
               Momentum RSI + EMA + MACD<br>
               Filtro HTF activo<br>
@@ -1096,7 +1101,7 @@ def _tab_instructions() -> None:
             </div>
           </div>
           <div class="ins-param-box" style="border-left:3px solid {EMERALD};">
-            <div class="ins-param-label">↔️ Reversión (5 agentes)</div>
+            <div class="ins-param-label">↔️ Reversión (objetivo: 5)</div>
             <div class="ins-param-items">
               RSI en extremos + OB/FVG<br>
               HTF desactivado<br>
@@ -1105,7 +1110,7 @@ def _tab_instructions() -> None:
             </div>
           </div>
           <div class="ins-param-box" style="border-left:3px solid {AMBER};">
-            <div class="ins-param-label">💥 Ruptura (5 agentes)</div>
+            <div class="ins-param-label">💥 Ruptura (objetivo: 3, Fase 2)</div>
             <div class="ins-param-items">
               Breakout de estructura N velas<br>
               Confirmado por range_spike<br>
@@ -1119,8 +1124,8 @@ def _tab_instructions() -> None:
           ADX ≥ 25 = <em>TENDENCIA</em> (S1 activo, S3 activo, S2 bloqueado).
           ADX &lt; 25 = <em>RANGO</em> (S2 activo, S1 y S3 bloqueados por defecto). NEUTRAL = todos operan.<br><br>
           <b>Resultado práctico:</b> en días de mercado lateral (ADX bajo, ej. ~17-20),
-          los 5 agentes tendencia y los 5 de ruptura quedan en HOLD automáticamente y los
-          5 de reversión operan en la dirección <em>correcta</em> para ese régimen.
+          los agentes tendencia y ruptura quedan en HOLD automáticamente y los de
+          reversión operan en la dirección <em>correcta</em> para ese régimen.
           <s>Nunca más "todos pierden a la vez".</s>
         </div>
       </div>
@@ -1180,7 +1185,9 @@ def _tab_instructions() -> None:
               Filtro HTF habilitado (0 / 1)<br>
               <b>Break-even activation (0.3–1.0R)</b><br>
               <b>Salida por reversa (0/1, bit-flip)</b><br>
-              <b>Piso ganancia para salida (0.2–1.0R)</b>
+              <b>Piso ganancia para salida (0.2–1.0R)</b><br>
+              <b>Salida parcial +runner (0.5–2.0R)</b> Fase 3<br>
+              <b>Sesión de trading</b> (categórico, sorteo) Fase 3
             </div>
           </div>
         </div>
@@ -1241,7 +1248,11 @@ def _tab_instructions() -> None:
             contrario no atenúa ni amplifica).<br>
             El <b>filtro HTF</b> (<code>htf_filter_enabled</code>) veta la señal si contradice
             la tendencia EMA50/EMA200 en velas de 1h: señal BUY cuando HTF = BEAR → HOLD.
-            Si la confianza cae en zona ambigua (0.45–0.65), consulta a DeepSeek para confirmar.
+            <b>Desde Fase 3 (2026-07-02, <code>LLM_EXECUTION_ENABLED=false</code>)</b> ya no
+            consulta a DeepSeek ni en la zona de confianza ambigua (0.45–0.65) — usa siempre
+            su heurística determinista, igual que el backtester que evalúa el torneo OOS.
+            Antes el LLM podía intervenir en producción sin que el backtest lo simulara,
+            midiendo una política distinta a la desplegada.
           </div>
         </div>
         <div class="ins-step">
@@ -1274,7 +1285,10 @@ def _tab_instructions() -> None:
             El <b>trailing stop</b> (genes <code>trailing_activation_pips</code> y
             <code>trailing_distance_pips</code>) queda registrado en la operación para que
             el Trade Monitor lo aplique <b>vela a vela</b> dentro del verificador intra-bar.
-            Luego consulta a DeepSeek para validación final.
+            <b>Desde Fase 3</b> ya no consulta a DeepSeek para validación final — la decisión
+            es 100% determinista, con la misma heurística que corre en el backtest OOS
+            (el Agente Juez sí sigue usando el LLM, pero solo para narrar el veredicto
+            después de que la decisión ya se tomó — ver sección 5).
           </div>
         </div>
       </div>
@@ -1317,13 +1331,19 @@ def _tab_instructions() -> None:
           tocó el Stop Loss o el Take Profit con el SL <em>antes</em> de aplicar trailing.
           Si <b>ambos</b> se tocan en la misma vela → <s>SL gana</s>
           (convención conservadora: ante ambigüedad intra-vela, asumir el peor caso).<br>
-          &nbsp;• <b>Luego</b>, si no hubo hit, aplica el trailing usando el extremo
-          favorable de la vela (<code>low</code> para SELL, <code>high</code> para BUY).
+          &nbsp;• <b>Luego</b>, si no hubo hit, chequea la <b>salida parcial + runner</b>
+          (gen <code>partial_tp_r</code>, Fase 3, 2026-07-02): si el extremo favorable de la
+          vela alcanza ese múltiplo de R y aún no se ejecutó, cierra el <b>50% de la
+          posición</b> al precio exacto del nivel (ganancia real reservada, su propio trade
+          para el fitness) y el resto sigue corriendo con capital reducido.<br>
+          &nbsp;• <b>Después</b> aplica el trailing/break-even usando el extremo favorable
+          de la vela (<code>low</code> para SELL, <code>high</code> para BUY).
           El SL dinámico <b>nunca empeora</b> — solo se mueve a favor del agente.<br><br>
-          Si SL o TP se activa, la operación cierra al <b>precio exacto del nivel</b>
-          y el <code>timestamp_salida</code> refleja el instante real de la mecha:<br>
+          Si SL o TP se activa, la operación (o el runner reducido) cierra al <b>precio
+          exacto del nivel</b> y el <code>timestamp_salida</code> refleja el instante real
+          de la mecha:<br>
           &nbsp;• <b style="color:{EMERALD};">&#10003; Take Profit alcanzado</b> — ganancia al precio exacto del TP.<br>
-          &nbsp;• <b style="color:{RED};">&#10007; Stop Loss alcanzado</b> — pérdida controlada al precio del SL (puede ser el SL trailing apretado).<br>
+          &nbsp;• <b style="color:{RED};">&#10007; Stop Loss alcanzado</b> — pérdida controlada al precio del SL (puede ser el SL trailing/break-even apretado).<br>
           &nbsp;• <b style="color:{DIM};">&#9677; Cierre EOD (10:45 pm Bogotá)</b> — posiciones aún abiertas cierran al precio de mercado.<br>
           &nbsp;• <b style="color:{DIM};">&#9888; Fallback automático:</b> si Yahoo no devuelve velas
           (fin de semana, error API), cae al check por snapshot único para no bloquear el ciclo.<br><br>
@@ -1331,12 +1351,18 @@ def _tab_instructions() -> None:
           cada 15 min. Una mecha que tocara el TP y rebotara era invisible: el trade
           seguía abierto y terminaba cerrando en SL trailing. El fitness medía un mundo
           ficticio. Con OHLC 1 min el simulador refleja lo que haría un broker real con
-          órdenes stop/limit, y el ADN que evoluciona es portable a producción real.<br><br>
+          órdenes stop/limit, y el ADN que evoluciona es portable a producción real.
+          La salida parcial (Fase 3) ataca además la firma "avg_win≈avg_loss pese a R:R
+          objetivo 2.0" de la auditoría 2026-07-01: antes el sistema cortaba ganadores
+          antes de que corrieran.<br><br>
           <b>② Evaluación de nuevas posiciones</b><br>
-          Para cada agente libre (sin posición abierta y con capital suficiente),
-          descarga velas OHLCV actualizadas, recalcula SMC + RSI/EMA/MACD con los precios
-          del momento y ejecuta el pipeline A→B→C completo. Un agente puede operar
-          varias veces al día de forma <b>secuencial</b> (una posición abierta a la vez).
+          Para cada agente libre (sin posición abierta y con capital suficiente), primero
+          pasa el gate de <b>régimen</b> (ADX/especie) y el gate de <b>sesión de trading</b>
+          (gen <code>sesion_trading</code>, Fase 3 — "cualquiera"/"londres"/"ny"/"overlap").
+          Si pasa ambos, descarga velas OHLCV actualizadas, recalcula SMC + RSI/EMA/MACD con
+          los precios del momento y ejecuta el pipeline A→B→C completo (sin LLM en A y C,
+          ver sección 2). Un agente puede operar varias veces al día de forma
+          <b>secuencial</b> (una posición abierta a la vez).
         </div>
       </div>
     </div>
@@ -1409,8 +1435,9 @@ def _tab_instructions() -> None:
             <b>Cupos vacantes sin bypass forzado (Fase 2, 2026-07-02):</b> si ningún candidato
             supera el umbral de calidad tras agotar las rondas de torneo y Hall of Fame, el
             cupo queda <em>vacante</em> ese día — ya no se fuerza un cruce o clon sin evidencia
-            de edge solo para completar 15 agentes. La población puede flotar entre 6 (piso de
-            2 por especie) y 15; se recupera sola en cuanto un candidato real demuestra edge.
+            de edge solo para completar la población. La población puede flotar entre 6 (piso
+            de 2 por especie) y 13 (objetivo: 5 tendencia + 5 reversión + 3 ruptura); se
+            recupera sola en cuanto un candidato real demuestra edge.
           </div>
         </div>
         <div class="ins-step">
@@ -1492,11 +1519,14 @@ def _tab_instructions() -> None:
       <div class="ins-title">7 · Hall of Fame — Estrategias que demuestran valor real</div>
       <div class="ins-card ins-card-left-emerald">
         <div class="ins-body">
-          Todo agente superviviente con <b>ROI &gt; 0.05%</b> tiene sus parámetros
-          guardados en la tabla <em>estrategias_exitosas</em>. Este repositorio acumula
-          las configuraciones que han demostrado rentabilidad real con datos de mercado
-          reales. En el futuro, puede usarse como fuente preferencial de herencia
-          para nuevas generaciones, acelerando la convergencia evolutiva.
+          Todo agente superviviente con muestra suficiente (≥15 trades o ≥7 días hábiles) y
+          <b>fitness_score ≥ 0.05</b> (Fase 1, 2026-07-02 — expectancy en R ajustada por
+          riesgo, ya NO el ROI acumulado) tiene sus parámetros guardados en la tabla
+          <em>estrategias_exitosas</em>, junto con el propio <code>fitness_registro</code>
+          que respaldó su ingreso (migración 013). Este repositorio acumula configuraciones
+          que demostraron edge real con datos de mercado reales, y sirve como fuente
+          preferencial de padres cuando el pool de agentes vivos de una especie es
+          insuficiente para el torneo (ver sección 5).
         </div>
       </div>
     </div>
@@ -1581,17 +1611,24 @@ def _tab_instructions() -> None:
           ② El fitness (expectancy ajustada por riesgo) es un hecho de mercado, no una opinión del agente
         </div>
         <div class="ins-body">
-          La métrica que el Juez usa para clasificar y eliminar es el <b>fitness por
-          expectancy neta de costos</b> (desde Sesión 16 — no ROI crudo ni Calmar Ratio),
-          calculada exclusivamente a partir de precios reales — win rate, ganancia/pérdida
-          media y max drawdown derivados de las operaciones cerradas en la base de datos:<br><br>
+          La métrica que el Juez usa para clasificar, eliminar y ahora también para
+          asignar capital (Fase 2) es el <b>fitness por expectancy en R</b> (Fase 1,
+          2026-07-02 — ni ROI acumulado ni Calmar Ratio), calculada exclusivamente a partir
+          de precios reales — win rate, ganancia/pérdida media en múltiplos del riesgo
+          planificado y max drawdown derivados de las operaciones cerradas en la base de
+          datos:<br><br>
           &nbsp;• Los precios de entrada y salida provienen de <b>Yahoo Finance</b>
             (fuente externa, no controlada por ningún agente).<br>
           &nbsp;• El P&L lo calcula el <b>Trade Monitor</b>, no el agente mismo, y ya es
             neto de fricción (spread + slippage).<br>
-          &nbsp;• El cierre de posiciones (SL/TP/EOD) lo ejecuta el Trade Monitor de forma autónoma.<br><br>
+          &nbsp;• El cierre de posiciones (SL/TP/salida parcial/EOD) lo ejecuta el Trade
+            Monitor de forma autónoma.<br><br>
           Un agente no puede declarar su propio P&L ni alterar precios de mercado.
-          Su fitness es un dato objetivo derivado del historial de operaciones cerradas — no de lo que el agente afirma sobre sí mismo.
+          Su fitness es un dato objetivo derivado del historial de operaciones cerradas — no
+          de lo que el agente afirma sobre sí mismo. Que el fitness ahora también determine
+          cuánto capital administra (en vez de un reparto igualitario) no abre una puerta
+          a manipulación: sigue siendo la misma métrica objetiva, calculada de la misma
+          forma, por el mismo proceso externo al agente.
         </div>
       </div>
 
@@ -1619,7 +1656,7 @@ def _tab_instructions() -> None:
           ④ Cero comunicación entre agentes inversionistas
         </div>
         <div class="ins-body">
-          Los 15 agentes no se conocen entre sí. Cada uno toma sus decisiones de forma
+          Los agentes activos no se conocen entre sí. Cada uno toma sus decisiones de forma
           completamente independiente a partir de los mismos datos de mercado públicos.
           No existe ningún canal de comunicación, memoria compartida ni mecanismo de
           coordinación entre agentes. No pueden coaligarse, imitar estrategias ajenas
@@ -1671,23 +1708,34 @@ def _tab_instructions() -> None:
       (TENDENCIA / RANGO) una vez por ciclo y habilita/bloquea cada especie según corresponde.
       El <b style="color:{TEXT};">filtro HTF</b> descarga velas de <b style="color:{TEXT};">1h / 3 meses</b>
       y calcula EMA50/EMA200 para bloquear señales contra la tendencia principal.
-      El razonamiento de los agentes y del Juez usa <b style="color:{TEXT};">DeepSeek</b>
-      (<code>deepseek-reasoner</code>). El fitness (Expectancy ajustada por riesgo × confianza
-      estadística) se calcula vía SQL sobre operaciones cerradas en
-      <b style="color:{TEXT};">PostgreSQL — Supabase</b>.
+      El razonamiento del Agente Juez usa <b style="color:{TEXT};">DeepSeek</b>
+      (<code>deepseek-reasoner</code>) — pero, desde <b style="color:{TEXT};">Fase 3</b>
+      (2026-07-02, <code>LLM_EXECUTION_ENABLED=false</code>), el Técnico y el Riesgo de
+      cada agente ya <b style="color:{TEXT};">no</b> lo usan para decidir trades: operan
+      100% determinista, igual que el backtester. El sub-agente Macro sí sigue llamando a
+      DeepSeek siempre (análisis de sentimiento de noticias).
+      El fitness (<b style="color:{TEXT};">expectancy en R</b> ajustada por drawdown ×
+      confianza estadística, Fase 1) se calcula vía SQL sobre operaciones cerradas en
+      <b style="color:{TEXT};">PostgreSQL — Supabase</b> — cada trade se mide en múltiplos
+      de su propio riesgo planificado (<code>pnl / riesgo_usd</code>), no en dólares
+      absolutos, para ser comparable entre agentes con capital distinto.
+      El capital de cada agente ya no se reparte en partes iguales cada noche: se pondera
+      por <code>clamp(1 + fitness_score, 0.5×, 2.0×)</code> (Fase 2).
       La verificación SL/TP usa <b style="color:{TEXT};">velas OHLC de 1 minuto</b>
-      (≥15 velas/ciclo, cierre = nivel exacto SL/TP).
+      (≥15 velas/ciclo, cierre = nivel exacto SL/TP/salida parcial).
       <b style="color:{TEXT};">Fricción 1.4 pips round-trip</b> (spread + slippage) descontada
       de cada operación al cerrar — el P&L en la DB es siempre neto de costos.
       El <b style="color:{TEXT};">torneo de candidatos</b> backtestea 3 mutaciones por slot
-      sobre los últimos 20 días de historia antes de desplegar al ganador (Sesión 16).
+      sobre los últimos 20 días de historia antes de desplegar al ganador; si ninguno supera
+      el umbral de calidad, el cupo queda vacante (Fase 2) en vez de forzar un genoma sin
+      evidencia de edge.
       El backtester soporta además un <b style="color:{TEXT};">modo multi-fold</b>
-      (Sesión 27, implementado pero aún no activado en producción): 3 tramos históricos
-      deslizantes de 30 días de calentamiento + 10 de validación cada uno, con un día de
-      separación entre ambos, para que un candidato deba demostrar que funciona en varios
-      regímenes de mercado — no solo en el tramo específico de las últimas semanas. Se
-      activará cuando la instrumentación de decaimiento OOS→producción (ver arriba) muestre
-      que vale la pena su costo computacional extra.
+      (implementado, aún no activado en producción): 3 tramos históricos deslizantes de 30
+      días de calentamiento + 10 de validación cada uno, con un día de separación entre
+      ambos, para que un candidato deba demostrar que funciona en varios regímenes de
+      mercado. Se activará cuando <code>v_decaimiento_oos</code> (vista SQL que compara el
+      fitness prometido por el torneo contra el realizado en producción, migraciones
+      012-013) muestre que vale la pena su costo computacional extra.
       Los workflows (monitor cada 15 min y juez diario lunes–viernes) corren en
       <b style="color:{TEXT};">GitHub Actions</b>, disparados externamente por
       <b style="color:{TEXT};">cron-job.org</b> con precisión ±5 segundos.
