@@ -1903,7 +1903,8 @@ class EvolutionEngine:
                             sum(float(a.get("capital_actual", 10.0)) for a in agents), 4
                         )
                         pool_total, _cap_s = self._redistribute_capital(
-                            conn, [a["id"] for a in _recovered_s], pool_override=_pool_s
+                            conn, [a["id"] for a in _recovered_s], pool_override=_pool_s,
+                            fitness_map=fitness_map,
                         )
                         result.capital_pool_total = pool_total
                         result.capital_por_agente = _cap_s
@@ -2242,10 +2243,16 @@ class EvolutionEngine:
                 self._snapshot_ranking(conn, all_for_snapshot, evento_map)
                 self._snapshot_ranking(conn, eliminated, evento_map)
 
-                # Redistribuir capital equitativamente entre todos los agentes activos
+                # Redistribuir capital ponderado por fitness entre los agentes
+                # activos. fitness_map (calculado al inicio de run(), ANTES de
+                # eliminar/criar) es lo que activa la ponderación de Fase 2 —
+                # sin él, _redistribute_capital degrada a reparto equitativo
+                # (bug detectado 2026-07-03: el primer ciclo en prod corrió sin
+                # pasarlo y todos los agentes amanecieron con capital idéntico).
                 new_agent_ids = [a["id"] for a in new_agents]
                 pool_total, capital_por_agente = self._redistribute_capital(
-                    conn, new_agent_ids, pool_override=pool_total_eod
+                    conn, new_agent_ids, pool_override=pool_total_eod,
+                    fitness_map=fitness_map,
                 )
                 result.capital_pool_total  = pool_total
                 result.capital_por_agente  = capital_por_agente

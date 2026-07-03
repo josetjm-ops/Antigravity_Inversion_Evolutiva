@@ -278,11 +278,43 @@ def test_full_evolution_cycle_on_db():
 
     poblacion_pre_ciclo = len(_get_active_agents())  # 15 (5 por especie), génesis
 
+    from unittest.mock import patch
     from evolution.evolution_engine import EvolutionEngine
+
+    # Spy sobre _redistribute_capital: la ponderación por fitness (Fase 2)
+    # SOLO se activa si run() le pasa fitness_map — sin él degrada
+    # silenciosamente a reparto equitativo. Bug real en prod 2026-07-03:
+    # el primer ciclo corrió sin pasarlo y todos los agentes amanecieron
+    # con capital idéntico (6.3730) pese al log "ponderada por fitness".
+    redistribute_kwargs: dict = {}
+    _original_redistribute = EvolutionEngine._redistribute_capital
+
+    def _spy_redistribute(self, conn, new_agent_ids, pool_override=None,
+                          fitness_map=None):
+        redistribute_kwargs["fitness_map"] = fitness_map
+        return _original_redistribute(
+            self, conn, new_agent_ids,
+            pool_override=pool_override, fitness_map=fitness_map,
+        )
+
     engine = EvolutionEngine(date.today())
-    result = engine.run()
+    with patch.object(EvolutionEngine, "_redistribute_capital", _spy_redistribute):
+        result = engine.run()
 
     assert not result.errors, f"Errores en el ciclo: {result.errors}"
+
+    # El ciclo con eliminaciones SIEMPRE redistribuye; debe llevar el
+    # fitness de TODOS los agentes pre-ciclo (aunque sea 0.0 para génesis
+    # sin operaciones — lo que importa es que el mapa viaje poblado).
+    assert "fitness_map" in redistribute_kwargs, \
+        "run() no llamó a _redistribute_capital (¿ciclo suspendido inesperado?)"
+    fm = redistribute_kwargs["fitness_map"]
+    assert fm is not None and len(fm) == poblacion_pre_ciclo, (
+        f"run() debe pasar fitness_map con los {poblacion_pre_ciclo} agentes "
+        f"pre-ciclo a _redistribute_capital; recibió: "
+        f"{None if fm is None else len(fm)} entradas"
+    )
+    print(f"  [PASS] _redistribute_capital recibió fitness_map con {len(fm)} agentes.")
     assert len(result.survivors)  > 0, "No hubo supervivientes"
     assert len(result.eliminated) > 0, "No se eliminó ningún agente"
     # Fase 2 (rediseño 2026-07-02): con REPOBLACION_PERMITE_VACANTES=true, 0
