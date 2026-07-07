@@ -54,6 +54,11 @@ _GENESIS_SMC = {
     "breakout_lookback_bars": 20, "breakout_min_pips": 5.0,
     "peso_breakout": 0.40,
     "adx_period": 14, "adx_threshold": 25.0,
+    # Genes Fase 3 (rediseño 2026-07-02), sembrados en prod por la migración
+    # 015 — el génesis de la sandbox debe incluirlos igual que la población
+    # real (además, test_migracion_015_genes_fase3_sembrados_en_activos los
+    # verifica sobre lo que _reset_agents() haya recreado).
+    "partial_tp_r": 1.0, "sesion_trading": "cualquiera",
 }
 _ESPECIES_TEST = ["tendencia", "reversion", "ruptura"]
 

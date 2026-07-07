@@ -195,6 +195,100 @@ def test_breed_agent_sin_mutacion_hereda_sesion(monkeypatch):
     assert child["params_smc"]["sesion_trading"] == "londres"
 
 
+# ─── (3b) Sembrado de genes en la población (migración 015) ─────────────────
+# Hallazgo de la auditoría 2026-07-07: los genes de Fase 3 nunca entraron al
+# pool porque el crossover solo hereda claves que los padres YA poseen y la
+# mutación gaussiana solo perturba claves existentes. La migración 015 los
+# siembra (mismo patrón que la 011 hizo con exit_on_reversal en Sesión 22).
+
+def test_migracion_015_genes_fase3_sembrados_en_activos():
+    """Todos los agentes activos de la sandbox deben tener partial_tp_r y
+    sesion_trading tras la migración 015, con partial_tp_r dentro de bounds."""
+    from db.connection import get_conn, get_dict_cursor
+    with get_conn() as conn:
+        cur = get_dict_cursor(conn)
+        cur.execute(
+            """
+            SELECT COUNT(*) AS total,
+                   COUNT(*) FILTER (WHERE NOT (params_smc ? 'partial_tp_r'))   AS sin_ptr,
+                   COUNT(*) FILTER (WHERE NOT (params_smc ? 'sesion_trading')) AS sin_ses,
+                   COUNT(*) FILTER (
+                       WHERE (params_smc->>'partial_tp_r')::numeric < 0.5
+                          OR (params_smc->>'partial_tp_r')::numeric > 2.0
+                   ) AS ptr_oob
+            FROM agentes WHERE estado = 'activo' AND params_smc IS NOT NULL
+            """
+        )
+        r = cur.fetchone()
+    if r["total"] == 0:
+        pytest.skip("Sandbox sin agentes activos (otro test la reseteó)")
+    assert r["sin_ptr"] == 0, f"{r['sin_ptr']} activos sin partial_tp_r"
+    assert r["sin_ses"] == 0, f"{r['sin_ses']} activos sin sesion_trading"
+    assert r["ptr_oob"] == 0, f"{r['ptr_oob']} activos con partial_tp_r fuera de bounds"
+
+
+def test_crossover_hereda_partial_tp_r_cuando_los_padres_lo_tienen():
+    """Con los padres sembrados (post-015), el gen viaja al hijo por crossover
+    y la mutación gaussiana lo mantiene dentro de sus bounds (0.5–2.0)."""
+    from evolution.evolution_engine import breed_agent
+    from datetime import date
+
+    def _parent(id_, ptr):
+        return {
+            "id": id_, "fitness_score": 0.1,
+            "params_tecnicos": {
+                "rsi_periodo": 14, "rsi_sobrecompra": 70, "rsi_sobreventa": 30,
+                "ema_rapida": 9, "ema_lenta": 21,
+                "macd_rapida": 12, "macd_lenta": 26, "macd_senal": 9,
+                "peso_rsi": 0.35, "peso_ema": 0.35, "peso_macd": 0.30,
+            },
+            "params_macro": {"peso_total_macro": 0.40},
+            "params_riesgo": {"stop_loss_pct": 0.02, "take_profit_pct": 0.04},
+            "params_smc": {"partial_tp_r": ptr, "risk_reward_target": 2.0},
+        }
+
+    for _ in range(20):
+        child = breed_agent(
+            _parent("p1", 0.8), _parent("p2", 1.2),
+            "child_test", date(2026, 7, 7), 2, especie="tendencia",
+        )
+        ptr = child["params_smc"].get("partial_tp_r")
+        assert ptr is not None, "El hijo debe heredar partial_tp_r de los padres sembrados"
+        assert 0.5 <= float(ptr) <= 2.0, f"partial_tp_r mutado fuera de bounds: {ptr}"
+
+
+def test_mutacion_categorica_introduce_sesion_aunque_los_padres_no_la_tengan(monkeypatch):
+    """La mutación por sorteo SETEA el gen categórico aunque la clave falte en
+    ambos padres — el mecanismo que mantiene el rasgo re-descubrible (y la
+    diferencia clave con partial_tp_r, que sí necesitó sembrado por migración)."""
+    from evolution.evolution_engine import breed_agent
+    from datetime import date
+
+    def _parent(id_):
+        return {
+            "id": id_, "fitness_score": 0.1,
+            "params_tecnicos": {
+                "rsi_periodo": 14, "rsi_sobrecompra": 70, "rsi_sobreventa": 30,
+                "ema_rapida": 9, "ema_lenta": 21,
+                "macd_rapida": 12, "macd_lenta": 26, "macd_senal": 9,
+                "peso_rsi": 0.35, "peso_ema": 0.35, "peso_macd": 0.30,
+            },
+            "params_macro": {"peso_total_macro": 0.40},
+            "params_riesgo": {"stop_loss_pct": 0.02, "take_profit_pct": 0.04},
+            "params_smc": {"risk_reward_target": 2.0},  # SIN genes de Fase 3
+        }
+
+    monkeypatch.setattr("random.random", lambda: 0.0)   # siempre muta
+    monkeypatch.setattr("random.choice", lambda opts: "ny")
+
+    child = breed_agent(_parent("p1"), _parent("p2"), "child_test",
+                        date(2026, 7, 7), 2, especie="tendencia")
+    assert child["params_smc"]["sesion_trading"] == "ny"
+    # partial_tp_r en cambio NO aparece sin sembrado: ni crossover ni gaussiana
+    # lo introducen — exactamente el gap que la migración 015 cierra.
+    assert "partial_tp_r" not in child["params_smc"]
+
+
 # ─── (4) Salida parcial: investor_agent.partial_close_operation (DB) ───────
 
 def test_partial_close_operation_crea_trade_y_reduce_runner():
