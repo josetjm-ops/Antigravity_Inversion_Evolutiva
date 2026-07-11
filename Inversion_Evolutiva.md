@@ -581,9 +581,11 @@ Históricamente los crons programados de GitHub Actions **no garantizaban dispar
 ```
 Para cada ciclo del monitor:
   1. _eod_guard():
-       - Calcula el inicio del día de trading UTC actual (TRADING_START_TIME_UTC).
+       - Calcula la frontera _eod_guard_cutoff(): el ÚLTIMO cierre forzoso
+         EOD (EOD_CLOSE_TIME_UTC, default 03:45 UTC) que YA PASÓ.
        - Si existen posiciones BUY/SELL abiertas con
-         timestamp_entrada < ese inicio → son del día anterior.
+         timestamp_entrada < esa frontera → pertenecen a un día de trading
+         ya cerrado (el Juez se retrasó).
        - Llama internamente a force_close_all() para cerrarlas.
   2. (continúa el ciclo normal: SL/TP, trailing, nuevas posiciones)
 ```
@@ -591,6 +593,12 @@ Para cada ciclo del monitor:
 **Consecuencia:** aunque `judge_daily.yml` se retrase X horas, el primer monitor que despierte después del cierre del día anterior cierra las posiciones huérfanas automáticamente. La ventana máxima de exposición se reduce a 15 minutos (el intervalo entre monitores).
 
 Para que esto funcione en la "ventana ciega" de 03:30 – 06:30 UTC (11pm – 1:30am Bogotá, antes sin monitor), `trade_monitor.yml` incluye un cron adicional `*/15 4-6 * * 2-6` que despierta el monitor cada 15 minutos en ese rango.
+
+**Bug corregido (auditoría 2026-07-11):** la versión original usaba como frontera "hoy a las 06:30 UTC" (`TRADING_START_TIME_UTC`) sin manejar que la ventana de trading cruza la medianoche UTC. Entre las 00:00 y las 04:00 UTC (**7–11 pm Bogotá**) esa frontera quedaba en el futuro, así que **cualquier posición recién abierta parecía "del día anterior"** → `force_close_all()` en cada ciclo de 15 min, y como la ventana de apertura seguía activa hasta las 04:00 UTC, el agente reabría al ciclo siguiente. Resultado: churn de abrir/cerrar cada 15 minutos pagando fricción (~-$1.32 acumulados solo en esa franja; el 2026-07-10 un solo agente pagó 16 ciclos seguidos) y runners de salida parcial cerrados prematuramente. El churn además **corrompía la selección natural**: el 2026-07-11 el Juez eliminó a `2026-07-01_01` (reversión, 75% de WR en horario limpio — posiblemente el mejor agente del pool) porque la fricción del churn le volvió negativo el fitness. La frontera correcta es el último `EOD_CLOSE_TIME_UTC` (03:45 UTC) ya pasado — cubierta por tests en `tests/test_eod_guard.py`.
+
+### Guardia de fin de semana (auditoría 2026-07-11)
+
+El mercado FX institucional cierra el **viernes ~21:00 UTC** (4–5 pm Bogotá) y reabre el **domingo ~21:00 UTC**, pero la ventana de trading del viernes se extiende hasta las 04:00 UTC del sábado. En esa franja Yahoo Finance devuelve el último precio **congelado** — el 2026-07-10 (viernes) el sistema abrió 16 posiciones consecutivas con precio idéntico `1.14194`, pagando fricción sin posibilidad de movimiento real (combinado con el bug de la guardia EOD). Desde este fix, `_forex_market_closed()` bloquea la **apertura** de posiciones nuevas cuando el reloj UTC está en viernes ≥ 21:00, sábado, o domingo < 21:00 (`FOREX_WEEKEND_GUARD=true`, default; las posiciones ya abiertas se siguen monitoreando normalmente). Se usa 21:00 UTC como frontera conservadora (el cierre real varía entre 21:00/22:00 UTC según horario de verano de NY).
 
 ---
 
@@ -1679,6 +1687,15 @@ Antigravity_Inversion_Evolutiva/
 *Documento actualizado el 2026-06-12 (Sesión 22 — salidas inteligentes como genes evolutivos: break-even stop `be_activation_r`, salida por señal contraria `exit_on_reversal`/`min_profit_for_exit_r`, techo `MAX_SL_PIPS` y recorte de `atr_factor` a 1.8; replicado en backtester, migración 011 en producción).*
 
 ## Historial de cambios mayores
+
+- **2026-07-11 (auditoría #2 de operación: bug de la guardia EOD en la madrugada UTC + guardia de fin de semana) · en producción:**
+  - **Reporte del usuario:** el agente `2026-07-01_01` parecía tener más de una posición abierta a la vez. **Veredicto: falsa alarma en ese punto** — los pares de filas con el mismo `timestamp_entrada` son la **salida parcial + runner** de Fase 3 operando como fue diseñada (7 parciales ejecutadas desde el sembrado, +$0.35 combinado; aritmética verificada: runner con `capital_usado` = mitad exacta del original). Solapamientos reales de posiciones (excluyendo pares de parcial): **0** — la invariante "una posición por agente" se cumple, protegida además por el índice único parcial en DB.
+  - **Bug real encontrado (grave, antiguo):** `_eod_guard()` calculaba la frontera de "posición del día anterior" como *hoy* a las 06:30 UTC sin manejar la ventana que cruza medianoche. Entre 00:00–04:00 UTC (7–11 pm Bogotá) TODA posición abierta parecía huérfana → `force_close_all()` cada 15 min + reapertura inmediata = **churn pagando fricción cada ciclo** (~-$1.32 acumulados en esa franja; 16 ciclos seguidos de un solo agente el 2026-07-10). Existía desde la Sesión 9 (mayo), pero se amplificó con el rediseño: capital ∝ fitness concentra más capital en los agentes que operan (nocional ~$155/op), y las señales deterministas (sin LLM) re-entran con más persistencia.
+  - **Daño colateral a la evolución:** el churn corrompía la selección — el 2026-07-11 el Juez eliminó a `2026-07-01_01` (fitness −0.0095) cuando sus datos LIMPIOS (fuera de la franja del bug) lo mostraban como el mejor del pool (reversión, 75% WR, +$0.37). También cerraba prematuramente los runners de salida parcial a las 7:01 pm Bogotá.
+  - **Fix A:** frontera correcta = último cierre EOD (`EOD_CLOSE_TIME_UTC`, 03:45 UTC) ya pasado — `_eod_guard_cutoff()` puro y testeado en los 5 casos límite (mediodía, madrugada UTC, ventana ciega, justo antes/después del cierre). El propósito original de la guardia (cerrar sobras si el Juez se retrasa) queda intacto.
+  - **Fix B (guardia de fin de semana):** el 2026-07-10 (viernes) el sistema abrió posiciones de 19:00 a 23:00 Bogotá con el precio congelado de Yahoo (`1.14194` idéntico 16 veces) — el mercado FX cierra el viernes ~21:00 UTC. Nuevo `_forex_market_closed()`: bloquea apertura (no monitoreo) viernes ≥ 21:00 UTC, sábado, y domingo < 21:00 UTC (`FOREX_WEEKEND_GUARD=true` default).
+  - **Señal alentadora de la auditoría:** excluyendo la franja contaminada por el bug, el desempeño post-rediseño es **positivo**: reversión +$0.37 (75% WR, 20 ops), tendencia +$0.05, ruptura +$0.003 — primera evidencia (muestra pequeña) de que las Fases 1–3 apuntan en la dirección correcta. `v_decaimiento_oos` aún sin filas (ningún agente con promesa OOS llega a 15 trades).
+  - Tests: 8 nuevos en `tests/test_eod_guard.py`. Env vars nuevas en `.env.example` y `trade_monitor.yml`: `EOD_CLOSE_TIME_UTC=03:45`, `FOREX_WEEKEND_GUARD=true`.
 
 - **2026-07-07 (auditoría de operación + migración 015: sembrado de los genes de Fase 3) · en producción:**
   - **Auditoría con datos reales (5 días post-rediseño):** la selección natural ya muerde — el ciclo del 2026-07-07 eliminó 2 rupturas negativas por cuota dinámica, dejó los cupos vacantes (sin bypass forzado) y la población convergió a 13 = exactamente el objetivo de diseño de Fase 2 (5+5+3); el capital amaneció diferenciado por fitness ($4.92–$8.81), confirmando el hotfix del `fitness_map`. La rentabilidad aún no es evaluable: solo 10 trades post-rediseño (mercado mayormente en RANGO).

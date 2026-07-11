@@ -44,7 +44,7 @@ import logging
 import os
 import sys
 import time
-from datetime import datetime, time as dtime, timezone
+from datetime import datetime, time as dtime, timedelta, timezone
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -114,6 +114,39 @@ def _parse_hhmm(value: str, fallback: str) -> dtime:
 #          = 1:30 am – 11:00 pm Bogotá. Cruza la medianoche UTC.
 _TRADING_START_TIME_UTC  = _parse_hhmm(os.getenv("TRADING_START_TIME_UTC"),  "06:30")
 _TRADING_CUTOFF_TIME_UTC = _parse_hhmm(os.getenv("TRADING_CUTOFF_TIME_UTC"), "04:00")
+
+# Hora UTC del cierre forzoso EOD del Juez (judge_daily.yml corre el
+# force-close-all a las 03:45 UTC = 10:45 pm Bogotá). Es la FRONTERA que usa
+# la guardia EOD para decidir si una posición pertenece a un día de trading
+# ya cerrado — ver _eod_guard_cutoff() y el bug corregido el 2026-07-11.
+_EOD_CLOSE_TIME_UTC = _parse_hhmm(os.getenv("EOD_CLOSE_TIME_UTC"), "03:45")
+
+# Guardia de fin de semana (auditoría 2026-07-11): el mercado FX cierra el
+# viernes ~21:00 UTC (4-5 pm Bogotá) y reabre el domingo ~21:00 UTC. La
+# ventana de trading (06:30→04:00 UTC) del viernes se extiende hasta la
+# madrugada UTC del sábado, cuando el mercado ya está cerrado y Yahoo
+# devuelve el último precio CONGELADO — el sistema abría posiciones sobre
+# ese precio pagando fricción sin posibilidad de movimiento real (observado
+# el 2026-07-10: 16 ops con precio idéntico 1.14194). "false" lo desactiva.
+_FOREX_WEEKEND_GUARD = os.getenv("FOREX_WEEKEND_GUARD", "true").lower() != "false"
+
+
+def _forex_market_closed(now_utc: datetime) -> bool:
+    """
+    True si el mercado FX institucional está cerrado: viernes desde las
+    21:00 UTC, todo el sábado, y domingo hasta las 21:00 UTC. (El cierre real
+    del viernes es 21:00 UTC en verano NY / 22:00 UTC en invierno — se usa
+    21:00 como frontera conservadora: bloquear una hora de más es barato,
+    operar sobre precios congelados no.)
+    """
+    wd = now_utc.weekday()  # 0=lunes … 4=viernes, 5=sábado, 6=domingo
+    if wd == 5:
+        return True
+    if wd == 4 and now_utc.time() >= dtime(21, 0):
+        return True
+    if wd == 6 and now_utc.time() < dtime(21, 0):
+        return True
+    return False
 
 
 # Eventos macro críticos que activan la ventana de cuarentena (silencio operacional)
@@ -495,25 +528,53 @@ def _partial_close_op(op: dict, precio_salida: float, ts_salida) -> None:
 
 # ── 1. Guardia EOD (red de seguridad ante retrasos del judge_daily) ───────────
 
-def _eod_guard() -> None:
+def _eod_guard_cutoff(now_utc: datetime) -> datetime:
     """
-    Red de seguridad EOD: detecta posiciones del día anterior que no fueron
-    cerradas por judge_daily.yml (GitHub Actions puede retrasarse horas) y
-    las cierra al precio actual antes del ciclo normal de SL/TP.
+    Frontera de "posición huérfana": el ÚLTIMO cierre forzoso EOD
+    (_EOD_CLOSE_TIME_UTC, 03:45 UTC) que YA PASÓ. Una posición abierta antes
+    de esa frontera pertenece a un día de trading ya cerrado → es huérfana.
 
-    Lógica: si hay posiciones con timestamp_entrada ANTERIOR al inicio del
-    día de trading UTC de hoy (_TRADING_START_TIME_UTC), significa que el
-    force-close-all programado a las 03:45 UTC no corrió a tiempo.
+    BUG CORREGIDO (auditoría 2026-07-11): la versión anterior usaba "hoy a las
+    06:30 UTC" (_TRADING_START_TIME_UTC) sin manejar que la ventana de trading
+    cruza la medianoche UTC. Entre las 00:00 y las 04:00 UTC (7–11 pm Bogotá),
+    ese instante quedaba EN EL FUTURO, así que cualquier posición recién
+    abierta parecía "del día anterior" → force_close_all() en CADA ciclo de
+    15 min, y como la ventana de apertura sigue activa hasta las 04:00 UTC,
+    el agente reabría al ciclo siguiente. Resultado: churn de abrir/cerrar
+    cada 15 minutos pagando fricción (~-$1.32 acumulados observados; el
+    2026-07-10 un solo agente pagó 16 ciclos seguidos), y runners de salida
+    parcial ejecutados prematuramente a precio de mercado.
+
+    Con la frontera en el último 03:45 UTC pasado:
+      - 12:00 UTC → frontera hoy 03:45: las posiciones de la sesión de hoy
+        (abiertas ≥ 06:30) quedan intactas; sobras de ayer se cierran. ✓
+      - 00:15 UTC → frontera AYER 03:45: las posiciones de la sesión vigente
+        (abiertas desde ayer 06:30) quedan intactas. ✓ (el caso del bug)
+      - 05:00 UTC (ventana ciega) → frontera hoy 03:45: las posiciones de la
+        sesión que acaba de terminar se cierran si el Juez se retrasó. ✓
+        (el propósito original de la guardia, intacto)
     """
-    from db.connection import get_conn, get_dict_cursor
-
-    now_utc = datetime.now(timezone.utc)
-    today_trading_start = now_utc.replace(
-        hour=_TRADING_START_TIME_UTC.hour,
-        minute=_TRADING_START_TIME_UTC.minute,
+    cutoff = now_utc.replace(
+        hour=_EOD_CLOSE_TIME_UTC.hour,
+        minute=_EOD_CLOSE_TIME_UTC.minute,
         second=0,
         microsecond=0,
     )
+    if now_utc < cutoff:
+        cutoff -= timedelta(days=1)
+    return cutoff
+
+
+def _eod_guard() -> None:
+    """
+    Red de seguridad EOD: detecta posiciones de un día de trading YA CERRADO
+    que no fueron cerradas por judge_daily.yml (GitHub Actions puede
+    retrasarse horas) y las cierra al precio actual antes del ciclo normal
+    de SL/TP. La frontera de "día cerrado" es _eod_guard_cutoff().
+    """
+    from db.connection import get_conn, get_dict_cursor
+
+    cutoff = _eod_guard_cutoff(datetime.now(timezone.utc))
 
     with get_conn() as conn:
         cur = get_dict_cursor(conn)
@@ -524,7 +585,7 @@ def _eod_guard() -> None:
               AND accion IN ('BUY', 'SELL')
               AND timestamp_entrada < %s
             """,
-            (today_trading_start,),
+            (cutoff,),
         )
         n_stale = int((cur.fetchone() or {}).get("n") or 0)
 
@@ -770,6 +831,18 @@ def _evaluate_new_positions() -> dict:
             now_hhmm,
             _TRADING_START_TIME_UTC.strftime("%H:%M"),
             _TRADING_CUTOFF_TIME_UTC.strftime("%H:%M"),
+        )
+        return {"evaluated": 0, "opened": 0, "errors": 0}
+
+    # Guardia de fin de semana (auditoría 2026-07-11): la ventana de trading
+    # del viernes se extiende hasta las 04:00 UTC del sábado, pero el mercado
+    # FX cierra el viernes ~21:00 UTC — abrir posiciones después es operar
+    # sobre el último precio congelado de Yahoo (fricción garantizada, cero
+    # movimiento real). Las posiciones YA abiertas se siguen monitoreando.
+    if _FOREX_WEEKEND_GUARD and _forex_market_closed(datetime.now(timezone.utc)):
+        log.info(
+            "[TradeMonitor] Mercado FX cerrado (fin de semana UTC). "
+            "No se abren posiciones nuevas."
         )
         return {"evaluated": 0, "opened": 0, "errors": 0}
 

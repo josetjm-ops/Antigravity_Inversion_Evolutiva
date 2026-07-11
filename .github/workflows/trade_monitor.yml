@@ -73,6 +73,11 @@ jobs:
       # que dejar el LLM activo en producción medía una política distinta a
       # la evaluada en el torneo OOS. "true" restaura el comportamiento legacy.
       LLM_EXECUTION_ENABLED:    "false"
+      # Auditoría 2026-07-11: frontera de la guardia EOD (= cron del
+      # force-close-all del Juez) y guardia de fin de semana (no abrir
+      # posiciones con el mercado FX cerrado / precio congelado de Yahoo).
+      EOD_CLOSE_TIME_UTC:       "03:45"
+      FOREX_WEEKEND_GUARD:      "true"
       LOG_LEVEL:                "INFO"
       ENVIRONMENT:              "production"
 
