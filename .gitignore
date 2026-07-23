@@ -56,3 +56,7 @@ google_credentials.json
 
 # ── Claude Code (sesiones locales, worktrees, plans) ─────────────────────────
 .claude/
+
+# Fase B (2026-07-23): históricos de Dukascopy y resultados de la evolución
+# offline. Son cientos de MB regenerables — nunca se versionan.
+resultados_offline/
