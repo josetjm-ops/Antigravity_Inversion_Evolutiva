@@ -337,3 +337,78 @@ def test_holdout_corto_se_marca_insuficiente_no_sin_edge():
     assert res["n_trades"] == 0
     # La clave: es DISTINGUIBLE de un genoma evaluado con 0 trades reales
     # (ese no traería el motivo).
+
+
+def test_evolucionar_reanuda_desde_checkpoint(tmp_path, monkeypatch):
+    """
+    Con reanudar=True y un checkpoint de la generación N, evolucionar debe
+    continuar en N+1 SIN regenerar ni re-evaluar la población inicial —
+    esto es lo que permite apagar el computador a mitad de una corrida de
+    horas sin perder el trabajo hecho.
+    """
+    import random
+    df = _df_sintetico(96 * 200)
+    folds = oe._construir_folds(df, 2, 40, 15, 1, 96)
+    htf = {"direccion": "NEUTRAL", "ema_rapida": 0.0, "ema_lenta": 0.0}
+
+    # Población de checkpoint: genomas ya evaluados (gen 3 completada).
+    rng = random.Random(1)
+    pobl = []
+    for i in range(6):
+        g = oe.genoma_aleatorio("tendencia", rng)
+        g["_eval"] = {"fitness": 0.5 - i * 0.05, "n_trades": 30,
+                      "fitness_medio": 0.5, "desviacion": 0.0}
+        g["fitness_score"] = g["_eval"]["fitness"]
+        pobl.append(g)
+    ruta = tmp_path / "cp_tendencia.json"
+    oe._guardar_checkpoint(ruta, "tendencia", 3, pobl)
+
+    # Espía: si se llama genoma_aleatorio, es que NO reanudó (regeneró la
+    # población desde cero), lo que sería el bug.
+    llamadas = {"aleatorio": 0}
+    orig = oe.genoma_aleatorio
+    def _spy(especie, rng_):
+        llamadas["aleatorio"] += 1
+        return orig(especie, rng_)
+    monkeypatch.setattr(oe, "genoma_aleatorio", _spy)
+
+    # Mock de la evaluación (pesada y en subprocesos): el test valida la
+    # LÓGICA de reanudación, no la simulación de trading.
+    monkeypatch.setattr(oe, "_evaluar_poblacion",
+                        lambda genomas, *a, **k: [
+                            {"fitness": 0.4, "n_trades": 25, "fitness_medio": 0.4,
+                             "desviacion": 0.0} for _ in genomas])
+
+    final = oe.evolucionar(
+        df, htf, "tendencia", generaciones=4, tam_poblacion=6, elite=2,
+        n_folds=2, train_dias=40, val_dias=15, purge_dias=1, velas_por_dia=96,
+        procesos=1, checkpoint=ruta, reanudar=True,
+    )
+
+    # Reanudó de gen 3 → solo corre gen 4 → NO regenera población inicial.
+    assert llamadas["aleatorio"] == 0, "No debe regenerar la población al reanudar"
+    assert len(final) == 6
+
+
+def test_evolucionar_checkpoint_completo_no_reevoluciona(tmp_path):
+    """Si el checkpoint ya alcanzó el total de generaciones pedidas, reanudar
+    devuelve la población tal cual, sin correr nada."""
+    import random
+    df = _df_sintetico(96 * 200)
+    rng = random.Random(2)
+    pobl = []
+    for i in range(4):
+        g = oe.genoma_aleatorio("reversion", rng)
+        g["_eval"] = {"fitness": 0.3, "n_trades": 20}
+        g["fitness_score"] = 0.3
+        pobl.append(g)
+    ruta = tmp_path / "cp_reversion.json"
+    oe._guardar_checkpoint(ruta, "reversion", 10, pobl)   # ya en gen 10
+
+    htf = {"direccion": "NEUTRAL"}
+    final = oe.evolucionar(
+        df, htf, "reversion", generaciones=10, tam_poblacion=4,
+        n_folds=2, train_dias=40, val_dias=15, purge_dias=1, velas_por_dia=96,
+        procesos=1, checkpoint=ruta, reanudar=True,
+    )
+    assert len(final) == 4

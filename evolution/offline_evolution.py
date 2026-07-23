@@ -265,6 +265,7 @@ def evolucionar(
     semilla: int = 42,
     procesos: int | None = None,
     checkpoint: Path | None = None,
+    reanudar: bool = False,
     on_generacion=None,
 ) -> list[dict]:
     """
@@ -274,6 +275,12 @@ def evolucionar(
     `velas_por_dia=96` corresponde a velas de 15m sobre 24h de mercado FX
     (el histórico de Dukascopy cubre las 24h, a diferencia de las ~26 velas
     útiles que asumía el backtester con datos de Yahoo).
+
+    `reanudar=True`: si existe `checkpoint`, carga su población y continúa
+    desde la generación siguiente en vez de empezar de cero — para que apagar
+    el computador a mitad de una corrida de horas no cueste el trabajo hecho.
+    (La trayectoria aleatoria tras el punto de reanudación no es idéntica a la
+    de una corrida ininterrumpida, pero sigue siendo una evolución válida.)
     """
     from evolution.evolution_engine import breed_agent
 
@@ -290,14 +297,32 @@ def evolucionar(
     procesos = procesos or max(1, (os.cpu_count() or 2))
     log.info("[Offline/%s] Evaluando con %d proceso(s)", especie, procesos)
 
-    poblacion = [genoma_aleatorio(especie, rng) for _ in range(tam_poblacion)]
-    for g, ev in zip(poblacion, _evaluar_poblacion(
-            poblacion, df_15m, folds, htf_trend, 0.5, procesos)):
-        g["_eval"] = ev
-        g["fitness_score"] = ev["fitness"]
-    poblacion.sort(key=lambda g: g["_eval"]["fitness"], reverse=True)
+    gen_inicial = 1
+    datos_cp = cargar_checkpoint(checkpoint) if (reanudar and checkpoint) else None
+    if datos_cp and datos_cp.get("poblacion"):
+        # El checkpoint guarda cada genoma con su _eval (fitness) y sus bloques
+        # de params — todo lo que el bucle necesita para seleccionar y criar.
+        # No hay que re-evaluar la población cargada.
+        poblacion = datos_cp["poblacion"]
+        gen_inicial = int(datos_cp.get("generacion", 0)) + 1
+        log.info(
+            "[Offline/%s] REANUDANDO desde el checkpoint: gen %d completa, "
+            "continuando en gen %d.", especie, gen_inicial - 1, gen_inicial,
+        )
+    else:
+        poblacion = [genoma_aleatorio(especie, rng) for _ in range(tam_poblacion)]
+        for g, ev in zip(poblacion, _evaluar_poblacion(
+                poblacion, df_15m, folds, htf_trend, 0.5, procesos)):
+            g["_eval"] = ev
+            g["fitness_score"] = ev["fitness"]
+        poblacion.sort(key=lambda g: g["_eval"]["fitness"], reverse=True)
 
-    for gen in range(1, generaciones + 1):
+    if gen_inicial > generaciones:
+        log.info("[Offline/%s] El checkpoint ya alcanzó %d generaciones — nada que evolucionar.",
+                 especie, generaciones)
+        return poblacion
+
+    for gen in range(gen_inicial, generaciones + 1):
         nueva = [dict(g) for g in poblacion[:elite]]          # elitismo
 
         hijos = []
