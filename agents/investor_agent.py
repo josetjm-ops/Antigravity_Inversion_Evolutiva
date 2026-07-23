@@ -398,11 +398,13 @@ class InvestorAgent:
                     agente_id, timestamp_entrada, par, accion,
                     precio_entrada, capital_usado, pips_sl,
                     senal_tecnico, senal_macro, decision_riesgo, estado,
-                    timestamp_salida, precio_salida, pnl, pnl_porcentaje
+                    timestamp_salida, precio_salida, pnl, pnl_porcentaje,
+                    razon_salida
                 ) VALUES (
                     %s, %s, 'EUR/USD', %s,
                     %s, %s, %s, %s, %s, %s, 'cerrada',
-                    %s, %s, %s, %s
+                    %s, %s, %s, %s,
+                    'PARCIAL'
                 )
                 """,
                 (
@@ -475,11 +477,19 @@ class InvestorAgent:
         precio_salida: float,
         capital_disponible: float,
         timestamp_salida: datetime | None = None,
+        razon_salida: str | None = None,
     ) -> dict[str, Any]:
         """
         Cierra una operación: calcula P&L desde precios reales de mercado
         y actualiza el capital y ROI del agente en la base de datos.
         Llamado por TradeMonitor cuando el precio toca SL, TP, o al EOD.
+
+        `razon_salida` (Fase A, 2026-07-23): mecanismo que cerró la operación
+        — TP/SL/BE/TRAILING/REV/EOD/GUARDIA (ver migración 016). Sin este
+        dato no se puede diagnosticar por qué el payoff está invertido: la
+        atribución del histórico reveló que el 44% de los trades muere en
+        break-even. El llamador es quien conoce el mecanismo, así que lo
+        pasa explícitamente; None deja la columna en NULL (no se inventa).
 
         `timestamp_salida` (opcional, UTC-aware): permite registrar el
         instante real en que la vela tocó SL/TP cuando el cierre proviene
@@ -539,10 +549,11 @@ class InvestorAgent:
                     precio_salida    = %s,
                     pnl              = %s,
                     pnl_porcentaje   = %s,
+                    razon_salida     = %s,
                     estado           = 'cerrada'
                 WHERE id = %s
                 """,
-                (ts_salida, precio_salida, pnl, pnl_pct, op_id),
+                (ts_salida, precio_salida, pnl, pnl_pct, razon_salida, op_id),
             )
             cur.execute(
                 """

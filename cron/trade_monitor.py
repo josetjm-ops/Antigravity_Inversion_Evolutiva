@@ -459,10 +459,49 @@ def _persist_trailing(op: dict, sl: float, extremo: float, since_ts) -> None:
         cur.execute(sql, params)
 
 
+def _clasificar_razon_salida(op: dict, precio_salida: float, resultado: str) -> str:
+    """
+    Traduce el resultado del verificador a la taxonomía de `razon_salida`
+    (Fase A, migración 016). La distinción clave es dentro de HIT_SL: no es
+    lo mismo perder -1R completo (SL original) que salir plano (break-even)
+    o con ganancia recortada (trailing) — la atribución del histórico mostró
+    que el 44% de los trades muere en break-even, así que agruparlos todos
+    como "SL" ocultaba exactamente el problema que hay que resolver.
+
+    - HIT_TP           → TP
+    - REVERSAL         → REV
+    - HIT_SL con el stop en su nivel original            → SL
+    - HIT_SL con el stop movido a entrada ± fricción     → BE
+    - HIT_SL con el stop movido a favor (ganancia real)  → TRAILING
+    """
+    if resultado == "HIT_TP":
+        return "TP"
+    if resultado == "REVERSAL":
+        return "REV"
+    if resultado != "HIT_SL":
+        return "EOD"
+
+    entrada = float(op["precio_entrada"])
+    sl_orig = op.get("stop_loss_original")
+    # Sin el nivel original registrado no se puede distinguir: se reporta el
+    # caso base (SL) en vez de inventar una categoría más favorable.
+    if sl_orig is None:
+        return "SL"
+    if abs(precio_salida - float(sl_orig)) <= 0.00005:
+        return "SL"
+
+    # El stop se movió. ¿Dónde quedó respecto a la entrada?
+    delta = (precio_salida - entrada) if op["accion"] == "BUY" else (entrada - precio_salida)
+    if abs(delta) <= _FRICTION_PIPS * 0.0001 * 1.5:
+        return "BE"
+    return "TRAILING" if delta > 0 else "SL"
+
+
 def _close_op(op: dict, precio_salida: float, ts_salida, resultado: str) -> None:
     """
     Cierra la operación reusando InvestorAgent.close_operation y propaga
-    el timestamp_salida real cuando proviene del verificador intra-vela.
+    el timestamp_salida real cuando proviene del verificador intra-vela,
+    más la razón de salida clasificada (Fase A).
     """
     from agents.investor_agent import InvestorAgent
     from db.connection import get_conn, get_dict_cursor
@@ -476,16 +515,18 @@ def _close_op(op: dict, precio_salida: float, ts_salida, resultado: str) -> None
         row = cur.fetchone()
         capital_actual = float(row["capital_actual"]) if row else 10.0
 
+    razon = _clasificar_razon_salida(op, precio_salida, resultado)
     agent = InvestorAgent(op["agente_id"], {})
     result = agent.close_operation(
         op_id=op["id"],
         precio_salida=precio_salida,
         capital_disponible=capital_actual,
         timestamp_salida=ts_salida,
+        razon_salida=razon,
     )
     log.info(
-        "[TradeMonitor] Op %d %s → %s: salida=%.5f pnl=%.4f capital=%.4f",
-        op["id"], op["accion"], resultado,
+        "[TradeMonitor] Op %d %s → %s (razon=%s): salida=%.5f pnl=%.4f capital=%.4f",
+        op["id"], op["accion"], resultado, razon,
         precio_salida, result.get("pnl", 0), result.get("nuevo_capital", 0),
     )
 
@@ -595,7 +636,7 @@ def _eod_guard() -> None:
             "(judge_daily demorado). Ejecutando cierre forzoso de emergencia...",
             n_stale,
         )
-        force_close_all()
+        force_close_all(razon="GUARDIA")
     else:
         log.debug("[TradeMonitor] EOD GUARD: sin posiciones huerfanas. OK.")
 
@@ -636,6 +677,9 @@ def sync_once() -> dict:
                 o.pips_sl::float        AS pips_sl,
                 COALESCE(o.sl_dinamico,
                     (o.decision_riesgo->>'stop_loss')::float)           AS stop_loss,
+                -- Nivel ORIGINAL del stop (Fase A): permite distinguir un SL
+                -- completo de un break-even o un trailing al clasificar la salida.
+                (o.decision_riesgo->>'stop_loss')::float                AS stop_loss_original,
                 (o.decision_riesgo->>'take_profit')::float              AS take_profit,
                 COALESCE(o.precio_extremo_favorable,
                     o.precio_entrada)::float                            AS precio_extremo_favorable,
@@ -917,6 +961,16 @@ def _evaluate_new_positions() -> dict:
         reversal_closed = 0
 
     evaluated = opened = errors = 0
+    # Embudo de decisión (Fase A, migración 016): cuántos candidatos cae en
+    # cada gate. Sin esto, "los agentes no operan" es una impresión; con esto
+    # es un número atribuible a un filtro concreto.
+    embudo = {
+        "candidatos": len(candidates),
+        "bloqueado_regimen": 0,
+        "bloqueado_sesion": 0,
+        "bloqueado_cuarentena": 0,
+        "hold_por_senal": 0,
+    }
 
     for agent_data in candidates:
         agent_id = agent_data["id"]
@@ -944,6 +998,7 @@ def _evaluate_new_positions() -> dict:
                     "[TradeMonitor] %s (%s) — bloqueado por régimen %s (ADX=%.1f). HOLD.",
                     agent_id, especie, regime_estado, regime["adx"],
                 )
+                embudo["bloqueado_regimen"] += 1
                 evaluated += 1
                 continue
 
@@ -956,6 +1011,7 @@ def _evaluate_new_positions() -> dict:
                     "[TradeMonitor] %s — QUARANTINE (%dmin) por '%s' — HOLD forzado.",
                     agent_id, quarantine_min, evento_q,
                 )
+                embudo["bloqueado_cuarentena"] += 1
                 evaluated += 1
                 continue
 
@@ -967,6 +1023,7 @@ def _evaluate_new_positions() -> dict:
                     "[TradeMonitor] %s — fuera de sesión '%s' (hora UTC=%d). HOLD.",
                     agent_id, sesion_gen, hour_utc_now,
                 )
+                embudo["bloqueado_sesion"] += 1
                 evaluated += 1
                 continue
 
@@ -1004,6 +1061,8 @@ def _evaluate_new_positions() -> dict:
 
             if action in ("BUY", "SELL"):
                 opened += 1
+            else:
+                embudo["hold_por_senal"] += 1
             evaluated += 1
 
         except Exception as exc:
@@ -1014,18 +1073,62 @@ def _evaluate_new_positions() -> dict:
         "[TradeMonitor] Nuevas posiciones — evaluados=%d abiertos=%d errores=%d",
         evaluated, opened, errors,
     )
+    log.info(
+        "[TradeMonitor] EMBUDO — candidatos=%d | regimen=%d sesion=%d cuarentena=%d "
+        "hold_senal=%d | abiertos=%d",
+        embudo["candidatos"], embudo["bloqueado_regimen"], embudo["bloqueado_sesion"],
+        embudo["bloqueado_cuarentena"], embudo["hold_por_senal"], opened,
+    )
+    _persistir_embudo(embudo, opened, errors, regime)
+
     return {
         "evaluated": evaluated, "opened": opened, "errors": errors,
-        "reversal_closed": reversal_closed,
+        "reversal_closed": reversal_closed, "embudo": embudo,
     }
+
+
+def _persistir_embudo(embudo: dict, opened: int, errors: int, regime: dict | None) -> None:
+    """
+    Guarda el embudo del ciclo en `embudo_decision` (Fase A, migración 016).
+
+    Nunca propaga excepciones: es telemetría de diagnóstico, no puede tumbar
+    un ciclo del monitor cuyo trabajo real (vigilar SL/TP) ya se completó.
+    """
+    from db.connection import get_conn
+
+    try:
+        with get_conn() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                INSERT INTO embudo_decision (
+                    candidatos, bloqueado_regimen, bloqueado_sesion,
+                    bloqueado_cuarentena, hold_por_senal, abiertos, errores,
+                    regimen_estado, adx
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    embudo["candidatos"], embudo["bloqueado_regimen"],
+                    embudo["bloqueado_sesion"], embudo["bloqueado_cuarentena"],
+                    embudo["hold_por_senal"], opened, errors,
+                    (regime or {}).get("estado"),
+                    round(float((regime or {}).get("adx") or 0), 2) or None,
+                ),
+            )
+    except Exception as exc:
+        log.warning("[TradeMonitor] No se pudo persistir el embudo: %s", exc)
 
 
 # ── 4. Cierre forzado EOD ─────────────────────────────────────────────────────
 
-def force_close_all() -> dict:
+def force_close_all(razon: str = "EOD") -> dict:
     """
     Cierra TODAS las posiciones abiertas al precio actual de mercado.
     Llamado por judge_daily.yml antes del ciclo evolutivo (10:45 pm Bogotá).
+
+    `razon` (Fase A): "EOD" para el cierre programado del Juez, "GUARDIA"
+    cuando lo invoca _eod_guard() como red de seguridad — distinguirlos
+    permite medir cuánto P&L se pierde por cada mecanismo.
     """
     from data.simulated_broker import get_current_price
     from agents.investor_agent import InvestorAgent
@@ -1075,6 +1178,7 @@ def force_close_all() -> dict:
                     op_id=op["id"],
                     precio_salida=current_price,
                     capital_disponible=capital_actual,
+                    razon_salida=razon,
                 )
                 log.info(
                     "[TradeMonitor] EOD — Op %d cerrada: accion=%s pnl=%.4f",
