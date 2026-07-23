@@ -62,6 +62,8 @@ def main() -> int:
     ap.add_argument("--semilla", type=int, default=42)
     ap.add_argument("--procesos", type=int, default=None,
                     help="Procesos paralelos (default: nº de núcleos)")
+    ap.add_argument("--reanudar", action="store_true",
+                    help="Continuar desde el checkpoint de cada especie si existe")
     args = ap.parse_args()
 
     hasta = args.hasta or date.today()
@@ -110,6 +112,7 @@ def main() -> int:
             generaciones=args.generaciones, tam_poblacion=args.poblacion,
             n_folds=args.folds, semilla=args.semilla, velas_por_dia=velas_por_dia,
             procesos=args.procesos,
+            reanudar=args.reanudar,
             checkpoint=SALIDA_DIR / f"checkpoint_{especie}.json",
         )
 
