@@ -60,6 +60,8 @@ def main() -> int:
     ap.add_argument("--poblacion", type=int, default=40)
     ap.add_argument("--folds", type=int, default=4)
     ap.add_argument("--semilla", type=int, default=42)
+    ap.add_argument("--procesos", type=int, default=None,
+                    help="Procesos paralelos (default: nº de núcleos)")
     args = ap.parse_args()
 
     hasta = args.hasta or date.today()
@@ -107,6 +109,7 @@ def main() -> int:
             df_evolucion, htf_trend, especie,
             generaciones=args.generaciones, tam_poblacion=args.poblacion,
             n_folds=args.folds, semilla=args.semilla, velas_por_dia=velas_por_dia,
+            procesos=args.procesos,
             checkpoint=SALIDA_DIR / f"checkpoint_{especie}.json",
         )
 
@@ -115,17 +118,26 @@ def main() -> int:
         for i, genoma in enumerate(poblacion[:5], 1):
             hold = oe.evaluar_holdout(genoma, df_holdout, htf_trend,
                                       velas_por_dia=velas_por_dia)
+
+            # "holdout_insuficiente" NO es un veredicto sobre el genoma: es un
+            # problema técnico (el tramo de holdout es más corto que el warmup).
+            # Distinguirlo evita leer un fallo de configuración como "sin edge"
+            # y, peor, como señal para cerrar el proyecto.
+            insuficiente = hold.get("motivo") == "holdout_insuficiente"
             promovible = (
-                hold["n_trades"] >= MIN_TRADES_HOLDOUT
+                not insuficiente
+                and hold["n_trades"] >= MIN_TRADES_HOLDOUT
                 and hold.get("expectancy_R", 0) > 0
                 and hold.get("pasa_bootstrap", False)
             )
+            etiqueta = ("HOLDOUT INSUFICIENTE (sube --holdout-dias)" if insuficiente
+                        else "PROMOVIBLE" if promovible else "descartado")
             log.info(
                 "  #%d evo_fitness=%+.4f | HOLDOUT: exp=%+.4fR n=%d WR=%.0f%% boot=%s → %s",
                 i, genoma["_eval"]["fitness"], hold.get("expectancy_R", 0),
                 hold["n_trades"], hold.get("win_rate", 0) * 100,
                 "SI" if hold.get("pasa_bootstrap") else "no",
-                "PROMOVIBLE" if promovible else "descartado",
+                etiqueta,
             )
             campeones.append({
                 "rank": i,
@@ -142,7 +154,19 @@ def main() -> int:
 
     total = sum(1 for esp in informe["campeones"].values()
                 for c in esp if c["promovible"])
+    # Si TODO el holdout fue insuficiente, el resultado no dice nada sobre el
+    # edge — es un problema de configuración, no un veredicto.
+    todos = [c for esp in informe["campeones"].values() for c in esp]
+    todo_insuficiente = todos and all(
+        c["holdout"].get("motivo") == "holdout_insuficiente" for c in todos)
+
     log.info("=" * 70)
+    if todo_insuficiente:
+        log.warning("HOLDOUT INSUFICIENTE en todas las especies — sin veredicto.")
+        log.warning("  El tramo de holdout es más corto que el warmup de indicadores.")
+        log.warning("  Re-ejecuta con --holdout-dias mayor (recomendado: 90-120).")
+        return 0
+
     log.info("RESULTADO: %d campeones PROMOVIBLES (pasaron el holdout)", total)
     log.info("Informe: %s", ruta)
     if total == 0:

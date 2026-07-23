@@ -42,8 +42,10 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import random
 import statistics
+from concurrent.futures import ProcessPoolExecutor
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -101,8 +103,12 @@ def genoma_aleatorio(especie: str, rng: random.Random) -> dict:
         smc["htf_filter_enabled"] = 1
 
     return {
+        # id sintético: breed_agent lo lee para la genealogía (padre_N_id).
+        # No toca la DB — es solo una etiqueta para el cruce offline.
+        "id": f"OFF_{especie}_{rng.getrandbits(32):08x}",
         "params_tecnicos": tec, "params_macro": mac,
         "params_riesgo": rie, "params_smc": smc, "especie": especie,
+        "fitness_score": 0.0,   # se actualiza tras evaluar (dominancia del cruce)
     }
 
 
@@ -188,6 +194,53 @@ def evaluar_genoma(
 
 # ── Bucle evolutivo ─────────────────────────────────────────────────────────
 
+# ── Evaluación en paralelo ──────────────────────────────────────────────────
+#
+# Una evaluación de genoma cuesta ~39 s (medido): 3 folds × cientos de
+# llamadas a calc_signals. En serie, una corrida de 30×40 tomaría ~6.5 h por
+# especie. Las evaluaciones son independientes y CPU-bound, así que se
+# reparten entre procesos. El estado pesado (el DataFrame del histórico) se
+# envía UNA VEZ por worker vía initializer, no en cada tarea.
+
+_ESTADO_WORKER: dict[str, Any] = {}
+
+
+def _init_worker(df_15m, folds, htf_trend, lam) -> None:
+    _ESTADO_WORKER.update(
+        {"df": df_15m, "folds": folds, "htf": htf_trend, "lam": lam}
+    )
+
+
+def _evaluar_en_worker(genoma: dict) -> dict:
+    ev = evaluar_genoma(
+        genoma, _ESTADO_WORKER["df"], _ESTADO_WORKER["folds"],
+        _ESTADO_WORKER["htf"], _ESTADO_WORKER["lam"],
+    )
+    ev.pop("oos_trades", None)
+    return ev
+
+
+def _evaluar_sin_trades(genoma, df_15m, folds, htf_trend, lam) -> dict:
+    ev = evaluar_genoma(genoma, df_15m, folds, htf_trend, lam)
+    ev.pop("oos_trades", None)
+    return ev
+
+
+def _evaluar_poblacion(genomas, df_15m, folds, htf_trend, lam, procesos):
+    """Evalúa una lista de genomas en paralelo; cae a serie si el pool falla."""
+    if procesos is not None and procesos <= 1:
+        return [_evaluar_sin_trades(g, df_15m, folds, htf_trend, lam) for g in genomas]
+    try:
+        with ProcessPoolExecutor(
+            max_workers=procesos, initializer=_init_worker,
+            initargs=(df_15m, folds, htf_trend, lam),
+        ) as pool:
+            return list(pool.map(_evaluar_en_worker, genomas))
+    except Exception as exc:
+        log.warning("[Offline] Pool no disponible (%s) — evaluando en serie.", exc)
+        return [_evaluar_sin_trades(g, df_15m, folds, htf_trend, lam) for g in genomas]
+
+
 def _seleccion_torneo(poblacion: list[dict], k: int, rng: random.Random) -> dict:
     """Selección por torneo: k candidatos al azar, gana el de mejor fitness.
     Mantiene presión selectiva sin colapsar la diversidad como haría elegir
@@ -210,6 +263,7 @@ def evolucionar(
     purge_dias: int = 1,
     velas_por_dia: int = 96,
     semilla: int = 42,
+    procesos: int | None = None,
     checkpoint: Path | None = None,
     on_generacion=None,
 ) -> list[dict]:
@@ -233,26 +287,35 @@ def evolucionar(
 
     log.info("[Offline/%s] %d folds sobre %d velas", especie, len(folds), len(df_15m))
 
-    poblacion = []
-    for _ in range(tam_poblacion):
-        g = genoma_aleatorio(especie, rng)
-        g["_eval"] = evaluar_genoma(g, df_15m, folds, htf_trend)
-        poblacion.append(g)
+    procesos = procesos or max(1, (os.cpu_count() or 2))
+    log.info("[Offline/%s] Evaluando con %d proceso(s)", especie, procesos)
+
+    poblacion = [genoma_aleatorio(especie, rng) for _ in range(tam_poblacion)]
+    for g, ev in zip(poblacion, _evaluar_poblacion(
+            poblacion, df_15m, folds, htf_trend, 0.5, procesos)):
+        g["_eval"] = ev
+        g["fitness_score"] = ev["fitness"]
     poblacion.sort(key=lambda g: g["_eval"]["fitness"], reverse=True)
 
     for gen in range(1, generaciones + 1):
         nueva = [dict(g) for g in poblacion[:elite]]          # elitismo
 
-        while len(nueva) < tam_poblacion:
+        hijos = []
+        while len(nueva) + len(hijos) < tam_poblacion:
             p1 = _seleccion_torneo(poblacion, torneo_k, rng)
             p2 = _seleccion_torneo(poblacion, torneo_k, rng)
             hijo = breed_agent(
-                p1, p2, f"OFFLINE_{especie}_{gen}_{len(nueva)}",
+                p1, p2, f"OFFLINE_{especie}_{gen}_{len(hijos)}",
                 date.today(), gen, especie=especie,
             )
             hijo["especie"] = especie
-            hijo["_eval"] = evaluar_genoma(hijo, df_15m, folds, htf_trend)
-            nueva.append(hijo)
+            hijos.append(hijo)
+
+        for h, ev in zip(hijos, _evaluar_poblacion(
+                hijos, df_15m, folds, htf_trend, 0.5, procesos)):
+            h["_eval"] = ev
+            h["fitness_score"] = ev["fitness"]
+        nueva.extend(hijos)
 
         poblacion = sorted(nueva, key=lambda g: g["_eval"]["fitness"], reverse=True)
         mejor = poblacion[0]["_eval"]
@@ -275,12 +338,24 @@ def evolucionar(
 
 def evaluar_holdout(
     genoma: dict, df_holdout: pd.DataFrame, htf_trend: dict,
-    velas_por_dia: int = 96, warmup_dias: int = 40,
+    velas_por_dia: int = 96, warmup_dias: int = 10,
 ) -> dict:
     """
     Evalúa un campeón sobre el tramo de holdout — datos que la evolución
     NUNCA tocó. Este es el único número que debería inspirar confianza: el
     fitness de evolución está, por construcción, optimizado sobre sus folds.
+
+    `warmup_dias=10`: solo lo necesario para que los indicadores (EMA lenta,
+    ATR, ADX) se estabilicen. NO son los 40 días de train de los folds de
+    evolución — aquí no se entrena nada, solo se calientan indicadores, y un
+    warmup grande desperdiciaría holdout evaluable (un warmup de 40 sobre un
+    holdout de 25 días dejaba CERO velas evaluables — bug de la corrida
+    preliminar 2026-07-23, que reportaba n=0 como si fuera "sin edge").
+
+    `motivo="holdout_insuficiente"` (con guion bajo) señala EXPLÍCITAMENTE el
+    caso técnico de holdout demasiado corto, para que el runner NO lo
+    confunda con un veredicto real de "el genoma no tiene edge" — esa
+    confusión podría empujar erróneamente a cerrar el proyecto.
 
     Devuelve además el veredicto del gate bootstrap (Fase 2).
     """
@@ -289,7 +364,7 @@ def evaluar_holdout(
     inicio = warmup_dias * velas_por_dia
     if len(df_holdout) <= inicio + velas_por_dia:
         return {"fitness": 0.0, "n_trades": 0, "pasa_bootstrap": False,
-                "motivo": "holdout insuficiente"}
+                "motivo": "holdout_insuficiente"}
 
     trades = _walk_forward_trades(
         df_holdout, inicio, len(df_holdout), htf_trend,
@@ -330,7 +405,9 @@ def _guardar_checkpoint(ruta: Path, especie: str, generacion: int, poblacion: li
         "guardado": datetime.now(timezone.utc).isoformat(),
         "poblacion": [_limpiar(g) for g in poblacion],
     }
-    ruta.write_text(json.dumps(datos, indent=2), encoding="utf-8")
+    # default=str serializa los date/datetime que breed_agent deja en el
+    # genoma (fecha_nacimiento).
+    ruta.write_text(json.dumps(datos, indent=2, default=str), encoding="utf-8")
 
 
 def cargar_checkpoint(ruta: Path) -> dict | None:
