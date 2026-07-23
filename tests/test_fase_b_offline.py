@@ -289,3 +289,51 @@ def test_checkpoint_ida_y_vuelta(tmp_path):
 
 def test_checkpoint_inexistente_devuelve_none():
     assert oe.cargar_checkpoint(dk.Path("no_existe_jamas.json")) is None
+
+
+def test_checkpoint_serializa_genomas_con_fecha(tmp_path):
+    """
+    breed_agent deja un `date` en el genoma (fecha_nacimiento). El checkpoint
+    debe poder serializarlo — este caso rompió la primera corrida real
+    (TypeError: Object of type date is not JSON serializable) porque los
+    tests anteriores solo usaban genomas sin fechas.
+    """
+    from datetime import date as _date
+    ruta = tmp_path / "cp_fecha.json"
+    poblacion = [{
+        "id": "OFF_x", "fecha_nacimiento": _date(2026, 7, 23),
+        "params_tecnicos": {}, "params_macro": {}, "params_riesgo": {},
+        "params_smc": {}, "especie": "reversion",
+        "_eval": {"fitness": 0.3, "n_trades": 40},
+    }]
+    oe._guardar_checkpoint(ruta, "reversion", 1, poblacion)   # no debe reventar
+    datos = oe.cargar_checkpoint(ruta)
+    assert datos["poblacion"][0]["fecha_nacimiento"] == "2026-07-23"
+
+
+def test_genoma_aleatorio_trae_id_y_fitness_para_el_cruce():
+    """breed_agent lee parent['id'] (genealogía) y parent['fitness_score']
+    (dominancia del cruce). Sin ellas, la segunda generación reventaba con
+    KeyError('id') — el bug de la primera corrida real."""
+    import random
+    g = oe.genoma_aleatorio("tendencia", random.Random(1))
+    assert "id" in g and g["id"].startswith("OFF_")
+    assert "fitness_score" in g
+
+
+def test_holdout_corto_se_marca_insuficiente_no_sin_edge():
+    """
+    Un holdout más corto que el warmup NO debe reportarse como n=0/"sin edge"
+    — ese fue el bug de la corrida preliminar 2026-07-23, que podía leerse
+    como señal para cerrar el proyecto cuando en realidad era un problema de
+    configuración. Debe devolver motivo="holdout_insuficiente" distinguible.
+    """
+    g = {"params_tecnicos": {}, "params_smc": {}, "params_riesgo": {},
+         "especie": "reversion"}
+    # Holdout de ~5 días con warmup por defecto de 10 → insuficiente.
+    df_corto = _df_sintetico(96 * 5)
+    res = oe.evaluar_holdout(g, df_corto, {"direccion": "NEUTRAL"}, velas_por_dia=96)
+    assert res["motivo"] == "holdout_insuficiente"
+    assert res["n_trades"] == 0
+    # La clave: es DISTINGUIBLE de un genoma evaluado con 0 trades reales
+    # (ese no traería el motivo).
