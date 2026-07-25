@@ -525,8 +525,16 @@ def test_dynamic_quota_protects_profitable_veterans():
 
 
 def test_dynamic_quota_eliminates_only_negative_fitness():
-    """Solo se eliminan agentes con fitness <= 0, hasta tope N_ELIMINATE."""
-    from evolution.evolution_engine import EvolutionEngine
+    """
+    Solo se eliminan agentes con fitness <= 0, hasta el tope aplicable.
+
+    Los 10 agentes de este caso no declaran `especie`, así que caen todos en
+    "tendencia" por defecto: desde la decisión de diseño 2026-07-25 el tope que
+    manda es MAX_ELIMINATE_POR_ESPECIE (3), no el global N_ELIMINATE. El punto
+    que verifica este test — que ningún agente rentable muera para cumplir
+    cuota — es independiente de cuál de los dos topes ate.
+    """
+    from evolution.evolution_engine import EvolutionEngine, MAX_ELIMINATE_POR_ESPECIE
 
     engine = EvolutionEngine(date(2026, 5, 14))
     # 6 negativos + 4 positivos
@@ -541,8 +549,9 @@ def test_dynamic_quota_eliminates_only_negative_fitness():
            for i in range(4)]
     )
     survivors, eliminated = engine.select_survivors_and_eliminated(agents)
-    # Tope por N_ELIMINATE=5 aunque haya 6 con fitness negativo
-    assert len(eliminated) == 5
+    # Tope por especie aunque haya 6 con fitness negativo: los 10 comparten
+    # especie, así que salen 3 y quedan 2 padres + los positivos.
+    assert len(eliminated) == MAX_ELIMINATE_POR_ESPECIE
     # Todos los eliminados deben tener fitness <= 0
     assert all(a["fitness_score"] <= 0 for a in eliminated), \
         "Se eliminó un agente con fitness > 0"

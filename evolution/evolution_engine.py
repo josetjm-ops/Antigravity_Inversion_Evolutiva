@@ -245,6 +245,14 @@ MIN_SAMPLE_DAYS = int(os.getenv("MIN_SAMPLE_DAYS", "7"))
 BLEEDER_FITNESS_THRESHOLD = float(os.getenv("BLEEDER_FITNESS_THRESHOLD", "-0.3"))
 BLEEDER_MIN_TRADES        = int(os.getenv("BLEEDER_MIN_TRADES", "20"))
 
+# ── Tope de bajas por especie (decisión de diseño 2026-07-25) ────────────────
+# De los 5 miembros de una especie salen como máximo 3 en un ciclo, de modo que
+# siempre queden 2 padres de los que nazcan los 3 reemplazos y la población
+# vuelva a 15. A diferencia del tope global AGENTS_ELIMINATE_PER_CYCLE, este se
+# evalúa por especie e INCLUYE a los bleeders crónicos (antes iban fuera de
+# cuota y podían vaciar una especie por debajo del piso de padres).
+MAX_ELIMINATE_POR_ESPECIE = int(os.getenv("MAX_ELIMINATE_POR_ESPECIE", "3"))
+
 # ── Capital proporcional a fitness (Fase 2, rediseño 2026-07-02) ────────────
 # Reemplaza la redistribución equitativa (mismo capital para todos, ganador y
 # perdedor) — auditoría 2026-07-01, hallazgo P0-2: "la redistribución
@@ -256,16 +264,29 @@ BLEEDER_MIN_TRADES        = int(os.getenv("BLEEDER_MIN_TRADES", "20"))
 CAPITAL_WEIGHT_FLOOR = float(os.getenv("CAPITAL_WEIGHT_FLOOR", "0.5"))
 CAPITAL_WEIGHT_CAP   = float(os.getenv("CAPITAL_WEIGHT_CAP",   "2.0"))
 
+# ── Gate de muestra para ponderar capital (decisión de diseño 2026-07-25) ────
+# El propietario pidió que todos los agentes amanezcan con el mismo capital
+# ("mismas condiciones"). El riesgo de igualarlo SIEMPRE es apagar la selección
+# natural otra vez (hallazgo P0-2). El punto medio implementado: la cuota es
+# EXACTAMENTE equitativa mientras el agente no tenga muestra suficiente — con
+# pocas operaciones el fitness es ruido y ponderar por ruido añade varianza sin
+# añadir retorno — y solo un agente con evidencia real se gana su sobrepeso.
+#   =20    -> punto medio (default)
+#   =0     -> ponderación siempre (comportamiento Fase 2 previo)
+#   =99999 -> reparto equitativo puro para todos
+CAPITAL_WEIGHT_MIN_TRADES = int(os.getenv("CAPITAL_WEIGHT_MIN_TRADES", "20"))
+
 # ── Recuperación de cupos vacantes (Sesión 18 / 19) ──────────────────────────
 # Objetivo de agentes activos por especie; el motor intenta llenar todos los
 # cupos faltantes (3 especies × 5 = población objetivo de 15 agentes) PERO ya
 # no fuerza genomas sin evidencia de edge (ver REPOBLACION_PERMITE_VACANTES).
 TARGET_AGENTS_PER_ESPECIE  = int(os.getenv("TARGET_AGENTS_PER_ESPECIE",  "5"))
-# Objetivo específico para "ruptura" (Fase 2): auditoría 2026-07-01 — 24.8%
-# WR, responsable del 68% de la pérdida total. Se reduce su cupo objetivo en
-# vez de mantenerlo artificialmente en 5 mientras no demuestre edge real;
-# override opcional por especie, cae al valor general si no se define.
-TARGET_AGENTS_RUPTURA = int(os.getenv("TARGET_AGENTS_RUPTURA", "3"))
+# Override opcional del cupo de "ruptura". Estuvo en 3 desde la Fase 2
+# (auditoría 2026-07-01: 24.8% WR, 68% de la pérdida total). Vuelve a 5 por
+# decisión de diseño del 2026-07-25: población fija de 15 agentes, 5 por
+# especie, para conservar diversidad de régimen. Se conserva la variable como
+# palanca por si hace falta volver a reducir el cupo sin re-desplegar código.
+TARGET_AGENTS_RUPTURA = int(os.getenv("TARGET_AGENTS_RUPTURA", "5"))
 
 # ── Gate OOS sin bypass forzado (Fase 2, rediseño 2026-07-02) ────────────────
 # Antes, si ningún candidato de cruce superaba el umbral OOS Y las rondas
@@ -436,7 +457,23 @@ def _build_fitness_sql(min_sample: int) -> str:
 """
 
 
+def _build_fitness_detail_sql(min_sample: int) -> str:
+    """Igual que _build_fitness_sql pero arrastra el tamaño de muestra.
+
+    Lo necesita _redistribute_capital para NO ponderar capital con un fitness
+    calculado sobre pocas operaciones (ver CAPITAL_WEIGHT_MIN_TRADES).
+    """
+    return f"""
+    WITH {_fitness_cte(min_sample)}
+    SELECT a.id, f.fitness_score, f.n_trades_fitness
+    FROM agentes a
+    JOIN fitness f ON a.id = f.id
+    WHERE a.estado = 'activo'
+"""
+
+
 _FITNESS_SQL = _build_fitness_sql(MIN_SAMPLE_TRADES)
+_FITNESS_DETAIL_SQL = _build_fitness_detail_sql(MIN_SAMPLE_TRADES)
 
 
 def calc_fitness_scores(conn, agent_ids: list[str] | None = None) -> dict[str, float]:
@@ -458,10 +495,52 @@ def calc_fitness_scores(conn, agent_ids: list[str] | None = None) -> dict[str, f
     return {row["id"]: float(row["fitness_score"] or 0) for row in cur.fetchall()}
 
 
+def calc_fitness_detail(conn, agent_ids: list[str] | None = None) -> dict[str, dict]:
+    """
+    Como calc_fitness_scores pero con el tamaño de muestra de cada agente.
+    Retorna {agente_id: {"fitness": float, "n_trades": int}}.
+
+    Existe para que _redistribute_capital pueda distinguir un fitness
+    respaldado por operaciones reales de uno que todavía es ruido.
+    """
+    sql    = _FITNESS_DETAIL_SQL
+    params: tuple = ()
+    if agent_ids:
+        sql    = _FITNESS_DETAIL_SQL + " AND a.id = ANY(%s)"
+        params = (agent_ids,)
+
+    cur = get_dict_cursor(conn)
+    cur.execute(sql, params)
+    return {
+        row["id"]: {
+            "fitness":  float(row["fitness_score"] or 0),
+            "n_trades": int(row["n_trades_fitness"] or 0),
+        }
+        for row in cur.fetchall()
+    }
+
+
 # ── Helpers de mutación ──────────────────────────────────────────────────────
 
 def _clamp(value: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, value))
+
+
+def _fitness_y_muestra(entrada) -> tuple[float, int | None]:
+    """
+    Normaliza una entrada de fitness_map a (fitness, n_trades).
+
+    Acepta el formato nuevo de calc_fitness_detail ({"fitness", "n_trades"}) y
+    el antiguo de calc_fitness_scores (float suelto). En el formato antiguo el
+    tamaño de muestra es desconocido y se devuelve None — el llamador decide
+    qué hacer con esa incertidumbre.
+    """
+    if isinstance(entrada, dict):
+        return (
+            float(entrada.get("fitness", 0.0) or 0.0),
+            int(entrada.get("n_trades", 0) or 0),
+        )
+    return float(entrada or 0.0), None
 
 
 def _real_roi_pct(agent: dict) -> float:
@@ -940,31 +1019,80 @@ class EvolutionEngine:
         Espera `agents` ya filtrados (sin inmunes) y ordenados por fitness
         DESC.
 
-        1. Bleeder crónico (incondicional, Fase 2 rediseño 2026-07-02):
-           cualquier agente con fitness_score <= BLEEDER_FITNESS_THRESHOLD y
-           n_trades >= BLEEDER_MIN_TRADES se elimina SIEMPRE, sin importar
-           cuota ni piso de especie. Un bleeder confirmado con muestra grande
-           no es "mala suerte" — es evidencia de que ese genoma no tiene edge.
-           No cuenta contra N_ELIMINATE (es adicional, no compite por cupo).
+        Tope por especie (decisión de diseño 2026-07-25): ninguna especie
+        pierde más de MAX_ELIMINATE_POR_ESPECIE (3) miembros por ciclo ni baja
+        del piso _MIN_AGENTS_PER_ESPECIE (2). Así siempre quedan 2 padres de
+        los que nacen los 3 reemplazos y la población vuelve a 15.
+
+        1. Bleeder crónico (Fase 2 rediseño 2026-07-02): agentes con
+           fitness_score <= BLEEDER_FITNESS_THRESHOLD y n_trades >=
+           BLEEDER_MIN_TRADES tienen PRIORIDAD de salida — un bleeder
+           confirmado con muestra grande no es "mala suerte", es evidencia de
+           que ese genoma no tiene edge. Desde 2026-07-25 consumen cupo de su
+           especie (antes eran incondicionales); el que no quepa encabeza la
+           fila del ciclo siguiente.
 
         2. Cuota dinámica (comportamiento previo, sobre el resto): nunca
            elimina agentes con fitness > 0 solo para cumplir la cuota de
            N_ELIMINATE. Ordena por fitness_score ASC, fecha_nacimiento ASC,
            id ASC — los primeros candidatos a salir son los veteranos
-           rezagados con peor fitness. Solo elimina fitness_score <= 0,
-           protegido por el piso de especie _MIN_AGENTS_PER_ESPECIE.
+           rezagados con peor fitness. Solo elimina fitness_score <= 0.
         """
         if not agents:
             return [], []
 
-        # ── 1. Bleeder crónico: incondicional, fuera de la cuota ──────────────
-        bleeders = [
-            a for a in agents
-            if float(a.get("fitness_score", 0) or 0) <= BLEEDER_FITNESS_THRESHOLD
-            and int(a.get("n_trades", 0) or 0) >= BLEEDER_MIN_TRADES
-        ]
+        def _especie_de(a: dict) -> str:
+            return str(a.get("especie") or "tendencia")
+
+        # Presupuesto de bajas por especie: nunca más de
+        # MAX_ELIMINATE_POR_ESPECIE, y nunca por debajo del piso de padres.
+        vivos: dict[str, int] = {}
+        for a in agents:
+            esp = _especie_de(a)
+            vivos[esp] = vivos.get(esp, 0) + 1
+        bajas: dict[str, int] = {}
+
+        def _hay_cupo(esp: str) -> bool:
+            return (
+                bajas.get(esp, 0) < MAX_ELIMINATE_POR_ESPECIE
+                and vivos.get(esp, 0) > _MIN_AGENTS_PER_ESPECIE
+            )
+
+        def _tomar(a: dict) -> None:
+            esp = _especie_de(a)
+            bajas[esp] = bajas.get(esp, 0) + 1
+            vivos[esp] = vivos.get(esp, 0) - 1
+
+        # ── 1. Bleeder crónico: máxima prioridad, DENTRO del cupo ─────────────
+        # Antes se eliminaban sin importar cuota ni piso de especie. Desde la
+        # decisión de diseño 2026-07-25 cuentan contra los 3 cupos de su
+        # especie y respetan el piso de 2 padres: la población debe volver a
+        # 15 con 2 progenitores por especie. Un bleeder que no quepa este ciclo
+        # sigue siendo el primero en la fila del siguiente (su fitness no mejora
+        # solo), así que la regla se aplaza, no se anula.
+        bleeders_candidatos = sorted(
+            (a for a in agents
+             if float(a.get("fitness_score", 0) or 0) <= BLEEDER_FITNESS_THRESHOLD
+             and int(a.get("n_trades", 0) or 0) >= BLEEDER_MIN_TRADES),
+            key=lambda a: (
+                float(a.get("fitness_score", 0) or 0),
+                a.get("fecha_nacimiento") or date.min,
+                a.get("id", ""),
+            ),
+        )
+        bleeders: list[dict] = []
+        for a in bleeders_candidatos:
+            if _hay_cupo(_especie_de(a)):
+                bleeders.append(a)
+                _tomar(a)
+
         bleeder_ids = {a["id"] for a in bleeders}
-        remaining = [a for a in agents if a["id"] not in bleeder_ids]
+        # Los bleeders que NO cupieron quedan fuera de la cuota dinámica de
+        # este ciclo: ya se evaluaron con su propia regla y no deben volver a
+        # competir por un cupo que su especie no tiene.
+        no_cupo_ids = {a["id"] for a in bleeders_candidatos} - bleeder_ids
+        remaining = [a for a in agents
+                     if a["id"] not in bleeder_ids and a["id"] not in no_cupo_ids]
 
         # ── 2. Cuota dinámica sobre el resto ──────────────────────────────────
         # Orden inverso para identificar a los peores: fitness ASC,
@@ -985,30 +1113,17 @@ class EvolutionEngine:
             if float(a.get("fitness_score", 0) or 0) <= 0
         ]
 
-        # Protección de diversidad de especies: no eliminar un agente si
-        # hacerlo bajaría su especie por debajo de _MIN_AGENTS_PER_ESPECIE.
-        # Los bleeders ya eliminados en el paso 1 se descuentan del conteo
-        # inicial — su especie ya perdió esos miembros incondicionalmente,
-        # no deben "sostener" artificialmente el piso para proteger al resto.
-        especie_counts: dict[str, int] = {}
-        for a in agents:
-            esp = str(a.get("especie") or "tendencia")
-            especie_counts[esp] = especie_counts.get(esp, 0) + 1
-        for b in bleeders:
-            esp = str(b.get("especie") or "tendencia")
-            especie_counts[esp] = especie_counts.get(esp, 0) - 1
-
-        protected_eliminable: list[dict] = []
-        temp_counts = dict(especie_counts)
+        # Protección doble: cupo por especie (3) y piso de padres (2).
+        por_cuota: list[dict] = []
         for a in eliminable:
-            esp = str(a.get("especie") or "tendencia")
-            if temp_counts.get(esp, 0) > _MIN_AGENTS_PER_ESPECIE:
-                protected_eliminable.append(a)
-                temp_counts[esp] = temp_counts[esp] - 1
-            # Si la especie ya está en el mínimo, este agente queda protegido.
+            if len(por_cuota) >= N_ELIMINATE:
+                break
+            if _hay_cupo(_especie_de(a)):
+                por_cuota.append(a)
+                _tomar(a)
+            # Si la especie agotó su cupo o está en el piso, queda protegido.
 
-        n = min(N_ELIMINATE, len(protected_eliminable))
-        eliminated = bleeders + protected_eliminable[:n]
+        eliminated = bleeders + por_cuota
 
         elim_ids = {a["id"] for a in eliminated}
         survivors = [a for a in agents if a["id"] not in elim_ids]
@@ -1352,9 +1467,16 @@ class EvolutionEngine:
         tienen fitness en vivo aún — reciben peso 1.0 (cuota equitativa estándar),
         igual que antes.
 
-        fitness_map: {agente_id: fitness_score} de los agentes veteranos ANTES
-        de este ciclo (ya lo calcula _get_active_agents_ranked al inicio de
-        run()) — evita recalcular fitness con una query aparte.
+        Gate de muestra (decisión de diseño 2026-07-25): un veterano con menos
+        de CAPITAL_WEIGHT_MIN_TRADES operaciones recibe cuota EQUITATIVA, igual
+        que un recién nacido. Con muestra corta el fitness es mayormente ruido y
+        ponderar por ruido añade varianza sin añadir retorno esperado. El
+        sobrepeso hay que ganárselo con evidencia, no con suerte.
+
+        fitness_map: {agente_id: {"fitness", "n_trades"}} de calc_fitness_detail.
+        Se acepta también el formato antiguo {agente_id: float} de
+        calc_fitness_scores, pero entonces el gate de muestra no puede aplicarse
+        y se pondera como antes de 2026-07-25.
 
         pool_override debe ser el SUM(capital_actual) de los agentes ANTES de que
         el ciclo evolutivo elimine/nazca ninguno — es decir, el pool real post-EOD.
@@ -1392,14 +1514,24 @@ class EvolutionEngine:
 
         cuota_base = round(pool_total / n_agentes, 4)
 
-        # Peso por agente: newborn=1.0 (equitativo estándar); veterano=clamp(1+fitness).
+        # Peso por agente. Cuota EQUITATIVA (peso 1.0) para el recién nacido y
+        # para todo agente sin muestra suficiente; solo se pondera por fitness a
+        # quien ya acumuló CAPITAL_WEIGHT_MIN_TRADES operaciones.
         weights: list[float] = []
+        n_equitativos = 0
         for aid in active_ids:
             if aid in new_ids_set:
                 weights.append(1.0)
-            else:
-                fit = float(fitness_map.get(aid, 0.0) or 0.0)
-                weights.append(_clamp(1.0 + fit, CAPITAL_WEIGHT_FLOOR, CAPITAL_WEIGHT_CAP))
+                n_equitativos += 1
+                continue
+            fit, n_trades = _fitness_y_muestra(fitness_map.get(aid))
+            # n_trades None = el llamador pasó solo fitness (formato antiguo):
+            # no se puede aplicar el gate, se pondera como antes.
+            if n_trades is not None and n_trades < CAPITAL_WEIGHT_MIN_TRADES:
+                weights.append(1.0)
+                n_equitativos += 1
+                continue
+            weights.append(_clamp(1.0 + fit, CAPITAL_WEIGHT_FLOOR, CAPITAL_WEIGHT_CAP))
         total_weight = sum(weights) or float(n_agentes)  # defensivo: nunca 0
 
         capitales = [round(w / total_weight * pool_total, 4) for w in weights]
@@ -1427,11 +1559,13 @@ class EvolutionEngine:
                     )
 
         log_r.info(
-            "[EvolutionEngine] Capital redistribuido (ponderado por fitness): "
-            "pool=%.4f / %d agentes — cuota base=%.4f, rango real=[%.4f, %.4f]",
+            "[EvolutionEngine] Capital redistribuido: pool=%.4f / %d agentes — "
+            "cuota base=%.4f, rango real=[%.4f, %.4f] — %d en cuota equitativa "
+            "(recién nacidos o muestra < %d trades), %d ponderados por fitness",
             pool_total, n_agentes, cuota_base,
             min(capitales) if capitales else 0.0,
             max(capitales) if capitales else 0.0,
+            n_equitativos, CAPITAL_WEIGHT_MIN_TRADES, n_agentes - n_equitativos,
         )
 
         # Reflejar nuevo capital de cada agente en Google Sheets
@@ -1812,8 +1946,15 @@ class EvolutionEngine:
 
             # Fase 2: fitness de cada agente ANTES del ciclo (veteranos), para
             # ponderar la redistribución de capital — evita una query aparte.
-            fitness_map: dict[str, float] = {
-                a["id"]: float(a.get("fitness_score", 0) or 0) for a in agents
+            # Desde 2026-07-25 arrastra también n_trades (el mismo
+            # f.n_trades_fitness que ya trae _get_active_agents_ranked) para que
+            # _redistribute_capital aplique el gate CAPITAL_WEIGHT_MIN_TRADES.
+            fitness_map: dict[str, dict] = {
+                a["id"]: {
+                    "fitness":  float(a.get("fitness_score", 0) or 0),
+                    "n_trades": int(a.get("n_trades", 0) or 0),
+                }
+                for a in agents
             }
 
             # ── PASO A: Periodo de Gracia Operativa ──────────────────────────

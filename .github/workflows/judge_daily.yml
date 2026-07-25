@@ -53,7 +53,12 @@ jobs:
       GOOGLE_CREDENTIALS_JSON:     ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
       JUDGE_TIMEZONE:              "America/Bogota"
       JUDGE_RUN_TIME:              "23:00"
-      AGENTS_ELIMINATE_PER_CYCLE:  "9"   # 3 por especie × 3 especies
+      AGENTS_ELIMINATE_PER_CYCLE:  "9"   # tope global = 3 × 3 especies
+      # Tope POR ESPECIE (decisión de diseño 2026-07-25): de 5 miembros salen
+      # como máximo 3, de modo que siempre queden 2 padres de los que nazcan
+      # los 3 reemplazos. Incluye a los bleeders crónicos (antes iban fuera de
+      # cuota y podían exceder este límite).
+      MAX_ELIMINATE_POR_ESPECIE:   "3"
       MUTATION_SIGMA_WEIGHTS:      "0.05"
       MUTATION_SIGMA_PERIODS:      "0.08"
       MUTATION_SIGMA_RISK:         "0.10"
@@ -79,10 +84,13 @@ jobs:
       TARGET_AGENTS_PER_ESPECIE:        "5"
       REPOPULATION_MAX_PER_CYCLE:       "3"   # deprecado (Sesión 19)
       REPOPULATION_MAX_ATTEMPTS_PER_SLOT: "8"
-      # ── Fase 2 (rediseño 2026-07-02): presión selectiva real ─────────────
-      # Ruptura: 24.8% WR, 68% de la pérdida total (auditoría 2026-07-01) —
-      # cupo objetivo reducido en vez de mantenerlo en 5 sin edge demostrado.
-      TARGET_AGENTS_RUPTURA:       "3"
+      # ── Población fija 15 (decisión de diseño 2026-07-25) ────────────────
+      # El cupo de ruptura se había reducido a 3 (auditoría 2026-07-01: 24.8%
+      # WR, 68% de la pérdida total). Se restituye a 5 por decisión explícita
+      # del propietario: la población debe ser SIEMPRE 15 agentes, 5 por
+      # especie, para conservar diversidad de régimen. La presión selectiva
+      # sigue viva por otras vías (bleeder crónico, gate OOS, cuota dinámica).
+      TARGET_AGENTS_RUPTURA:       "5"
       # Bleeder crónico: elimina siempre (sin cuota ni piso de especie) un
       # agente con fitness_score <= umbral y muestra grande.
       BLEEDER_FITNESS_THRESHOLD:   "-0.3"
@@ -91,6 +99,11 @@ jobs:
       # auditoría 2026-07-01). FLOOR=CAP=1.0 revierte al reparto igualitario.
       CAPITAL_WEIGHT_FLOOR:        "0.5"
       CAPITAL_WEIGHT_CAP:          "2.0"
+      # Gate de muestra (decisión de diseño 2026-07-25): con menos de 20 trades
+      # el fitness es ruido, así que la cuota es exactamente equitativa; el
+      # sobrepeso se gana con evidencia. "0" = ponderar siempre (Fase 2),
+      # "99999" = reparto equitativo puro para todos.
+      CAPITAL_WEIGHT_MIN_TRADES:   "20"
       # Gate OOS sin bypass: cupo sin candidato con edge confirmado queda
       # vacante en vez de forzar cruce/clon sin evidencia. "false" restaura
       # el comportamiento legacy (forzado_cruce/forzado_clon_unico).
