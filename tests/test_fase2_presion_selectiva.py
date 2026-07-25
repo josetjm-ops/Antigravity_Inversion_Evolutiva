@@ -27,6 +27,7 @@ from evolution.evolution_engine import (
     BLEEDER_MIN_TRADES,
     CAPITAL_WEIGHT_FLOOR,
     CAPITAL_WEIGHT_CAP,
+    TARGET_AGENTS_PER_ESPECIE,
     TARGET_AGENTS_RUPTURA,
 )
 
@@ -68,22 +69,101 @@ def test_bleeder_no_eliminado_con_muestra_insuficiente():
     assert "POCA_MUESTRA" not in {a["id"] for a in eliminated}
 
 
-def test_bleeder_bypassa_piso_de_especie():
+def test_bleeder_respeta_piso_de_padres():
     """
-    Un bleeder se elimina AUNQUE su especie ya esté en el mínimo — a
-    diferencia de la cuota dinámica normal, que sí respeta el piso.
+    Decisión de diseño 2026-07-25: el bleeder YA NO bypassa el piso de especie.
+
+    Revierte a propósito el comportamiento de la Fase 2. La población debe
+    volver siempre a 15 con 5 por especie, y para eso hacen falta 2 padres
+    vivos de los que nazcan los reemplazos. Un bleeder en una especie que ya
+    está en el piso sobrevive este ciclo y encabeza la fila del siguiente.
     """
     engine = EvolutionEngine(date(2026, 7, 2))
-    # Especie "ruptura" con exactamente 2 miembros (el mínimo _MIN_AGENTS_PER_ESPECIE)
+    # Especie "ruptura" con exactamente 2 miembros (el piso _MIN_AGENTS_PER_ESPECIE)
     agents = [
         _agent("RUPTURA_BLEEDER", fitness=BLEEDER_FITNESS_THRESHOLD - 0.2,
                n_trades=BLEEDER_MIN_TRADES + 10, especie="ruptura"),
         _agent("RUPTURA_OK", fitness=0.05, especie="ruptura"),
     ]
     survivors, eliminated = engine.select_survivors_and_eliminated(agents)
+    assert eliminated == [], \
+        "Con la especie en el piso de 2 padres no puede salir nadie, ni el bleeder"
+    assert len(survivors) == 2
+
+
+def test_tope_de_tres_bajas_por_especie():
+    """
+    De 5 miembros salen como máximo 3, dejando 2 padres — aunque los 5 sean
+    elegibles para eliminación (fitness <= 0).
+    """
+    engine = EvolutionEngine(date(2026, 7, 2))
+    agents = [
+        _agent(f"REV_{i}", fitness=-0.05 * (i + 1), especie="reversion")
+        for i in range(5)
+    ]
+    survivors, eliminated = engine.select_survivors_and_eliminated(agents)
+    assert len(eliminated) == 3, f"debe eliminar exactamente 3, eliminó {len(eliminated)}"
+    assert len(survivors) == 2, "deben quedar 2 padres"
+    # Los que salen son los 3 peores por fitness.
+    assert {a["id"] for a in eliminated} == {"REV_4", "REV_3", "REV_2"}
+
+
+def test_tope_por_especie_es_independiente_entre_especies():
+    """
+    El cupo de 3 se cuenta por especie: 3 especies malas => 9 bajas, no 3.
+
+    Se fija N_ELIMINATE=9 (el valor de producción, judge_daily.yml) para aislar
+    la lógica por especie del tope global, que en .env local está en 5.
+    """
+    engine = EvolutionEngine(date(2026, 7, 2))
+    agents = [
+        _agent(f"{esp[:3].upper()}_{i}", fitness=-0.05 * (i + 1), especie=esp)
+        for esp in ("tendencia", "reversion", "ruptura")
+        for i in range(5)
+    ]
+    with patch("evolution.evolution_engine.N_ELIMINATE", 9):
+        survivors, eliminated = engine.select_survivors_and_eliminated(agents)
+    por_especie: dict[str, int] = {}
+    for a in eliminated:
+        por_especie[a["especie"]] = por_especie.get(a["especie"], 0) + 1
+    assert por_especie == {"tendencia": 3, "reversion": 3, "ruptura": 3}
+    assert len(survivors) == 6, "2 padres por especie"
+
+
+def test_tope_global_sigue_acotando_por_encima_del_cupo_por_especie():
+    """
+    AGENTS_ELIMINATE_PER_CYCLE sigue siendo una red de seguridad: si es menor
+    que 3 x n_especies, acota el total aunque quede cupo por especie.
+    """
+    engine = EvolutionEngine(date(2026, 7, 2))
+    agents = [
+        _agent(f"{esp[:3].upper()}_{i}", fitness=-0.05 * (i + 1), especie=esp)
+        for esp in ("tendencia", "reversion", "ruptura")
+        for i in range(5)
+    ]
+    with patch("evolution.evolution_engine.N_ELIMINATE", 4):
+        _survivors, eliminated = engine.select_survivors_and_eliminated(agents)
+    assert len(eliminated) == 4
+
+
+def test_bleeder_consume_cupo_de_su_especie():
+    """
+    Un bleeder cuenta DENTRO de las 3 bajas de su especie (antes era adicional).
+    Con 1 bleeder + 4 elegibles, salen 3 en total, no 4.
+    """
+    engine = EvolutionEngine(date(2026, 7, 2))
+    agents = [
+        _agent("REV_BLEEDER", fitness=BLEEDER_FITNESS_THRESHOLD - 0.2,
+               n_trades=BLEEDER_MIN_TRADES + 10, especie="reversion"),
+    ] + [
+        _agent(f"REV_{i}", fitness=-0.01 * (i + 1), especie="reversion")
+        for i in range(4)
+    ]
+    survivors, eliminated = engine.select_survivors_and_eliminated(agents)
     eliminated_ids = {a["id"] for a in eliminated}
-    assert "RUPTURA_BLEEDER" in eliminated_ids, \
-        "El bleeder debe morir aunque deje a su especie en 1 (por debajo del piso)"
+    assert "REV_BLEEDER" in eliminated_ids, "el bleeder sale primero"
+    assert len(eliminated) == 3, "el bleeder consume 1 de los 3 cupos"
+    assert len(survivors) == 2
 
 
 def test_bleeder_no_cuenta_contra_cuota_n_eliminate():
@@ -209,9 +289,18 @@ def test_redistribute_capital_newborn_recibe_cuota_estandar():
 
 # ─── (3) Objetivo de población por especie ──────────────────────────────────
 
-def test_target_agents_ruptura_reducido():
-    assert TARGET_AGENTS_RUPTURA < 5, \
-        "TARGET_AGENTS_RUPTURA debe ser menor al objetivo general (5) tras Fase 2"
+def test_poblacion_objetivo_es_15_paritaria():
+    """
+    Decisión de diseño 2026-07-25: población fija de 15 agentes, 5 por especie.
+
+    Revierte a propósito la reducción del cupo de ruptura de la Fase 2
+    (auditoría 2026-07-01). El propietario prioriza conservar diversidad de
+    régimen; la presión selectiva sigue viva por el bleeder crónico, el gate
+    OOS y la cuota dinámica, no por el tamaño del cupo.
+    """
+    assert TARGET_AGENTS_PER_ESPECIE == 5
+    assert TARGET_AGENTS_RUPTURA == 5, \
+        "ruptura comparte el cupo general: 3 especies x 5 = 15 agentes"
 
 
 def test_capital_weight_bounds_sane():

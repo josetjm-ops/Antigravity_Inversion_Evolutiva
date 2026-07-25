@@ -115,7 +115,7 @@ def main() -> int:
         return 0
 
     from db.connection import get_conn, get_dict_cursor
-    from evolution.evolution_engine import EvolutionEngine, calc_fitness_scores
+    from evolution.evolution_engine import EvolutionEngine, calc_fitness_detail
 
     hoy = date.today()
     with get_conn() as conn:
@@ -166,7 +166,9 @@ def main() -> int:
 
         # Redistribuir el MISMO pool entre los agentes (ahora más): los
         # campeones toman su cuota diluyendo a todos, sin inyectar capital.
-        fitness_map = calc_fitness_scores(conn)
+        # calc_fitness_detail (no _scores): arrastra n_trades para que el gate
+        # CAPITAL_WEIGHT_MIN_TRADES se aplique igual que en el ciclo del Juez.
+        fitness_map = calc_fitness_detail(conn)
         pool_total, cuota = engine._redistribute_capital(
             conn, nuevos_ids, pool_override=pool_previo, fitness_map=fitness_map,
         )
