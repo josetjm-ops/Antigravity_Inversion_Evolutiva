@@ -33,6 +33,27 @@ _MAX_SL_PIPS   = float(os.getenv("MAX_SL_PIPS", "35.0"))
 _MAX_LEVERAGE  = 50.0    # techo de apalancamiento (nocional ≤ equity × 50)
 _UNITS_PER_LOT = 1000.0  # unidades EUR por lote micro (referencia pip_value)
 
+# ── Piso económico duro de R:R (auditoría forex 2026-07-31) ────────────────
+# Con fricción de _FRICTION_PIPS por operación, un R:R bajo hace que el coste
+# de entrar/salir sea una fracción demasiado grande del objetivo: a 12.4 pips
+# de SL medio y R:R 2.0 (población legacy), la fricción representaba 5.5% del
+# TP; con el R:R validado por la evolución offline (~3.8, campeones
+# 2026-07-24_01/_02, holdout +0.50R a +0.71R) baja a 2.9%. Se aplica como PISO
+# EN TIEMPO REAL — no solo como límite de mutación — para corregir de
+# inmediato a los agentes YA vivos con genes legacy (R:R 1.5-2.0), sin esperar
+# a que la selección natural los reemplace.
+MIN_RISK_REWARD_TARGET = float(os.getenv("MIN_RISK_REWARD_TARGET", "2.5"))
+
+# ── Regla de peaje (auditoría forex 2026-07-31) ─────────────────────────────
+# Red de seguridad adicional: si por cualquier vía el objetivo en pips queda
+# por debajo de MIN_TARGET_TO_FRICTION_RATIO × fricción, la operación se
+# rechaza (HOLD). Con el piso de R:R y el piso de SL (_MIN_SL_PIPS) ya activos
+# el objetivo mínimo es 10 × 2.5 = 25 pips >> 10 × 1.4 = 14 pips, así que en
+# la práctica esta regla no debería disparar — existe como defensa en
+# profundidad, no como palanca principal.
+MIN_TARGET_TO_FRICTION_RATIO = float(os.getenv("MIN_TARGET_TO_FRICTION_RATIO", "10.0"))
+_FRICTION_PIPS = float(os.getenv("TRADE_FRICTION_PIPS", "1.4"))
+
 _SYSTEM_PROMPT = """Eres el Sub-agente de Riesgo y Decisión Final de un sistema de trading evolutivo EUR/USD.
 Recibes señales de dos analistas (Técnico y Macro) y debes tomar la decisión óptima de trading.
 
@@ -185,11 +206,31 @@ class SubAgentRisk(BaseAgent):
         sl_pips = round(abs(precio - sl_precio) * 10_000, 2)
 
         # ── Take profit por R:R ────────────────────────────────────────────────
+        # Piso económico duro (auditoría 2026-07-31): el gen del agente puede
+        # pedir menos, pero nunca se ejecuta un R:R por debajo del piso — se
+        # aplica al valor efectivo, no solo al rango de mutación, para corregir
+        # también a los agentes ya vivos con genes legacy.
         risk_reward = float(
             self.params_smc.get("risk_reward_target",
             self.params.get("risk_reward_target", 2.0))
         )
+        risk_reward = max(risk_reward, MIN_RISK_REWARD_TARGET)
         tp_pips     = sl_pips * risk_reward
+
+        # ── Regla de peaje (defensa en profundidad) ─────────────────────────
+        # Si el objetivo no alcanza a cubrir la fricción con margen amplio, la
+        # operación no tiene economía viable: se rechaza antes de calcular
+        # nocional. Con los pisos de SL y R:R activos no debería dispararse en
+        # la práctica; existe para blindar contra rutas de cálculo futuras que
+        # no pasen por este piso de R:R.
+        if tp_pips < _FRICTION_PIPS * MIN_TARGET_TO_FRICTION_RATIO:
+            log.info(
+                "[SubAgentRisk] Rechazada por regla de peaje: TP=%.1fpips < "
+                "%.1fx friccion (%.1fpips) — HOLD preventivo.",
+                tp_pips, MIN_TARGET_TO_FRICTION_RATIO, _FRICTION_PIPS,
+            )
+            return None, None, 0.0, sl_pips, "peaje", atr_valor
+
         take_profit = (
             round(precio + tp_pips * 0.0001, 5) if accion == "BUY"
             else round(precio - tp_pips * 0.0001, 5)
@@ -298,8 +339,18 @@ class SubAgentRisk(BaseAgent):
         accion_final = accion_prelim
         conf_final   = conf_prelim
         ind          = senal_tecnico.get("indicadores", {})
-        rr           = float(self.params_smc.get("risk_reward_target",
-                             self.params.get("risk_reward_target", 2.0)))
+        rr           = max(
+            float(self.params_smc.get("risk_reward_target",
+                 self.params.get("risk_reward_target", 2.0))),
+            MIN_RISK_REWARD_TARGET,
+        )
+
+        # La regla de peaje devuelve sl_fuente="peaje" y stop_loss=None: la
+        # operación no tiene economía viable y se convierte en HOLD, aunque
+        # accion_prelim fuera BUY/SELL.
+        if sl_fuente == "peaje":
+            accion_final = "HOLD"
+            conf_final   = 0.30
 
         razonamiento = (
             f"Tecnico: {rec_tec} ({conf_tec:.2f}), Macro: {rec_mac} ({conf_mac:.2f}). "
