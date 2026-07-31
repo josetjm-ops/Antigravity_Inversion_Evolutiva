@@ -70,6 +70,20 @@ _MIN_CAPITAL  = float(os.getenv("MIN_CAPITAL_TO_TRADE", "2.0"))
 # el cierre en BE no termine en pérdida tras descontar la fricción.
 _FRICTION_PIPS = float(os.getenv("TRADE_FRICTION_PIPS", "1.4"))
 
+# ── Piso económico duro de be_activation_r (auditoría forex 2026-07-31) ────
+# El backfill mostró que 419 operaciones (44%) morían planas: activaban BE a
+# ~0.6R, el precio revertía y la operación cerraba pagando fricción por cero
+# beneficio. La evolución offline validó 0.88-0.90R como el valor que preserva
+# el edge (holdout +0.50R a +0.71R, campeones 2026-07-24_01/_02) — activar el
+# break-even más tarde deja que las operaciones ganadoras respiren antes de
+# asegurarlas. Se aplica como PISO EN TIEMPO REAL sobre el valor efectivo
+# leído de la operación abierta — corrige de inmediato a las posiciones YA
+# abiertas por agentes con genes legacy (be_activation_r 0.5-0.63), sin
+# esperar a que la selección natural los reemplace. Si el gen es 0 (BE
+# desactivado) se respeta: el piso solo sube valores positivos por debajo del
+# mínimo, nunca activa un BE que el agente tenía apagado.
+BE_ACTIVATION_MIN_R = float(os.getenv("BE_ACTIVATION_MIN_R", "0.8"))
+
 # Fase 5 Sesión 17: ruptura bloqueada en régimen RANGO.
 # Un breakout en mercado lateral tiene un WR muy bajo (~22% observado en prod).
 # En NEUTRAL sigue operando (régimen indefinido / sin datos de ADX).
@@ -251,7 +265,12 @@ def _apply_trailing_stop(op: dict, current_price: float) -> tuple[float, float]:
     # Al ganar be_activation_r × R, el SL sube a entrada ± fricción: la
     # operación ya no puede terminar en pérdida, sin recortar su potencial.
     # Se aplica ANTES del trailing (que exige 1R completo) y nunca empeora.
+    # Piso BE_ACTIVATION_MIN_R (auditoría 2026-07-31): un gen positivo pero
+    # por debajo del piso se sube al piso; un gen en 0 (BE desactivado) se
+    # respeta tal cual.
     be_r = float(op.get("be_activation_r") or 0)
+    if be_r > 0:
+        be_r = max(be_r, BE_ACTIVATION_MIN_R)
     if be_r > 0 and r_pips > 0 and profit_pips >= be_r * r_pips:
         friction = _FRICTION_PIPS * 0.0001
         if accion == "BUY":

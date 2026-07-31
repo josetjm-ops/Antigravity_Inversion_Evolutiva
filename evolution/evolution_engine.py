@@ -106,7 +106,7 @@ _DEFAULT_SMC_PARAMS: dict = {
     "fvg_min_pips":             5.0,
     "ob_impulse_pips":          10.0,
     "range_spike_multiplier":   1.5,
-    "risk_reward_target":       2.0,
+    "risk_reward_target":       2.5,
     "macro_quarantine_minutes": 60,
     "risk_pct_per_trade":       0.015,
     "peso_fvg":                 0.15,
@@ -126,7 +126,7 @@ _DEFAULT_SMC_PARAMS: dict = {
     "adx_period":               14,
     "adx_threshold":            25.0,
     # Salidas inteligentes (Sesión 22) — genes evolutivos
-    "be_activation_r":          0.6,    # mover SL a break-even al ganar este múltiplo de R
+    "be_activation_r":          0.9,    # mover SL a break-even al ganar este múltiplo de R
     "exit_on_reversal":         0,      # 1=salir ante señal contraria fuerte; 0/1, muta por bit-flip
     "min_profit_for_exit_r":    0.4,    # ganancia mínima (en R) para permitir salida por señal
     # Salida parcial + runner (Fase 3, rediseño 2026-07-02): al alcanzar este
@@ -147,7 +147,12 @@ _BOUNDS_SMC = {
     "fvg_min_pips":             (2.0,  15.0,  False),
     "ob_impulse_pips":          (5.0,  20.0,  False),
     "range_spike_multiplier":   (1.2,   3.0,  False),
-    "risk_reward_target":       (1.5,   4.0,  False),
+    # Piso 1.5→2.5 (auditoría forex 2026-07-31): con R:R 1.5-2.0 la fricción
+    # (1.4 pips) representaba 5.5%+ del objetivo. Los campeones validados
+    # contra holdout (2026-07-24_01/_02, +0.50R a +0.71R) operan en 3.77-3.82;
+    # 2.5 deja margen de exploración por debajo de ese óptimo sin reabrir la
+    # zona que la auditoría descartó.
+    "risk_reward_target":       (2.5,   4.0,  False),
     "macro_quarantine_minutes": (30,  120,    True),
     "risk_pct_per_trade":       (0.01,  0.02, False),
     "peso_fvg":                 (0.05,  0.50, False),
@@ -166,7 +171,13 @@ _BOUNDS_SMC = {
     "breakout_min_pips":        (3.0,  15.0,  False),
     "peso_breakout":            (0.20,  0.70, False),
     # Salidas inteligentes (Sesión 22) — mutables
-    "be_activation_r":          (0.3,   1.0,  False),
+    # Piso 0.3→0.8 (auditoría forex 2026-07-31): con be_activation_r<=0.63 el
+    # 44% de las operaciones activaba el break-even, revertía y moría plana
+    # pagando fricción por cero beneficio (backfill migración 016). Los
+    # campeones validados operan en 0.88-0.90; el techo sube a 1.2 para dejar
+    # margen de exploración por encima de ese óptimo sin volver a la zona
+    # descartada (0.3-0.6).
+    "be_activation_r":          (0.8,   1.2,  False),
     "min_profit_for_exit_r":    (0.2,   1.0,  False),
     # Salida parcial + runner (Fase 3) — mutable
     "partial_tp_r":              (0.5,   2.0,  False),
