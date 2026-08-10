@@ -289,18 +289,31 @@ def test_redistribute_capital_newborn_recibe_cuota_estandar():
 
 # ─── (3) Objetivo de población por especie ──────────────────────────────────
 
-def test_poblacion_objetivo_es_15_paritaria():
+def test_poblacion_objetivo_sigue_siendo_15():
     """
-    Decisión de diseño 2026-07-25: población fija de 15 agentes, 5 por especie.
+    La población objetivo sigue siendo 15, pero YA NO es 5-5-5.
 
-    Revierte a propósito la reducción del cupo de ruptura de la Fase 2
-    (auditoría 2026-07-01). El propietario prioriza conservar diversidad de
-    régimen; la presión selectiva sigue viva por el bleeder crónico, el gate
-    OOS y la cuota dinámica, no por el tamaño del cupo.
+    Revisión 2026-08-10: con grupo de control real en producción el perfil
+    campeón dio +0.184R (24 ops) frente a -0.794R del legacy (27 ops) — toda
+    la pérdida vino de agentes sin edge validado. De las 3 especies solo
+    reversion pasó el gate bootstrap contra holdout, así que la población se
+    concentra ahí (11) y tendencia/ruptura quedan en el piso de 2: conservan
+    diversidad de régimen sin consumir 2/3 del capital sin evidencia.
+
+    Se verifica el TOTAL (15) en vez de la paridad, que es lo que de verdad
+    importa para la aritmética de crianza (2 padres -> 3 hijos por especie).
     """
-    assert TARGET_AGENTS_PER_ESPECIE == 5
-    assert TARGET_AGENTS_RUPTURA == 5, \
-        "ruptura comparte el cupo general: 3 especies x 5 = 15 agentes"
+    from evolution.evolution_engine import _TARGET_OVERRIDE_POR_ESPECIE
+
+    total = sum(
+        _TARGET_OVERRIDE_POR_ESPECIE.get(esp, TARGET_AGENTS_PER_ESPECIE)
+        for esp in ("tendencia", "reversion", "ruptura")
+    )
+    assert total == 15, f"la poblacion objetivo debe sumar 15, suma {total}"
+    assert _TARGET_OVERRIDE_POR_ESPECIE["reversion"] == 11, \
+        "reversion concentra la poblacion: es la unica especie con edge validado"
+    assert _TARGET_OVERRIDE_POR_ESPECIE["tendencia"] == 2
+    assert _TARGET_OVERRIDE_POR_ESPECIE["ruptura"] == 2
 
 
 def test_capital_weight_bounds_sane():
@@ -317,6 +330,11 @@ def test_repopulation_vacante_por_default_sin_bypass():
     mejor candidato sin evidencia de edge ("mejor_candidato_oos" legacy).
     Réplica del escenario de test_repopulation_best_candidate_when_no_one_passes
     en test_sesion18_repopulacion.py, pero sin forzar el kill-switch a False.
+
+    El objetivo por especie se fija a 5/5/5 dentro del test: lo que se verifica
+    es que un déficit quede REGISTRADO en vez de encubierto por un clon
+    forzado, no la política de distribución de población (11/2/2 desde
+    2026-08-10).
     """
     from evolution.evolution_engine import REPOBLACION_PERMITE_VACANTES
 
@@ -327,7 +345,7 @@ def test_repopulation_vacante_por_default_sin_bypass():
     current = (
         [_agent(f"T_{i}", 0.05, especie="tendencia") for i in range(4)]  # déficit de 1
         + [_agent(f"R_{i}", 0.05, especie="reversion") for i in range(5)]
-        + [_agent(f"B_{i}", 0.05, especie="ruptura") for i in range(3)]
+        + [_agent(f"B_{i}", 0.05, especie="ruptura") for i in range(5)]
     )
     bad_bt = {"fitness": 0.02, "n_trades": 3}  # positivo pero muestra corta: no pasa el gate
 
@@ -336,7 +354,9 @@ def test_repopulation_vacante_por_default_sin_bypass():
 
     hof_pool = [_agent(f"HOF_{i}", 0.10, especie="tendencia") for i in range(2)]
 
-    with patch("evolution.evolution_engine.breed_agent", side_effect=_mock_breed), \
+    with patch.dict("evolution.evolution_engine._TARGET_OVERRIDE_POR_ESPECIE",
+                    {"reversion": 5, "tendencia": 5, "ruptura": 5}, clear=True), \
+         patch("evolution.evolution_engine.breed_agent", side_effect=_mock_breed), \
          patch("evolution.backtester.run_backtest", return_value=bad_bt), \
          patch.object(engine, "_get_hof_parents", return_value=hof_pool):
 

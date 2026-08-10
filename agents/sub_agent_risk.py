@@ -42,7 +42,12 @@ _UNITS_PER_LOT = 1000.0  # unidades EUR por lote micro (referencia pip_value)
 # EN TIEMPO REAL — no solo como límite de mutación — para corregir de
 # inmediato a los agentes YA vivos con genes legacy (R:R 1.5-2.0), sin esperar
 # a que la selección natural los reemplace.
-MIN_RISK_REWARD_TARGET = float(os.getenv("MIN_RISK_REWARD_TARGET", "2.5"))
+# 2026-08-10: subido 2.5 -> 3.5. El piso de 2.5 resulto ser un ATRACTOR, no un
+# suelo: los agentes nacidos el 8-ago heredaron exactamente RR=2.50 (el minimo
+# permitido) en vez de converger hacia el 3.54-3.82 de los campeones validados.
+# La evolucion se acomoda en el limite inferior del rango que se le permita, asi
+# que el piso debe fijarse en el valor validado, no por debajo "para dar margen".
+MIN_RISK_REWARD_TARGET = float(os.getenv("MIN_RISK_REWARD_TARGET", "3.5"))
 
 # ── Regla de peaje (auditoría forex 2026-07-31) ─────────────────────────────
 # Red de seguridad adicional: si por cualquier vía el objetivo en pips queda

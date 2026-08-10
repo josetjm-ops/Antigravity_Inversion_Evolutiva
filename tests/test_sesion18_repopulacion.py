@@ -2,6 +2,14 @@
 Tests unitarios para Sesión 18: recuperación de cupos vacantes.
 
 Todos usan mocks — sin DB ni red.
+
+NOTA (2026-08-10): estos tests verifican la MECÁNICA de repoblación (que el
+déficit se detecte, que se llenen los cupos, que el gate OOS no se saltee),
+no la política de cuántos agentes tiene cada especie. Antes dependían de que
+el objetivo fuera 5 por especie, así que se rompían cada vez que cambiaba la
+distribución de producción — que ahora es 11/2/2 al concentrarse en reversion
+(la única especie con edge validado). El fixture `objetivo_simetrico` fija
+5/5/5 para todos ellos: aísla la mecánica de la política.
 """
 from __future__ import annotations
 
@@ -10,7 +18,20 @@ import sys
 from datetime import date
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+
+@pytest.fixture(autouse=True)
+def objetivo_simetrico():
+    """Fija el objetivo por especie en 5/5/5 durante estos tests."""
+    with patch.dict(
+        "evolution.evolution_engine._TARGET_OVERRIDE_POR_ESPECIE",
+        {"reversion": 5, "tendencia": 5, "ruptura": 5},
+        clear=True,
+    ):
+        yield
 
 
 # ─── Fixtures de agentes ──────────────────────────────────────────────────────
@@ -121,16 +142,21 @@ def test_repopulation_fills_all_deficits_no_cap():
     """
     Sesión 19: sin tope por ciclo, se llenan todos los cupos objetivo.
 
-    Fase 2 (rediseño 2026-07-02): el total ya no es 15 (5 por especie) — el
-    objetivo de "ruptura" se redujo a TARGET_AGENTS_RUPTURA=3 (auditoría
-    2026-07-01: 24.8% WR, 68% de la pérdida total), así que el total esperado
-    es 5 (tendencia) + 5 (reversion) + 3 (ruptura) = 13.
+    El total esperado se deriva del objetivo REAL por especie en vez de
+    hardcodearlo: así el test sigue verificando "se llenan todos los cupos"
+    aunque cambie la política de distribución (5/5/5 -> 11/2/2 -> ...). Bajo
+    el fixture `objetivo_simetrico` de este módulo son 5+5+5 = 15.
     """
-    from evolution.evolution_engine import EvolutionEngine, TARGET_AGENTS_PER_ESPECIE, TARGET_AGENTS_RUPTURA
+    from evolution.evolution_engine import (
+        EvolutionEngine, _TARGET_OVERRIDE_POR_ESPECIE, TARGET_AGENTS_PER_ESPECIE,
+    )
 
     engine = EvolutionEngine(date(2026, 6, 9))
-    # Déficit máximo: 0 agentes en cada especie → total = objetivo por especie
-    total_esperado = 2 * TARGET_AGENTS_PER_ESPECIE + TARGET_AGENTS_RUPTURA
+    # Déficit máximo: 0 agentes en cada especie → total = suma de objetivos
+    total_esperado = sum(
+        _TARGET_OVERRIDE_POR_ESPECIE.get(esp, TARGET_AGENTS_PER_ESPECIE)
+        for esp in ("tendencia", "reversion", "ruptura")
+    )
     current: list[dict] = []
     parents = [_agent(f"X_{i}", "tendencia") for i in range(3)]
 

@@ -35,16 +35,16 @@ def _op_buy(be_r: float = 0.6) -> dict:
 
 
 def test_be_moves_sl_to_breakeven_buy():
-    """BUY: al ganar be_r×R (0.8×20=16 pips, piso BE_ACTIVATION_MIN_R) el SL
-    sube a entrada + fricción."""
+    """BUY: al ganar be_r×R (0.88×20=17.6 pips, piso BE_ACTIVATION_MIN_R) el
+    SL sube a entrada + fricción."""
     from cron.trade_monitor import _apply_trailing_stop, _FRICTION_PIPS
 
-    op = _op_buy(be_r=0.8)
-    # Precio favorable +16 pips = justo el umbral BE; trailing (1R=20) NO activa.
-    nuevo_sl, extremo = _apply_trailing_stop(op, 1.10160)
+    op = _op_buy(be_r=0.88)
+    # Precio favorable +17.6 pips = justo el umbral BE; trailing (1R=20) NO activa.
+    nuevo_sl, extremo = _apply_trailing_stop(op, 1.10176)
     esperado = round(1.10000 + _FRICTION_PIPS * 0.0001, 5)
     assert nuevo_sl == esperado, f"SL debía ser BE {esperado}, fue {nuevo_sl}"
-    assert extremo == 1.10160
+    assert extremo == 1.10176
 
 
 def test_be_moves_sl_to_breakeven_sell():
@@ -59,9 +59,9 @@ def test_be_moves_sl_to_breakeven_sell():
         "precio_extremo_favorable": 1.10000,
         "trailing_activation_pips": 15.0,
         "trailing_distance_pips": 10.0,
-        "be_activation_r": 0.8,
+        "be_activation_r": 0.88,
     }
-    nuevo_sl, _ = _apply_trailing_stop(op, 1.09840)  # +16 pips = 0.8×20
+    nuevo_sl, _ = _apply_trailing_stop(op, 1.09824)  # +17.6 pips = 0.88×20
     esperado = round(1.10000 - _FRICTION_PIPS * 0.0001, 5)
     assert nuevo_sl == esperado
 
@@ -69,12 +69,12 @@ def test_be_moves_sl_to_breakeven_sell():
 def test_be_activation_min_r_sube_gen_por_debajo_del_piso():
     """
     Piso económico duro (auditoría forex 2026-07-31): un be_activation_r por
-    debajo de BE_ACTIVATION_MIN_R (0.8) se sube al piso en tiempo real —
+    debajo de BE_ACTIVATION_MIN_R (0.88) se sube al piso en tiempo real —
     corrige de inmediato a los agentes YA vivos con genes legacy (0.5-0.63)
     sin esperar a que la selección natural los reemplace.
 
     Con be_r=0.6 (gen legacy) y ganancia de +12 pips (0.6×20, el umbral viejo),
-    el BE NO debe activarse todavía: el piso exige 0.8×20=16 pips.
+    el BE NO debe activarse todavía: el piso exige 0.88×20=17.6 pips.
     """
     from cron.trade_monitor import _apply_trailing_stop
 
@@ -170,18 +170,19 @@ def test_atr_sl_capped_at_max():
 
 def test_new_genes_in_defaults_and_bounds():
     """
-    be_activation_r: piso 0.3->0.8 y default 0.6->0.9 (auditoría forex
-    2026-07-31). El backfill mostró 44% de operaciones muriendo planas con
-    be_activation_r<=0.63; los campeones validados contra holdout operan en
-    0.88-0.90. El techo sube a 1.2 para dejar margen de exploración por
-    encima sin reabrir la zona descartada (0.3-0.6).
+    be_activation_r: piso 0.3->0.8 (auditoría 2026-07-31) ->0.85 (revisión
+    2026-08-10). El backfill mostró 44% de operaciones muriendo planas con
+    be_activation_r<=0.63. El piso de 0.8 resultó ser un ATRACTOR: los agentes
+    nacidos el 8-ago heredaron todos exactamente 0.80 en vez de converger al
+    0.88-1.00 de los campeones validados, así que el rango se recentró sobre
+    el valor validado en vez de dejarlo "con margen" por debajo.
     """
     from evolution.evolution_engine import _DEFAULT_SMC_PARAMS, _BOUNDS_SMC
 
-    assert _DEFAULT_SMC_PARAMS["be_activation_r"] == 0.9
+    assert _DEFAULT_SMC_PARAMS["be_activation_r"] == 0.92
     assert _DEFAULT_SMC_PARAMS["exit_on_reversal"] == 0
     assert _DEFAULT_SMC_PARAMS["min_profit_for_exit_r"] == 0.4
-    assert _BOUNDS_SMC["be_activation_r"] == (0.8, 1.2, False)
+    assert _BOUNDS_SMC["be_activation_r"] == (0.85, 1.2, False)
     assert _BOUNDS_SMC["min_profit_for_exit_r"] == (0.2, 1.0, False)
     # exit_on_reversal NO se muta gaussianamente
     assert "exit_on_reversal" not in _BOUNDS_SMC
@@ -219,7 +220,7 @@ def test_breed_respects_new_bounds_and_flips_reversal():
     for i in range(120):
         child = breed_agent(base, base, f"C{i}", date(2026, 6, 12), 2)
         smc = child["params_smc"]
-        assert 0.8 <= smc["be_activation_r"] <= 1.2
+        assert 0.85 <= smc["be_activation_r"] <= 1.2
         assert 0.2 <= smc["min_profit_for_exit_r"] <= 1.0
         assert 0.8 <= smc["atr_factor"] <= 1.8
         assert smc["exit_on_reversal"] in (0, 1)

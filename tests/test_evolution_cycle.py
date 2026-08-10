@@ -1,6 +1,14 @@
 """
 Test de integración del ciclo evolutivo completo.
 Ejecuta contra la DB Neon real: selección, mutación, persistencia y genealogía.
+
+NOTA (2026-08-10): estos tests siembran 15 agentes génesis repartidos 5 por
+especie. La distribución objetivo de PRODUCCIÓN ya no es esa — desde la
+revisión del 10-ago se concentra en reversion (11/2/2), la única especie con
+edge validado. El fixture `objetivo_simetrico` alinea el objetivo con lo que
+el módulo siembra: sin él, la repoblación detectaría un déficit artificial de
+6 en reversion y la población crecería a 18, que no es lo que estos tests
+quieren medir (verifican la mecánica del ciclo, no la política de reparto).
 """
 
 import json
@@ -9,11 +17,24 @@ import sys
 import random
 from copy import deepcopy
 from datetime import date, datetime, timedelta, timezone
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import psycopg2
 import psycopg2.extras
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def objetivo_simetrico():
+    """Alinea el objetivo por especie (5/5/5) con la génesis que se siembra."""
+    with patch.dict(
+        "evolution.evolution_engine._TARGET_OVERRIDE_POR_ESPECIE",
+        {"reversion": 5, "tendencia": 5, "ruptura": 5},
+        clear=True,
+    ):
+        yield
 
 DB = "postgresql://neondb_owner:npg_HpqvWm94yaLr@ep-crimson-heart-amtwwmvf.c-5.us-east-1.aws.neon.tech/inversion_evolutiva?channel_binding=require&sslmode=require"
 
