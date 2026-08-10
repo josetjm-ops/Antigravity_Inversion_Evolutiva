@@ -15,7 +15,24 @@ import sys
 from datetime import date
 from unittest.mock import patch
 
+import pytest
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+
+@pytest.fixture(autouse=True)
+def objetivo_simetrico():
+    """
+    Fija el objetivo por especie en 5/5/5. Estos tests verifican la pureza de
+    especie en la crianza, no la política de distribución de población (que
+    desde 2026-08-10 es 11/2/2 al concentrarse en reversion).
+    """
+    with patch.dict(
+        "evolution.evolution_engine._TARGET_OVERRIDE_POR_ESPECIE",
+        {"reversion": 5, "tendencia": 5, "ruptura": 5},
+        clear=True,
+    ):
+        yield
 
 
 def _agent(id_: str, especie: str, fitness: float = 0.05) -> dict:

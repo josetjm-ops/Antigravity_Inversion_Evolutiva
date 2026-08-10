@@ -84,13 +84,17 @@ jobs:
       TARGET_AGENTS_PER_ESPECIE:        "5"
       REPOPULATION_MAX_PER_CYCLE:       "3"   # deprecado (Sesión 19)
       REPOPULATION_MAX_ATTEMPTS_PER_SLOT: "8"
-      # ── Población fija 15 (decisión de diseño 2026-07-25) ────────────────
-      # El cupo de ruptura se había reducido a 3 (auditoría 2026-07-01: 24.8%
-      # WR, 68% de la pérdida total). Se restituye a 5 por decisión explícita
-      # del propietario: la población debe ser SIEMPRE 15 agentes, 5 por
-      # especie, para conservar diversidad de régimen. La presión selectiva
-      # sigue viva por otras vías (bleeder crónico, gate OOS, cuota dinámica).
-      TARGET_AGENTS_RUPTURA:       "5"
+      # ── Concentración en la especie validada (revisión 2026-08-10) ───────
+      # Población sigue siendo 15, pero ya NO 5-5-5. Con grupo de control real
+      # en producción el perfil campeón dio +0.184R (24 ops) vs -0.794R del
+      # legacy (27 ops): toda la pérdida vino de agentes sin edge validado.
+      # Solo reversion pasó el gate bootstrap contra holdout; tendencia y
+      # ruptura fallaron el mismo gate offline y pierden en vivo. Quedan en el
+      # piso de 2 (conservan diversidad de régimen) durante la ventana de
+      # validación de 4 semanas. Revertir a 5-5-5 si reversion confirma edge.
+      TARGET_AGENTS_REVERSION:     "11"
+      TARGET_AGENTS_TENDENCIA:     "2"
+      TARGET_AGENTS_RUPTURA:       "2"
       # Bleeder crónico: elimina siempre (sin cuota ni piso de especie) un
       # agente con fitness_score <= umbral y muestra grande.
       BLEEDER_FITNESS_THRESHOLD:   "-0.3"

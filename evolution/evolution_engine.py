@@ -106,7 +106,7 @@ _DEFAULT_SMC_PARAMS: dict = {
     "fvg_min_pips":             5.0,
     "ob_impulse_pips":          10.0,
     "range_spike_multiplier":   1.5,
-    "risk_reward_target":       2.5,
+    "risk_reward_target":       3.7,
     "macro_quarantine_minutes": 60,
     "risk_pct_per_trade":       0.015,
     "peso_fvg":                 0.15,
@@ -126,7 +126,7 @@ _DEFAULT_SMC_PARAMS: dict = {
     "adx_period":               14,
     "adx_threshold":            25.0,
     # Salidas inteligentes (Sesión 22) — genes evolutivos
-    "be_activation_r":          0.9,    # mover SL a break-even al ganar este múltiplo de R
+    "be_activation_r":          0.92,   # mover SL a break-even al ganar este múltiplo de R
     "exit_on_reversal":         0,      # 1=salir ante señal contraria fuerte; 0/1, muta por bit-flip
     "min_profit_for_exit_r":    0.4,    # ganancia mínima (en R) para permitir salida por señal
     # Salida parcial + runner (Fase 3, rediseño 2026-07-02): al alcanzar este
@@ -147,12 +147,15 @@ _BOUNDS_SMC = {
     "fvg_min_pips":             (2.0,  15.0,  False),
     "ob_impulse_pips":          (5.0,  20.0,  False),
     "range_spike_multiplier":   (1.2,   3.0,  False),
-    # Piso 1.5→2.5 (auditoría forex 2026-07-31): con R:R 1.5-2.0 la fricción
-    # (1.4 pips) representaba 5.5%+ del objetivo. Los campeones validados
-    # contra holdout (2026-07-24_01/_02, +0.50R a +0.71R) operan en 3.77-3.82;
-    # 2.5 deja margen de exploración por debajo de ese óptimo sin reabrir la
-    # zona que la auditoría descartó.
-    "risk_reward_target":       (2.5,   4.0,  False),
+    # Piso 1.5→2.5 (auditoría forex 2026-07-31) →3.4 (revisión 2026-08-10).
+    # Con R:R 1.5-2.0 la fricción (1.4 pips) representaba 5.5%+ del objetivo.
+    # Los campeones validados contra holdout (+0.50R a +0.71R) operan en
+    # 3.54-3.82. El piso de 2.5 se fijó "para dejar margen de exploración" y
+    # resultó ser un ATRACTOR: los 5 agentes nacidos el 8-ago heredaron
+    # exactamente 2.50, el mínimo permitido, en vez de converger al óptimo.
+    # Con muestras de 10-20 trades la selección no distingue 2.5 de 3.8, así
+    # que el rango debe centrarse en el valor validado, no por debajo.
+    "risk_reward_target":       (3.4,   4.0,  False),
     "macro_quarantine_minutes": (30,  120,    True),
     "risk_pct_per_trade":       (0.01,  0.02, False),
     "peso_fvg":                 (0.05,  0.50, False),
@@ -171,13 +174,10 @@ _BOUNDS_SMC = {
     "breakout_min_pips":        (3.0,  15.0,  False),
     "peso_breakout":            (0.20,  0.70, False),
     # Salidas inteligentes (Sesión 22) — mutables
-    # Piso 0.3→0.8 (auditoría forex 2026-07-31): con be_activation_r<=0.63 el
-    # 44% de las operaciones activaba el break-even, revertía y moría plana
-    # pagando fricción por cero beneficio (backfill migración 016). Los
-    # campeones validados operan en 0.88-0.90; el techo sube a 1.2 para dejar
-    # margen de exploración por encima de ese óptimo sin volver a la zona
-    # descartada (0.3-0.6).
-    "be_activation_r":          (0.8,   1.2,  False),
+    # Piso 0.3→0.8 (auditoría 2026-07-31) →0.85 (revisión 2026-08-10): mismo
+    # efecto atractor que risk_reward_target — los agentes del 8-ago nacieron
+    # todos clavados en 0.80. Los campeones validados operan en 0.88-1.00.
+    "be_activation_r":          (0.85,  1.2,  False),
     "min_profit_for_exit_r":    (0.2,   1.0,  False),
     # Salida parcial + runner (Fase 3) — mutable
     "partial_tp_r":              (0.5,   2.0,  False),
@@ -297,7 +297,29 @@ TARGET_AGENTS_PER_ESPECIE  = int(os.getenv("TARGET_AGENTS_PER_ESPECIE",  "5"))
 # decisión de diseño del 2026-07-25: población fija de 15 agentes, 5 por
 # especie, para conservar diversidad de régimen. Se conserva la variable como
 # palanca por si hace falta volver a reducir el cupo sin re-desplegar código.
-TARGET_AGENTS_RUPTURA = int(os.getenv("TARGET_AGENTS_RUPTURA", "5"))
+TARGET_AGENTS_RUPTURA = int(os.getenv("TARGET_AGENTS_RUPTURA", "2"))
+TARGET_AGENTS_TENDENCIA = int(os.getenv("TARGET_AGENTS_TENDENCIA", "2"))
+TARGET_AGENTS_REVERSION = int(os.getenv("TARGET_AGENTS_REVERSION", "11"))
+
+# ── Concentración en la especie validada (2026-08-10) ───────────────────────
+# Veredicto de la revisión del 10-ago: con grupo de control real en producción,
+# el perfil campeón dio +0.184R (24 ops) mientras el legacy dio -0.794R (27
+# ops); TODA la pérdida vino de agentes sin edge validado. De las 3 especies,
+# solo reversion tiene un perfil que pasó el gate bootstrap contra holdout
+# (+0.50R a +0.71R, n=92-115) — tendencia y ruptura fallaron el mismo gate en
+# la evolución offline y pierden en producción.
+#
+# Se concentra la población en reversion (11) dejando tendencia y ruptura en
+# el piso de 2 (_MIN_AGENTS_PER_ESPECIE) en vez de eliminarlas: conservan
+# diversidad de régimen por si el mercado cambia, pero dejan de consumir 2/3
+# del capital sin evidencia. Revierte la paridad 5-5-5 del 2026-07-25 SOLO
+# durante la ventana de validación de 4 semanas; si reversion confirma el edge
+# se puede reevaluar la distribución.
+_TARGET_OVERRIDE_POR_ESPECIE = {
+    "reversion": TARGET_AGENTS_REVERSION,
+    "tendencia": TARGET_AGENTS_TENDENCIA,
+    "ruptura":   TARGET_AGENTS_RUPTURA,
+}
 
 # ── Gate OOS sin bypass forzado (Fase 2, rediseño 2026-07-02) ────────────────
 # Antes, si ningún candidato de cruce superaba el umbral OOS Y las rondas
@@ -1664,10 +1686,13 @@ class EvolutionEngine:
 
         ESPECIES = ("tendencia", "reversion", "ruptura")
 
-        # Objetivo por especie (Fase 2): ruptura tiene un cupo reducido — 24.8%
-        # WR, responsable del 68% de la pérdida total (auditoría 2026-07-01).
+        # Objetivo por especie: override individual por especie, con
+        # TARGET_AGENTS_PER_ESPECIE como valor por defecto. Desde 2026-08-10 la
+        # población se concentra en reversion — la única especie cuyo perfil
+        # pasó el gate bootstrap contra holdout Y muestra expectancy positiva
+        # en vivo. Ver _TARGET_OVERRIDE_POR_ESPECIE.
         target_by_especie = {
-            esp: (TARGET_AGENTS_RUPTURA if esp == "ruptura" else TARGET_AGENTS_PER_ESPECIE)
+            esp: _TARGET_OVERRIDE_POR_ESPECIE.get(esp, TARGET_AGENTS_PER_ESPECIE)
             for esp in ESPECIES
         }
 

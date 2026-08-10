@@ -82,7 +82,10 @@ _FRICTION_PIPS = float(os.getenv("TRADE_FRICTION_PIPS", "1.4"))
 # esperar a que la selección natural los reemplace. Si el gen es 0 (BE
 # desactivado) se respeta: el piso solo sube valores positivos por debajo del
 # mínimo, nunca activa un BE que el agente tenía apagado.
-BE_ACTIVATION_MIN_R = float(os.getenv("BE_ACTIVATION_MIN_R", "0.8"))
+# 2026-08-10: subido 0.8 -> 0.88 por el mismo efecto atractor que RR (los
+# agentes del 8-ago nacieron todos clavados en 0.80). 0.88 es el valor del
+# campeon validado 2026-07-24_02.
+BE_ACTIVATION_MIN_R = float(os.getenv("BE_ACTIVATION_MIN_R", "0.88"))
 
 # Fase 5 Sesión 17: ruptura bloqueada en régimen RANGO.
 # Un breakout en mercado lateral tiene un WR muy bajo (~22% observado en prod).
