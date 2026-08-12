@@ -15,7 +15,6 @@ Simplificaciones intencionales vs producción
 --------------------------------------------
   - Sin LLM       : reason() devuelve HOLD vacío → análisis siempre heurístico.
   - Sin macro      : solo señales técnicas + régimen ADX.
-  - Sin trailing   : SL/TP fijo; simplifica el backtester sin cambiar el edge.
   - Fricción igual : TRADE_FRICTION_PIPS descontado de cada trade.
   - HTF una vez    : se calcula al inicio del OOS, no se actualiza cada vela.
   - Cadencia 1h    : nueva posición se evalúa cada 4 velas de 15m (= cron real).
@@ -202,6 +201,11 @@ def _walk_forward_trades(
     # Salida parcial + runner y sesión de trading (Fase 3, rediseño 2026-07-02)
     partial_r     = float(params_smc.get("partial_tp_r", 0) or 0)
     sesion_gen    = str(params_smc.get("sesion_trading", "cualquiera"))
+    # Trailing stop (2026-08-12): mismos genes que lee cron/trade_monitor.py.
+    # trailing_enabled=0 lo apaga por completo (gen nuevo, ver _DEFAULT_SMC_PARAMS).
+    trail_on       = int(params_smc.get("trailing_enabled", 1) or 0)
+    trail_act_gen  = float(params_smc.get("trailing_activation_pips", 0) or 0) if trail_on else 0.0
+    trail_dist_gen = float(params_smc.get("trailing_distance_pips", 10.0) or 10.0)
 
     sub_tec  = SubAgentTechnical("bt", params_tec, params_smc)
     sub_risk = SubAgentRisk("bt", params_riesgo, params_smc)
@@ -285,22 +289,55 @@ def _walk_forward_trades(
                         open_pos["capital_usado"] = round(cap_used - cap_parcial, 6)
                         open_pos["parcial_ejecutada"] = True
 
-                # ── Break-even stop (Sesión 22) — igual que trade_monitor:
-                # tras el chequeo de hits, si el extremo favorable de la vela
-                # alcanza be_r × R, el SL sube a entrada ± fricción.
-                if be_r > 0:
-                    r_pips = open_pos.get("sl_pips") or (abs(entry - sl) * 10_000)
-                    favorable = candle_hi if accion == "BUY" else candle_lo
-                    profit_pips = (
-                        (favorable - entry) * 10_000 if accion == "BUY"
-                        else (entry - favorable) * 10_000
-                    )
-                    if r_pips > 0 and profit_pips >= be_r * r_pips:
-                        fr = friction_pips * 0.0001
+                # ── Extremo favorable acumulado ──────────────────────────────
+                # Producción lo persiste en precio_extremo_favorable y lo usa
+                # tanto para el break-even como para el trailing. Antes el
+                # backtester miraba solo el extremo de LA VELA ACTUAL, así que
+                # un máximo alcanzado dos velas atrás no contaba.
+                r_pips = open_pos.get("sl_pips") or (abs(entry - sl) * 10_000)
+                if accion == "BUY":
+                    open_pos["extremo"] = max(open_pos.get("extremo", entry), candle_hi)
+                    profit_pips = (open_pos["extremo"] - entry) * 10_000
+                else:
+                    open_pos["extremo"] = min(open_pos.get("extremo", entry), candle_lo)
+                    profit_pips = (entry - open_pos["extremo"]) * 10_000
+
+                # ── Break-even stop (Sesión 22) — igual que trade_monitor ────
+                if be_r > 0 and r_pips > 0 and profit_pips >= be_r * r_pips:
+                    fr = friction_pips * 0.0001
+                    if accion == "BUY":
+                        open_pos["stop_loss"] = max(open_pos["stop_loss"],
+                                                     round(entry + fr, 5))
+                    else:
+                        open_pos["stop_loss"] = min(open_pos["stop_loss"],
+                                                     round(entry - fr, 5))
+
+                # ── Trailing stop (2026-08-12): paridad con producción ───────
+                # Antes el backtester NO lo modelaba ("Sin trailing: SL/TP
+                # fijo") y esa omisión sesgaba el fitness hacia R:R altos: en
+                # el backtest el ganador corría hasta un TP lejano que en vivo
+                # el trailing cortaba mucho antes (69 salidas por trailing en
+                # 90 días a 11.4 pips medios, frente a 22.3 de los TP
+                # completos). Se replican las tres particularidades de
+                # _apply_trailing_stop en cron/trade_monitor.py:
+                #   1. la activación nunca baja de 1R, aunque el gen pida menos
+                #   2. la distancia se acota a 0.7 × activación (bloquea profit>0)
+                #   3. el SL solo se mueve a favor, nunca empeora
+                if trail_act_gen > 0 and r_pips > 0:
+                    activation_pips = max(trail_act_gen, r_pips)
+                    if profit_pips >= activation_pips:
+                        dist_pips = min(trail_dist_gen, 0.7 * activation_pips)
+                        trailing_dist = dist_pips * 0.0001
                         if accion == "BUY":
-                            open_pos["stop_loss"] = max(sl, round(entry + fr, 5))
+                            open_pos["stop_loss"] = max(
+                                open_pos["stop_loss"],
+                                round(open_pos["extremo"] - trailing_dist, 5),
+                            )
                         else:
-                            open_pos["stop_loss"] = min(sl, round(entry - fr, 5))
+                            open_pos["stop_loss"] = min(
+                                open_pos["stop_loss"],
+                                round(open_pos["extremo"] + trailing_dist, 5),
+                            )
 
                 # ── Cierre EOD (2026-08-12): paridad con producción ──────────
                 # Se evalúa DESPUÉS de SL/TP porque dentro de la misma vela un

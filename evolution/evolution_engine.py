@@ -128,6 +128,17 @@ _DEFAULT_SMC_PARAMS: dict = {
     # Salidas inteligentes (Sesión 22) — genes evolutivos
     "be_activation_r":          0.92,   # mover SL a break-even al ganar este múltiplo de R
     "exit_on_reversal":         0,      # 1=salir ante señal contraria fuerte; 0/1, muta por bit-flip
+    # Trailing on/off como gen (2026-08-12). Hasta ahora el trailing era
+    # OBLIGATORIO — trailing_activation_pips nunca podía valer 0 — y además el
+    # backtester no lo modelaba, así que la evolución jamás pudo evaluar si
+    # aporta. Al modelarlo se midió que CUESTA -0.189R sobre el holdout de 6
+    # meses (+0.319R sin trailing vs +0.131R con él): convierte ganadores en
+    # stops (TP cae de 11 a 3 sobre 117 operaciones, SL sube de 76 a 101),
+    # porque salta a mitad de camino del objetivo y una retracción normal
+    # cierra la posición. Ahora la selección natural decide, con el backtest
+    # viéndolo por primera vez. Arranca en 0 (apagado) por lo que dice la
+    # medición, pero el bit-flip lo mantiene re-descubrible.
+    "trailing_enabled":         0,      # 1=trailing activo; 0/1, muta por bit-flip
     "min_profit_for_exit_r":    0.4,    # ganancia mínima (en R) para permitir salida por señal
     # Salida parcial + runner (Fase 3, rediseño 2026-07-02): al alcanzar este
     # múltiplo de R se cierra el 50% de la posición (fricción propia + BE en
@@ -198,7 +209,7 @@ _BOUNDS_SMC = {
 # Probabilidad de invertir genes booleanos 0/1 en cada crianza (Sesión 22).
 # Mantiene el rasgo re-descubrible si se extingue de la población; la
 # selección natural decide si la salida por señal contraria aporta edge.
-_BOOLEAN_GENE_FLIP_PROB = {"exit_on_reversal": 0.10}
+_BOOLEAN_GENE_FLIP_PROB = {"exit_on_reversal": 0.10, "trailing_enabled": 0.10}
 
 # ── Genes categóricos (Fase 3, rediseño 2026-07-02) ─────────────────────────
 # Como los booleanos, no se mutan gaussianamente: con probabilidad
