@@ -358,8 +358,19 @@ class SubAgentRisk(BaseAgent):
             precio_actual, accion_prelim, capital_disponible, senal_tecnico
         )
 
-        trailing_activation_pips = float(
-            self.params_smc.get("trailing_activation_pips", 15.0)
+        # Trailing on/off (gen trailing_enabled, 2026-08-12). Con el gen en 0 se
+        # propaga activación 0, que es lo que _apply_trailing_stop interpreta
+        # como "trailing apagado" (`if configured_act <= 0: return`). Se apaga
+        # aquí, en el origen, para que quede registrado en decision_riesgo y el
+        # monitor lo respete sin lógica adicional.
+        # Motivo: al modelar por fin el trailing en el backtester se midió que
+        # CUESTA -0.189R sobre 6 meses de holdout (+0.319R sin él vs +0.131R
+        # con él) — salta a mitad de camino del objetivo y una retracción normal
+        # cierra la posición, convirtiendo ganadores en stops.
+        trailing_on = int(self.params_smc.get("trailing_enabled", 1) or 0)
+        trailing_activation_pips = (
+            float(self.params_smc.get("trailing_activation_pips", 15.0))
+            if trailing_on else 0.0
         )
         trailing_distance_pips = float(
             self.params_smc.get("trailing_distance_pips", 10.0)
