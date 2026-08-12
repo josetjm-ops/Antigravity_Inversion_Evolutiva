@@ -206,10 +206,22 @@ def test_walk_forward_eod_cierra_en_borde_del_fold_no_del_dataset(monkeypatch):
         especie="tendencia",
     )
 
-    assert len(trades) == 1
-    trade = trades[0]
-    assert trade["hit"] == "EOD"
-    # El cierre debe usar el precio del borde del fold (1.10, índice 149),
-    # NUNCA el precio post-salto (2.00) que vive fuera de [oos_start, oos_end).
-    assert trade["exit"] == pytest.approx(df_15m["close"].iloc[oos_end - 1])
-    assert trade["exit"] < 1.5  # si el bug estuviera presente, sería ~2.00
+    # Desde el cierre EOD de producción (2026-08-12) puede haber MÁS de un
+    # trade: el fold [100,150) abarca de 2026-01-02 01:00 a 13:30, así que la
+    # frontera de las 03:45 UTC cae dentro y corta la primera posición; luego
+    # se abre otra que sí muere en el borde del fold. Lo que este test protege
+    # NO es el número de trades sino que ninguno espíe precios de fuera del
+    # fold, así que se afirma eso sobre TODOS ellos.
+    assert len(trades) >= 1
+    assert all(t["hit"] == "EOD" for t in trades), \
+        f"con SL/TP inalcanzables todo cierre debe ser EOD, hubo: {[t['hit'] for t in trades]}"
+
+    # Ningún cierre puede usar el precio post-salto (2.00), que vive fuera de
+    # [oos_start, oos_end): si el bug estuviera presente, sería ~2.00.
+    for t in trades:
+        assert t["exit"] < 1.5, \
+            f"cierre en {t['exit']} — espió un precio de fuera del fold"
+
+    # El ÚLTIMO trade es el que muere en el borde del fold: debe cerrar
+    # exactamente al precio del índice oos_end-1.
+    assert trades[-1]["exit"] == pytest.approx(df_15m["close"].iloc[oos_end - 1])
