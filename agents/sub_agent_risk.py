@@ -42,12 +42,36 @@ _UNITS_PER_LOT = 1000.0  # unidades EUR por lote micro (referencia pip_value)
 # EN TIEMPO REAL — no solo como límite de mutación — para corregir de
 # inmediato a los agentes YA vivos con genes legacy (R:R 1.5-2.0), sin esperar
 # a que la selección natural los reemplace.
-# 2026-08-10: subido 2.5 -> 3.5. El piso de 2.5 resulto ser un ATRACTOR, no un
-# suelo: los agentes nacidos el 8-ago heredaron exactamente RR=2.50 (el minimo
-# permitido) en vez de converger hacia el 3.54-3.82 de los campeones validados.
-# La evolucion se acomoda en el limite inferior del rango que se le permita, asi
-# que el piso debe fijarse en el valor validado, no por debajo "para dar margen".
-MIN_RISK_REWARD_TARGET = float(os.getenv("MIN_RISK_REWARD_TARGET", "3.5"))
+# 2026-08-10: subido 2.5 -> 3.5 para alinearlo con el perfil campeon validado.
+# 2026-08-12: REVERTIDO a 2.2. El 3.5 fue un error de metodo con consecuencias
+# medibles: en 24 operaciones (11-12 ago) NINGUNA llego siquiera a un tercio de
+# su objetivo — maximo favorable medio 15.2% del TP, mejor caso 31.2% — y hubo
+# cero take-profits. Con el stop clavado en el piso de 10 pips, un R:R de 3.5-4.0
+# pone el objetivo en 34-40 pips, por encima del MAXIMO historico de casi todas
+# las salidas ganadoras.
+#
+# CAUSA RAIZ DEL ERROR: el perfil campeon se valido en un backtest que NO cerraba
+# por fin de dia (las posiciones corrian dias hasta tocar SL/TP), mientras que
+# produccion las cierra a las 03:45 UTC (~14 h de vida maxima). Se valido bajo
+# condiciones que produccion no puede reproducir. Ver el cierre EOD anadido al
+# backtester en evolution/backtester.py (misma fecha).
+#
+# 2026-08-12 (segunda revision, mismo dia): 2.2 -> 2.8. La bajada a 2.2 fue una
+# reaccion a 24 operaciones y se apoyaba en la hipotesis de que el cierre EOD
+# explicaba la perdida. El experimento la REFUTO: sobre el mismo holdout de 6
+# meses y con identico filtro de sesion, anadir el cierre EOD solo resta 0.069R
+# (+0.435R -> +0.366R). No es la causa. Y bajo esas condiciones realistas el
+# backtest prefiere R:R alto: 3.82 -> +0.366R, 2.7 -> +0.315R, 2.2 -> +0.185R.
+#
+# Por que 2.8 y no volver a 3.8: queda un sesgo conocido a favor del R:R alto en
+# el backtester — NO modela el trailing stop, que en produccion cierra ganadores
+# antes de llegar al objetivo (69 salidas por trailing en 90 dias, a 11.4 pips
+# medios frente a 22.3 de los TP completos). El backtest deja correr al ganador
+# hasta un TP lejano que en vivo rara vez se cobra, asi que su optimo esta
+# inflado. 2.8 conserva el 86% del edge estimado (+0.315R en la curva medida)
+# con objetivos de ~28 pips, dentro del percentil 90 real de las ganadoras
+# (27.7 pips) en vez de los 38-40 que no se alcanzaron ni una vez.
+MIN_RISK_REWARD_TARGET = float(os.getenv("MIN_RISK_REWARD_TARGET", "2.8"))
 
 # ── Regla de peaje (auditoría forex 2026-07-31) ─────────────────────────────
 # Red de seguridad adicional: si por cualquier vía el objetivo en pips queda

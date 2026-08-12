@@ -60,6 +60,46 @@ def _within_session(sesion: str, hour_utc: int) -> bool:
     start, end = window
     return start <= hour_utc < end
 
+
+# ── Cierre EOD: paridad con producción (2026-08-12) ─────────────────────────
+# Producción cierra TODA posición abierta a las 03:45 UTC (10:45 pm Bogotá) —
+# ver EOD_CLOSE_TIME_UTC en .github/workflows/trade_monitor.yml y
+# force_close_all() en cron/trade_monitor.py. El backtester NO modelaba esto:
+# una posición corría indefinidamente hasta tocar SL o TP, potencialmente
+# durante días.
+#
+# La consecuencia fue concreta y cara: la evolución offline premió genomas con
+# risk_reward_target 3.4-4.0 (objetivos de 34-40 pips) porque, con días de
+# margen, el precio acaba recorriendo esa distancia. En producción, con ~14 h
+# de vida máxima, esos objetivos son inalcanzables: en las 24 operaciones del
+# 11-12 de agosto de 2026 no hubo un solo take-profit y el máximo favorable
+# medio fue el 15.2% del objetivo. Se validaba un perfil bajo condiciones que
+# producción no puede reproducir.
+_EOD_CLOSE_HHMM_UTC = os.getenv("EOD_CLOSE_TIME_UTC", "03:45")
+
+
+def _parse_eod_hhmm(valor: str) -> tuple[int, int]:
+    try:
+        h, m = valor.split(":")
+        return int(h), int(m)
+    except Exception:
+        return 3, 45
+
+
+def _eod_cutoff_para(ts) -> Any:
+    """
+    Primer instante de cierre EOD ESTRICTAMENTE posterior a `ts`.
+
+    Réplica de la frontera que usa producción: una posición abierta a las 14:00
+    UTC del lunes muere en el cierre de las 03:45 UTC del martes (~13.75 h de
+    vida), no cuando le convenga al precio.
+    """
+    hh, mm = _parse_eod_hhmm(_EOD_CLOSE_HHMM_UTC)
+    cutoff = ts.replace(hour=hh, minute=mm, second=0, microsecond=0)
+    if cutoff <= ts:
+        cutoff = cutoff + pd.Timedelta(days=1)
+    return cutoff
+
 # ── Fase 2 PLAN_DE_MEJORA.md: gate estadístico del torneo ────────────────────
 # legacy    : umbral débil actual (fitness OOS > 0 & n_trades >= 5).
 # bootstrap : exige que el límite inferior del IC de la expectancy sea > 0.
@@ -172,10 +212,16 @@ def _walk_forward_trades(
     capital  = 10.0
     trades: list[dict] = []
 
+    # El cierre EOD necesita marca de tiempo real. Las fixtures sintéticas de
+    # los tests no la traen: sin timestamps se conserva el comportamiento
+    # anterior (posición corre hasta SL/TP) en vez de inventar una frontera.
+    _hay_ts = "timestamp" in df_15m.columns
+
     for i in range(oos_start, n_end):
         candle_hi = float(df_15m["high"].iloc[i])
         candle_lo = float(df_15m["low"].iloc[i])
         precio    = float(df_15m["close"].iloc[i])
+        ts_actual = df_15m["timestamp"].iloc[i] if _hay_ts else None
 
         # ── 1. Verificar SL/TP si hay posición abierta ────────────────────
         if open_pos is not None:
@@ -255,6 +301,29 @@ def _walk_forward_trades(
                             open_pos["stop_loss"] = max(sl, round(entry + fr, 5))
                         else:
                             open_pos["stop_loss"] = min(sl, round(entry - fr, 5))
+
+                # ── Cierre EOD (2026-08-12): paridad con producción ──────────
+                # Se evalúa DESPUÉS de SL/TP porque dentro de la misma vela un
+                # nivel tocado durante el día gana al cierre programado — igual
+                # que en vivo, donde el monitor verifica niveles cada 15 min y
+                # force_close_all() solo actúa sobre lo que sigue abierto.
+                cutoff = open_pos.get("_eod_cutoff") if open_pos else None
+                if cutoff is not None and ts_actual is not None and ts_actual >= cutoff:
+                    cap_eod = open_pos["capital_usado"]
+                    pnl = (
+                        (precio - entry) / entry * cap_eod if accion == "BUY"
+                        else (entry - precio) / entry * cap_eod
+                    )
+                    pnl -= friction_pips * 0.0001 / entry * cap_eod
+                    pnl  = round(pnl, 6)
+                    capital += pnl
+                    trades.append({
+                        "accion": accion, "entry": entry, "exit": precio,
+                        "pnl": pnl, "hit": "EOD",
+                        "capital_usado": cap_eod,
+                        "sl_pips": open_pos.get("sl_pips") or (abs(entry - sl) * 10_000),
+                    })
+                    open_pos = None
 
         # ── 2. Cada N velas: evaluar señal (entrada o salida por reversa) ─
         cadence = (i - oos_start) % _CHECK_EVERY == 0
@@ -343,6 +412,9 @@ def _walk_forward_trades(
                 "take_profit":    tp,
                 "capital_usado":  cap_uso,
                 "sl_pips":        sl_pips,
+                # Frontera de vida de la posición: producción la cierra en el
+                # primer 03:45 UTC posterior a la entrada.
+                "_eod_cutoff":    _eod_cutoff_para(ts_actual) if ts_actual is not None else None,
             }
 
     # ── Cerrar posición abierta al precio final del FOLD (no del dataset) ────

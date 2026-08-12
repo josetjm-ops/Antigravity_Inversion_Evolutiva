@@ -106,7 +106,7 @@ _DEFAULT_SMC_PARAMS: dict = {
     "fvg_min_pips":             5.0,
     "ob_impulse_pips":          10.0,
     "range_spike_multiplier":   1.5,
-    "risk_reward_target":       3.7,
+    "risk_reward_target":       3.0,
     "macro_quarantine_minutes": 60,
     "risk_pct_per_trade":       0.015,
     "peso_fvg":                 0.15,
@@ -147,15 +147,25 @@ _BOUNDS_SMC = {
     "fvg_min_pips":             (2.0,  15.0,  False),
     "ob_impulse_pips":          (5.0,  20.0,  False),
     "range_spike_multiplier":   (1.2,   3.0,  False),
-    # Piso 1.5→2.5 (auditoría forex 2026-07-31) →3.4 (revisión 2026-08-10).
-    # Con R:R 1.5-2.0 la fricción (1.4 pips) representaba 5.5%+ del objetivo.
-    # Los campeones validados contra holdout (+0.50R a +0.71R) operan en
-    # 3.54-3.82. El piso de 2.5 se fijó "para dejar margen de exploración" y
-    # resultó ser un ATRACTOR: los 5 agentes nacidos el 8-ago heredaron
-    # exactamente 2.50, el mínimo permitido, en vez de converger al óptimo.
-    # Con muestras de 10-20 trades la selección no distingue 2.5 de 3.8, así
-    # que el rango debe centrarse en el valor validado, no por debajo.
-    "risk_reward_target":       (3.4,   4.0,  False),
+    # Historial: 1.5 → 2.5 (auditoría 2026-07-31) → 3.4 (2026-08-10) → 2.5-3.5
+    # (2026-08-12). El rango 3.4-4.0 producía objetivos de 34-40 pips que en 24
+    # operaciones de producción no se alcanzaron ni una vez (máximo favorable
+    # medio: 15.2% del objetivo, cero take-profits).
+    #
+    # La hipótesis inicial —que el culpable era el cierre EOD ausente en el
+    # backtester— se midió y quedó REFUTADA: sobre el mismo holdout y con el
+    # mismo filtro de sesión, añadir el cierre EOD solo resta 0.069R. El
+    # backtest corregido sigue prefiriendo R:R alto (3.82→+0.366R, 2.7→+0.315R,
+    # 2.2→+0.185R), así que bajar a 2.0-3.0 habría sido sobrerreaccionar a una
+    # muestra de 2 días.
+    #
+    # 2.5-3.5 es el punto medio justificado: el backtester TAMPOCO modela el
+    # trailing stop, que en vivo cierra ganadores antes del objetivo (69
+    # salidas por trailing en 90 días a 11.4 pips medios vs 22.3 de los TP),
+    # de modo que su óptimo está sesgado hacia arriba. Se conserva la mayor
+    # parte del edge estimado con objetivos dentro del percentil 90 real de
+    # las salidas ganadoras (27.7 pips).
+    "risk_reward_target":       (2.5,   3.5,  False),
     "macro_quarantine_minutes": (30,  120,    True),
     "risk_pct_per_trade":       (0.01,  0.02, False),
     "peso_fvg":                 (0.05,  0.50, False),
