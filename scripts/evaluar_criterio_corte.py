@@ -54,9 +54,19 @@ except Exception:
     pass
 
 # ── Parámetros de la ventana de validación ──────────────────────────────────
-INICIO_VENTANA = os.getenv("VENTANA_INICIO", "2026-08-12")
-FIN_VENTANA    = os.getenv("VENTANA_FIN",    "2026-09-09")
-POOL_INICIAL   = float(os.getenv("VENTANA_POOL_INICIAL", "15000.0"))
+# La ventana arranca el 2026-08-13, no el 12: ese dia se promovieron los 2
+# campeones validados con el backtester honesto y se alinearon los genes de
+# toda la poblacion. Las operaciones del 11 y 12 corrieron con la
+# configuracion anterior (R:R inalcanzable, atr_factor sin validar) y mezclarlas
+# contaminaria la medicion con el periodo que precisamente se corrigio.
+INICIO_VENTANA = os.getenv("VENTANA_INICIO", "2026-08-13")
+FIN_VENTANA    = os.getenv("VENTANA_FIN",    "2026-09-10")
+# Pool REAL al abrir la ventana, no los $15.000 de la capitalizacion inicial.
+# Entre el 10 y el 13 de agosto el pool bajo a $14.435 mientras se corregian
+# los tres huecos del backtester. Usar 15.000 como referencia haria fallar el
+# criterio "el pool crece" aunque el sistema fuera rentable desde el dia uno:
+# se estaria exigiendo recuperar perdidas de una configuracion ya descartada.
+POOL_INICIAL   = float(os.getenv("VENTANA_POOL_INICIAL", "14435.32"))
 
 MIN_EVENTOS        = int(os.getenv("CORTE_MIN_EVENTOS", "100"))
 MIN_EXPECTANCY_R   = float(os.getenv("CORTE_MIN_EXPECTANCY_R", "0.15"))
