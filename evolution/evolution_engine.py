@@ -580,6 +580,49 @@ def _clamp(value: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, value))
 
 
+# Tope de las columnas NUMERIC(8,4) de ranking_historico (roi_diario,
+# roi_acumulado, fitness_score): 8 dígitos totales, 4 decimales -> |v| < 10000.
+_MAX_NUMERIC_8_4 = 9999.9999
+
+
+def _log_modulo():
+    """Logger del módulo. El resto del archivo importa logging localmente
+    dentro de cada función; esto evita repetir el import en cada llamada."""
+    import logging
+    return logging.getLogger(__name__)
+
+
+def _clamp_numerico(valor: float, tope: float, campo: str, agente_id: str) -> float:
+    """
+    Recorta un valor al rango de su columna en vez de dejar que el INSERT falle.
+
+    Existe por el incidente del 2026-08-26: un roi_diario de 10.543 (calculado
+    con un capital inicial hardcodeado) desbordó NUMERIC(8,4), el INSERT lanzó
+    NumericValueOutOfRange y la transacción revirtió el ciclo evolutivo
+    COMPLETO. El Juez murió así 21 días seguidos.
+
+    La lección no es solo corregir aquel cálculo: es que un paso de AUDITORÍA
+    nunca debería poder abortar la evolución. Si un valor se sale de rango se
+    recorta y se registra un WARNING — el dato queda marcado como sospechoso,
+    pero los agentes siguen evolucionando.
+    """
+    if valor != valor or valor in (float("inf"), float("-inf")):  # NaN / inf
+        _log_modulo().warning(
+            "[EvolutionEngine] %s de %s no es finito (%r) — se guarda 0.",
+            campo, agente_id, valor,
+        )
+        return 0.0
+    if abs(valor) > tope:
+        recortado = tope if valor > 0 else -tope
+        _log_modulo().warning(
+            "[EvolutionEngine] %s de %s fuera de rango (%.4f) — recortado a "
+            "%.4f para no abortar el ciclo. Revisar el calculo de origen.",
+            campo, agente_id, valor, recortado,
+        )
+        return recortado
+    return valor
+
+
 def _fitness_y_muestra(entrada) -> tuple[float, int | None]:
     """
     Normaliza una entrada de fitness_map a (fitness, n_trades).
@@ -1266,17 +1309,38 @@ class EvolutionEngine:
             logging.getLogger(__name__).error(f"[EvolutionEngine] Error logging new agent {agent['id']} to sheet: {e}")
 
     def _snapshot_ranking(self, conn, agents: list[dict], evento_map: dict[str, str]) -> None:
+        """
+        Escribe el snapshot diario de ranking. Es un paso de AUDITORÍA: su
+        fallo no debe abortar el ciclo evolutivo (ver _CLAMP más abajo).
+        """
         cur = conn.cursor()
         for pos, agent in enumerate(agents, start=1):
             roi_total = float(agent.get("roi_total", 0))
             ops_total = int(agent.get("operaciones_total", 0))
 
-            # ROI diario: diferencia entre capital_actual y capital_inicial
+            # ROI diario sobre el capital inicial REAL del agente.
+            #
+            # BUG 2026-08-26 → 2026-09-15 (21 días sin evolución): aquí
+            # `cap_inicial` estaba hardcodeado en 10.0, que era el capital de
+            # cada agente cuando se escribió. Al capitalizar a $15.000 el
+            # 10-ago cada agente pasó a ~$1.000, y el cálculo devolvía
+            # (1064-10)/10*100 = 10.543 contra una columna NUMERIC(8,4) cuyo
+            # máximo es 9.999. El INSERT lanzaba NumericValueOutOfRange, la
+            # transacción revertía el ciclo COMPLETO y el Juez moría cada día
+            # en cuanto cualquier agente superaba ~$1.010. Con el capital real
+            # los ROI quedan en el rango sano de -20% a +21%.
             cap_actual  = float(agent.get("capital_actual", 10.0))
-            cap_inicial = 10.0
+            cap_inicial = float(agent.get("capital_inicial") or 0) or 10.0
             roi_diario  = round((cap_actual - cap_inicial) / cap_inicial * 100, 4)
 
             fitness = round(float(agent.get("fitness_score", 0) or 0), 6)
+
+            # Red de seguridad: ningún valor de un informe puede volver a
+            # tumbar la evolución. Si algo se sale del rango de la columna se
+            # recorta y se avisa, en vez de reventar el ciclo entero.
+            roi_diario    = _clamp_numerico(roi_diario, _MAX_NUMERIC_8_4, "roi_diario", agent["id"])
+            roi_total     = _clamp_numerico(roi_total,  _MAX_NUMERIC_8_4, "roi_acumulado", agent["id"])
+            fitness       = _clamp_numerico(fitness,    _MAX_NUMERIC_8_4, "fitness_score", agent["id"])
             cur.execute(
                 """
                 INSERT INTO ranking_historico (
