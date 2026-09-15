@@ -174,3 +174,24 @@ veces.
 
 **Lo que NO debe borrarse aún:** el cliente Dukascopy y el backtester son piezas
 sólidas y reutilizables para cualquier proyecto futuro de trading cuantitativo.
+
+---
+
+## Cierre operativo (2026-09-15)
+
+Decisión aprobada: **apagar y archivar, no eliminar.**
+
+1. Workflows (Monitor, Juez, Health Check, Backfill) desactivados tras el
+   cierre EOD de la noche del 15-sep, sin posiciones abiertas.
+2. Tareas programadas de revisión eliminadas.
+3. Repositorio archivado en GitHub (solo lectura, reversible).
+4. Respaldo completo de la base de producción en
+   `C:\JOSE TOMAS JARAMILLO\Respaldo_Inversion_Evolutiva_2026-09-15`
+   (CSV por tabla + esquema + migraciones).
+
+**Pendiente manual:** pausar en cron-job.org los jobs que disparan los
+workflows ("GH Action - Trade Monitor", "Judge Daily", "Health Check",
+"Backfill Weekly").
+
+**Para reactivar:** desarchivar el repo en Settings → General, reactivar los
+workflows con `gh workflow enable <id>` y reanudar los jobs de cron-job.org.
